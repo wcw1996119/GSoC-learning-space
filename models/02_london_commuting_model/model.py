@@ -1,0 +1,357 @@
+import mesa
+import mesa_geo as mg
+import geopandas as gpd
+import pandas as pd
+import numpy as np
+import os
+from agents import MSOAAgent, CommuterAgent
+from shapely.geometry import Point
+
+
+class LondonCommuteModel(mesa.Model):
+    """
+    Agent-Based Model of daily commuting in London.
+    Each step = one hour (6am-9pm, 16 steps per day).
+    Commuters have fixed workplaces from real OD flow probabilities.
+    Travel time computed via BPR function using straight-line distance
+    with circuity factor as free-flow time proxy.
+    Congestion ratios from TomTom data (Borough level, hourly).
+    Accessibility = Σ E_j * exp(-beta * BPR_travel_time).
+    """
+
+    def __init__(self, n_commuters=5000, bpr_beta=3.0, alpha=1.0, seed=None):
+        super().__init__(seed=seed)
+
+        self.n_commuters = n_commuters
+        self.alpha = alpha
+        self.space = mg.GeoSpace(warn_crs_conversion=False)
+        self.current_hour = 6
+        self.beta_acc = 1.0
+
+        # BPR parameters
+        self.bpr_alpha = 0.15
+        self.bpr_beta = bpr_beta
+        self.circuity_factor = 1.3
+        self.avg_speed_kmh = 20.0
+
+        # Hourly flow multiplier (relative traffic volume, peak=1.0)
+        # Used to scale car flow in BPR — derived from typical London traffic patterns
+        self.hourly_flow_multiplier = [
+            0.3,   # 6am
+            0.6,   # 7am
+            1.0,   # 8am  ← morning peak (baseline)
+            0.95,  # 9am
+            0.7,   # 10am
+            0.65,  # 11am
+            0.65,  # 12pm
+            0.65,  # 1pm
+            0.65,  # 2pm
+            0.7,   # 3pm
+            0.8,   # 4pm
+            0.95,  # 5pm  ← evening peak
+            0.9,   # 6pm
+            0.6,   # 7pm
+            0.4,   # 8pm
+            0.2,   # 9pm
+        ]
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        data_dir = os.path.join(base_dir, 'data', 'processed')
+
+        self.od_df = pd.read_csv(os.path.join(data_dir, 'london_OD_travel2work.csv'))
+        self.gdf = gpd.read_file(os.path.join(data_dir, 'london_msoa_boundaries.geojson'))
+
+        # Employment attraction: total inflow per MSOA
+        emp = self.od_df.groupby('MSOA21CD_work')['count'].sum()
+        self.employment_attraction = emp.to_dict()
+
+        # OD candidates and weights per home MSOA
+        self.work_candidates = {}
+        self.work_weights = {}
+        for home, group in self.od_df.groupby('MSOA21CD_home'):
+            self.work_candidates[home] = group['MSOA21CD_work'].tolist()
+            weights = group['count'].values.astype(float)
+            self.work_weights[home] = (weights / weights.sum()).tolist()
+
+        # OD capacity = observed flow
+        self.od_capacity = {
+            (row['MSOA21CD_home'], row['MSOA21CD_work']): max(1, row['count'])
+            for _, row in self.od_df.iterrows()
+        }
+
+        # Create MSOA Agents
+        self.msoa_agents = {}
+        ac = mg.AgentCreator(MSOAAgent, model=self)
+        msoa_agents_list = ac.from_GeoDataFrame(self.gdf)
+        self.space.add_agents(msoa_agents_list)
+
+        for agent, (_, row) in zip(msoa_agents_list, self.gdf.iterrows()):
+            agent.msoa_code = row['MSOA21CD']
+            agent.msoa_name = row['MSOA21NM']
+            agent.lat = row['LAT']
+            agent.lon = row['LONG']
+            agent.employment_attraction = self.employment_attraction.get(
+                row['MSOA21CD'], 0
+            )
+            self.msoa_agents[row['MSOA21CD']] = agent
+
+        # Pre-compute free-flow travel time for all observed OD pairs
+        self.free_flow_time = {}
+        for _, row in self.od_df.iterrows():
+            home = row['MSOA21CD_home']
+            work = row['MSOA21CD_work']
+            if home in self.msoa_agents and work in self.msoa_agents:
+                h = self.msoa_agents[home]
+                w = self.msoa_agents[work]
+                dist_deg = ((h.lat - w.lat)**2 + (h.lon - w.lon)**2)**0.5
+                dist_km = dist_deg * 111 * self.circuity_factor
+                t0 = max(0.5/60, dist_km / self.avg_speed_kmh)
+                self.free_flow_time[(home, work)] = t0
+
+        # Filter: only keep OD pairs with free-flow time <= 2 hours
+        self.free_flow_time = {
+            k: v for k, v in self.free_flow_time.items() if v <= 2.0
+        }
+
+        # Load TomTom hourly congestion ratios per MSOA
+        congestion_path = os.path.join(data_dir, 'msoa_hourly_congestion.csv')
+        congestion_df = pd.read_csv(congestion_path)
+        self.msoa_congestion = {}
+        for _, row in congestion_df.iterrows():
+            self.msoa_congestion[row['MSOA21CD']] = {
+                h: row[f'hour_{h}'] for h in range(24)
+            }
+
+        # Load commute mode proportions
+        mode_path = os.path.join(data_dir, 'london_commute_mode_msoa.csv')
+        mode_df = pd.read_csv(mode_path)
+        self.commute_mode_props = mode_df.set_index('MSOA11CD')[
+            ['prop_car', 'prop_pt', 'prop_active']
+        ].to_dict('index')
+
+        # Real accessibility: gravity model with exponential decay
+        real_acc = {}
+        for _, row in self.od_df.iterrows():
+            home = row['MSOA21CD_home']
+            work = row['MSOA21CD_work']
+            t0 = self.free_flow_time.get((home, work), None)
+            if t0 is None:
+                continue
+            emp_attr = self.employment_attraction.get(work, 0)
+            acc = emp_attr * np.exp(-self.beta_acc * t0)
+            real_acc[home] = real_acc.get(home, 0) + acc
+        self.real_accessibility = real_acc
+
+        # Create Commuter Agents
+        home_counts = self.od_df.groupby('MSOA21CD_home')['count'].sum()
+        home_msoas = home_counts.index.tolist()
+        weights = home_counts.values / home_counts.values.sum()
+        sampled_homes = self.rng.choice(home_msoas, size=n_commuters, p=weights)
+
+        for home_code in sampled_homes:
+            msoa = self.msoa_agents[home_code]
+            point = Point(msoa.lon, msoa.lat)
+            commuter = CommuterAgent(model=self, geometry=point, crs="EPSG:4326")
+            commuter.home_msoa = home_code
+
+            if home_code in self.commute_mode_props:
+                props = self.commute_mode_props[home_code]
+                modes = ['car', 'pt', 'active']
+                mode_weights = [props['prop_car'], props['prop_pt'], props['prop_active']]
+            else:
+                modes = ['car', 'pt', 'active']
+                mode_weights = [0.341, 0.519, 0.132]
+
+            commuter.commute_mode = self.random.choices(modes, weights=mode_weights, k=1)[0]
+
+            candidates = self.work_candidates.get(home_code, [])
+            w = self.work_weights.get(home_code, [])
+            if candidates:
+                commuter.chosen_work_msoa = self.random.choices(
+                    candidates, weights=w, k=1
+                )[0]
+
+            self.space.add_agents(commuter)
+
+        # Cache agent lists
+        self._msoa_agent_list = [
+            a for a in self.space.agents if isinstance(a, MSOAAgent)
+        ]
+        self._commuter_agent_list = [
+            a for a in self.space.agents if isinstance(a, CommuterAgent)
+        ]
+
+        # Initialise accessibility at off-peak (hour=12)
+        self._initialise_accessibility()
+
+        self.datacollector = mesa.DataCollector(
+            model_reporters={
+                "Mean_Accessibility": self._mean_accessibility,
+                "Accessibility_Gini": self._accessibility_gini,
+                "Validation_Correlation": self._validation_correlation,
+                "Hour": lambda m: m.current_hour,
+                "Mean_Commute_Time": self._mean_commute_time,
+                "Accessibility_Palma": self._accessibility_palma,
+            },
+            agent_reporters={
+                "Accessibility": lambda a: (
+                    a.accessibility if isinstance(a, MSOAAgent) else None
+                ),
+            }
+        )
+        self.datacollector.collect(self)
+
+    def _get_free_flow_time(self, home, work):
+        return self.free_flow_time.get((home, work), 0.5)
+
+    def _bpr_travel_time(self, home, work, flow, hour):
+        t0 = self._get_free_flow_time(home, work)
+        capacity = self.od_capacity.get((home, work), 1)
+        congestion_ratio = self.msoa_congestion.get(work, {}).get(hour, 1.2)
+        effective_capacity = capacity / congestion_ratio
+        return t0 * (1 + self.bpr_alpha * (flow / max(effective_capacity, 0.1)) ** self.bpr_beta)
+
+    def _mean_accessibility(self):
+        values = [a.accessibility for a in self._msoa_agent_list if a.accessibility > 0]
+        return np.mean(values) if values else 0.0
+
+    def _accessibility_gini(self):
+        values = sorted([a.accessibility for a in self._msoa_agent_list if a.accessibility > 0])
+        if not values:
+            return 0
+        n = len(values)
+        cumsum = np.cumsum(values)
+        return (2 * sum((i + 1) * v for i, v in enumerate(values))
+                / (n * cumsum[-1])) - (n + 1) / n
+
+    def _accessibility_palma(self):
+        values = sorted([a.accessibility for a in self._msoa_agent_list if a.accessibility > 0])
+        if not values:
+            return 0.0
+        n = len(values)
+        bottom_40 = values[:int(n * 0.4)]
+        top_10 = values[int(n * 0.9):]
+        if not bottom_40 or not top_10:
+            return 0.0
+        return np.mean(top_10) / np.mean(bottom_40)
+
+    def _validation_correlation(self):
+        sim_acc = {a.msoa_code: a.accessibility for a in self._msoa_agent_list}
+        common = set(sim_acc.keys()) & set(self.real_accessibility.keys())
+        if len(common) < 2:
+            return 0.0
+        sim_arr = np.array([sim_acc[k] for k in common])
+        real_arr = np.array([self.real_accessibility[k] for k in common])
+        if sim_arr.std() == 0 or real_arr.std() == 0:
+            return 0.0
+        return float(np.corrcoef(sim_arr, real_arr)[0, 1])
+
+    def _mean_commute_time(self):
+        times = [a.commute_time_minutes for a in self._commuter_agent_list
+                 if a.commute_time_minutes > 0]
+        return np.mean(times) if times else 0.0
+
+    def _initialise_accessibility(self):
+        """Initialise accessibility at off-peak (hour=12)."""
+        init_hour = 12
+        flow_multiplier = self.hourly_flow_multiplier[init_hour - 6]
+
+        od_flow = {}
+        for agent in self._commuter_agent_list:
+            if agent.chosen_work_msoa:
+                key = (agent.home_msoa, agent.chosen_work_msoa)
+                od_flow[key] = od_flow.get(key, 0) + 1
+
+        scaled_flow = {k: v * flow_multiplier for k, v in od_flow.items()}
+        travel_time = {
+            key: self._bpr_travel_time(key[0], key[1], flow, init_hour)
+            for key, flow in scaled_flow.items()
+        }
+
+        home_accessibility = {}
+        for agent in self._commuter_agent_list:
+            if agent.chosen_work_msoa:
+                home = agent.home_msoa
+                work_msoa = self.msoa_agents.get(agent.chosen_work_msoa)
+                if work_msoa:
+                    key = (home, agent.chosen_work_msoa)
+                    if key not in self.free_flow_time:
+                        continue
+                    tt = travel_time.get(key, self.free_flow_time[key])
+                    acc = work_msoa.employment_attraction * np.exp(-self.beta_acc * tt)
+                    home_accessibility[home] = home_accessibility.get(home, 0) + acc
+
+        for agent in self._msoa_agent_list:
+            agent.accessibility = home_accessibility.get(agent.msoa_code, 0.0)
+
+    def step(self):
+        hour_idx = self.steps % len(self.hourly_flow_multiplier)
+        self.current_hour = hour_idx + 6
+        flow_multiplier = self.hourly_flow_multiplier[hour_idx]
+
+        # Split flows by commute mode
+        od_flow_car = {}
+        od_flow_pt = {}
+        od_flow_active = {}
+
+        for agent in self._commuter_agent_list:
+            if agent.chosen_work_msoa:
+                key = (agent.home_msoa, agent.chosen_work_msoa)
+                if agent.commute_mode == 'car':
+                    od_flow_car[key] = od_flow_car.get(key, 0) + 1
+                elif agent.commute_mode == 'pt':
+                    od_flow_pt[key] = od_flow_pt.get(key, 0) + 1
+                else:
+                    od_flow_active[key] = od_flow_active.get(key, 0) + 1
+
+        # Car: BPR with TomTom congestion + flow multiplier
+        scaled_flow_car = {k: v * flow_multiplier for k, v in od_flow_car.items()}
+        travel_time_car = {
+            key: self._bpr_travel_time(key[0], key[1], flow, self.current_hour)
+            for key, flow in scaled_flow_car.items()
+        }
+
+        # PT: crowding penalty during peak based on TomTom congestion level
+        london_avg_congestion = np.mean([
+            self.msoa_congestion.get(key[1], {}).get(self.current_hour, 1.2)
+            for key in od_flow_pt
+        ]) if od_flow_pt else 1.2
+        pt_multiplier = 1.1 if london_avg_congestion > 1.5 else 1.0
+        travel_time_pt = {
+            key: self._get_free_flow_time(key[0], key[1]) * pt_multiplier
+            for key in od_flow_pt
+        }
+
+        # Active: always free flow
+        travel_time_active = {
+            key: self._get_free_flow_time(key[0], key[1])
+            for key in od_flow_active
+        }
+
+        # Merge: active → pt → car
+        travel_time = {}
+        travel_time.update(travel_time_active)
+        travel_time.update(travel_time_pt)
+        travel_time.update(travel_time_car)
+
+        # Compute accessibility and store commute time
+        home_accessibility = {}
+        for agent in self._commuter_agent_list:
+            if agent.chosen_work_msoa:
+                home = agent.home_msoa
+                work_code = agent.chosen_work_msoa
+                work_msoa = self.msoa_agents.get(work_code)
+                if work_msoa:
+                    key = (home, work_code)
+                    if key not in self.free_flow_time:
+                        continue
+                    tt = travel_time.get(key, self.free_flow_time[key])
+                    agent.commute_time_minutes = tt * 60
+                    acc = work_msoa.employment_attraction * np.exp(-self.beta_acc * tt)
+                    home_accessibility[home] = home_accessibility.get(home, 0) + acc
+
+        # Update MSOA accessibility
+        for agent in self._msoa_agent_list:
+            agent.accessibility = home_accessibility.get(agent.msoa_code, 0.0)
+
+        self.datacollector.collect(self)
