@@ -29,6 +29,7 @@ class CommuterAgent(mg.GeoAgent):
         self.chosen_work_msoa = None
         self.commute_mode = None  # 'car', 'pt', 'active'
         self.commute_time_minutes = 0.0
+        self.occupation = None  # 'soc1' to 'soc9'
 
     def step(self):
         pass  # Workplace is fixed; no re-selection each step

@@ -1,5 +1,5 @@
-# Ignore processed/generated data
-data/processed/
+# Ignore all data (raw files are large, processed are generated)
+data/
 
 # Images
 *.png
@@ -11,3 +11,6 @@ __pycache__/
 
 # Test file
 test_model.py
+
+# Claude Code project instructions
+CLAUDE.md
