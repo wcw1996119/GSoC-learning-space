@@ -10,10 +10,12 @@ import time
 
 
 # ── Model instance ───────────────────────────────────────────────
-model = solara.reactive(LondonCommuteModel(n_commuters=5000))
+# model starts as None; Page component initialises it via use_effect
+# so the HTTP server binds to the port before the heavy data loading starts.
+model = solara.reactive(None)
 is_playing = solara.reactive(False)
 step_count = solara.reactive(0)
-n_commuters_param = solara.reactive(5000)
+n_commuters_param = solara.reactive(2000)
 bpr_beta_param = solara.reactive(3.0)
 
 
@@ -52,12 +54,17 @@ def _hour_label(hour):
     return f"{h}:00 {period}"
 
 
-def _make_time_label(step, steps_per_day=16, start_hour=6):
+def _make_time_label(step, steps_per_day=24, start_hour=0):
     day = step // steps_per_day + 1
-    hour = start_hour + (step % steps_per_day)
-    period = "AM" if hour < 12 else "PM"
-    h = hour if hour <= 12 else hour - 12
-    return f"D{day} {h}{period}"
+    hour = (start_hour + step) % 24
+    if hour == 0:
+        return f"D{day}\n12am"
+    elif hour == 12:
+        return "12pm"
+    elif hour < 12:
+        return f"{hour}am"
+    else:
+        return f"{hour - 12}pm"
 
 
 # ── Tab 1: The Inequality Landscape ─────────────────────────────
@@ -137,14 +144,14 @@ def GiniTimeSeries(m):
     steps = list(range(len(data)))
     vals = data['Accessibility_Gini'].values
     ax.plot(steps, vals, color='steelblue', linewidth=1.5)
-    peak_steps = [s for s in steps if (s % 16) in [2, 3, 11, 12]]
+    peak_steps = [s for s in steps if (s % 24) in [8, 9, 17, 18]]
     if peak_steps:
         ax.scatter(peak_steps, vals[peak_steps],
                    color='red', s=25, zorder=5, label='Peak hour')
     ax.set_xlabel("Time")
     ax.set_ylabel("Gini coefficient")
     ax.set_title("Accessibility Inequality (Gini)\nRises during peak hours")
-    tick_steps = list(range(0, len(steps), 16))
+    tick_steps = list(range(0, len(steps), 6))
     ax.set_xticks(tick_steps)
     ax.set_xticklabels([_make_time_label(s) for s in tick_steps], fontsize=7)
     ax.legend(fontsize=7)
@@ -163,7 +170,7 @@ def PalmaTimeSeries(m):
     steps = list(range(len(data)))
     vals = data['Accessibility_Palma'].values
     ax.plot(steps, vals, color='purple', linewidth=1.5)
-    peak_steps = [s for s in steps if (s % 16) in [2, 3, 11, 12]]
+    peak_steps = [s for s in steps if (s % 24) in [8, 9, 17, 18]]
     if peak_steps:
         ax.scatter(peak_steps, vals[peak_steps],
                    color='red', s=25, zorder=5, label='Peak hour')
@@ -179,7 +186,7 @@ def PalmaTimeSeries(m):
     ax.set_xlabel("Time")
     ax.set_ylabel("Palma ratio (top 10% / bottom 40%)")
     ax.set_title("Palma Ratio\nCongestion widens the gap between best and worst served areas")
-    tick_steps = list(range(0, len(steps), 16))
+    tick_steps = list(range(0, len(steps), 6))
     ax.set_xticks(tick_steps)
     ax.set_xticklabels([_make_time_label(s) for s in tick_steps], fontsize=7)
     ax.legend(fontsize=7)
@@ -201,7 +208,7 @@ def CommuteTimeTimeSeries(m):
     ax.set_xlabel("Time")
     ax.set_ylabel("Mean commute time (min)")
     ax.set_title("Mean Commute Time\nPeak-hour congestion adds ~10 min to average journey")
-    tick_steps = list(range(0, len(steps), 16))
+    tick_steps = list(range(0, len(steps), 6))
     ax.set_xticks(tick_steps)
     ax.set_xticklabels([_make_time_label(s) for s in tick_steps], fontsize=7)
     fig.tight_layout()
@@ -328,9 +335,9 @@ def OccupationAccessibilityPlot(m):
     ax.set_title("Who Has Access to Jobs?\n"
                  "Knowledge workers reach significantly more employment opportunities")
     ax.set_ylim(0, max(values) * 1.2)
-    ax.annotate("Person-based measure: A_k = Σ E_j · exp(−β · t_kj)",
-                xy=(0.5, -0.12), xycoords='axes fraction',
-                ha='center', fontsize=8, color='gray', style='italic')
+    ax.text(0.5, 0.01, "Person-based measure: A_k = Σ E_j · exp(−β · t_kj)",
+            transform=ax.transAxes, ha='center', va='bottom',
+            fontsize=8, color='gray', style='italic')
     fig.tight_layout()
     solara.FigureMatplotlib(fig)
 
@@ -346,7 +353,7 @@ def SOCGapTimeSeries(m):
     steps = list(range(len(data)))
     vals = data['SOC_Gap'].values
     ax.plot(steps, vals, color='darkred', linewidth=1.5)
-    peak_steps = [s for s in steps if (s % 16) in [2, 3, 11, 12]]
+    peak_steps = [s for s in steps if (s % 24) in [8, 9, 17, 18]]
     if peak_steps:
         ax.scatter(peak_steps, vals[peak_steps],
                    color='red', s=25, zorder=5, label='Peak hour')
@@ -355,7 +362,7 @@ def SOCGapTimeSeries(m):
     ax.set_ylabel("Accessibility ratio\n(best-served / worst-served SOC)")
     ax.set_title("Occupation Accessibility Gap Over Time\n"
                  "Congestion widens the gap between occupational groups")
-    tick_steps = list(range(0, len(steps), 16))
+    tick_steps = list(range(0, len(steps), 6))
     ax.set_xticks(tick_steps)
     ax.set_xticklabels([_make_time_label(s) for s in tick_steps], fontsize=7)
     ax.legend(fontsize=7)
@@ -406,87 +413,45 @@ def OccupationModeTable(m):
 
 # ── Tab 4: Validation ────────────────────────────────────────────
 
-@solara.component
-def OutflowComparisonPlot(m):
-    step_count.get()
-    sim_outflow = {}
-    for agent in m._commuter_agent_list:
-        if agent.home_msoa:
-            sim_outflow[agent.home_msoa] = sim_outflow.get(agent.home_msoa, 0) + 1
-    real_outflow = m.od_df.groupby('MSOA21CD_home')['count'].sum().to_dict()
-    common = sorted(set(sim_outflow.keys()) & set(real_outflow.keys()))
-    if len(common) < 2:
-        return
-    sim_vals = np.array([sim_outflow[k] for k in common], dtype=float)
-    real_vals = np.array([real_outflow[k] for k in common], dtype=float)
-    sim_norm = (sim_vals - sim_vals.min()) / (sim_vals.max() - sim_vals.min() + 1e-10)
-    real_norm = (real_vals - real_vals.min()) / (real_vals.max() - real_vals.min() + 1e-10)
-    corr = np.corrcoef(sim_norm, real_norm)[0, 1]
-    fig = Figure(figsize=(6, 5))
-    ax = fig.subplots()
-    ax.scatter(real_norm, sim_norm, alpha=0.4, s=12, color="darkorange")
-    z = np.polyfit(real_norm, sim_norm, 1)
-    p = np.poly1d(z)
-    x_line = np.linspace(0, 1, 100)
-    ax.plot(x_line, p(x_line), "r--", alpha=0.8, linewidth=1.5)
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
-    ax.set_xlabel("Real commuting outflow per MSOA (normalised)")
-    ax.set_ylabel("Simulated outflow (normalised)")
-    ax.set_title("Validation 1: Commuting Outflow\n"
-                 "Simulated residential distribution matches real OD data")
-    ax.text(0.05, 0.95, f"Pearson r = {corr:.3f}", transform=ax.transAxes,
-            fontsize=11, verticalalignment='top',
-            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    fig.tight_layout()
-    solara.FigureMatplotlib(fig)
-
-
-@solara.component
-def AccessibilityComparisonPlot(m):
-    step_count.get()
-    sim_acc = {a.msoa_code: a.accessibility for a in m._msoa_agent_list}
-    real_acc = m.real_accessibility
-    common = sorted(set(sim_acc.keys()) & set(real_acc.keys()))
-    if len(common) < 2:
-        return
-    sim_vals = np.array([sim_acc[k] for k in common], dtype=float)
-    real_vals = np.array([real_acc[k] for k in common], dtype=float)
-
-    def percentile_norm(arr):
-        p5, p95 = np.percentile(arr, [5, 95])
-        return np.clip((arr - p5) / (p95 - p5 + 1e-10), 0, 1)
-
-    sim_norm = percentile_norm(sim_vals)
-    real_norm = percentile_norm(real_vals)
-    corr = np.corrcoef(sim_norm, real_norm)[0, 1]
-    fig = Figure(figsize=(6, 5))
-    ax = fig.subplots()
-    ax.scatter(real_norm, sim_norm, alpha=0.4, s=12, color="steelblue")
-    z = np.polyfit(real_norm, sim_norm, 1)
-    p = np.poly1d(z)
-    x_line = np.linspace(0, 1, 100)
-    ax.plot(x_line, p(x_line), "r--", alpha=0.8, linewidth=1.5)
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
-    ax.set_xlabel("Real accessibility (normalised, free-flow baseline)")
-    ax.set_ylabel("Simulated accessibility (normalised)")
-    ax.set_title("Validation 2: Accessibility Distribution\n"
-                 "Simulated spatial pattern correlates with empirical benchmark")
-    ax.text(0.05, 0.95, f"Pearson r = {corr:.3f}", transform=ax.transAxes,
-            fontsize=11, verticalalignment='top',
-            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    fig.tight_layout()
-    solara.FigureMatplotlib(fig)
-
 
 # ── Main Page ────────────────────────────────────────────────────
 @solara.component
 def Page():
+    # _tick is local state used only to force a re-render when the
+    # background thread finishes — model.reactive alone does not
+    # reliably trigger re-renders from outside the Solara event loop.
+    _tick, set_tick = solara.use_state(0)
+
+    def _start_init():
+        def _run():
+            try:
+                model.set(LondonCommuteModel(
+                    n_commuters=n_commuters_param.value,
+                    bpr_beta=bpr_beta_param.value,
+                ))
+            except Exception:
+                import traceback
+                traceback.print_exc()
+            set_tick(1)   # wake up the component regardless of success/failure
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    solara.use_effect(_start_init, dependencies=[])
+
     m = model.value
     sc = step_count.value
 
     solara.Title("London Commuting Accessibility Model")
+
+    if m is None:
+        with solara.Column(style="align-items:center; justify-content:center; "
+                                 "min-height:60vh; gap:12px;"):
+            solara.Text("Loading model data…",
+                        style="font-size:20px; font-weight:bold; color:#1565C0;")
+            solara.Text("Reading boundaries, OD flows and congestion data — "
+                        "about 30–60 s on first load.",
+                        style="font-size:13px; color:#666;")
+        return
 
     # Header
     with solara.Row(style="align-items:center; gap:12px; padding:8px 16px; "
@@ -578,12 +543,47 @@ def Page():
                 OccupationModeTable(m)
 
         with solara.lab.Tab("✅ Model Validation"):
-            solara.Text(
-                "The simulation is validated against real commuting data (Chen Zhong et al., 2025) "
-                "and official accessibility benchmarks. Both spatial distribution and aggregate patterns "
-                "show positive correlation with empirical observations.",
-                style="padding:8px 16px; color:#555; font-size:13px;"
-            )
-            with solara.Columns([1, 1]):
-                OutflowComparisonPlot(m)
-                AccessibilityComparisonPlot(m)
+            solara.Markdown("""
+**Calibration & Validation Summary** — full statistical results in `report/report.md`
+
+---
+
+### Calibration (Grid search: β_acc × BPR β)
+Best parameters: **β_acc = 3.0, BPR β = 1.5** — selected by highest |Spearman ρ| against
+DfT JTS0501 PT travel-time benchmark (`5000EmpPTt`, n = 784 MSOAs).
+
+| Metric | Value | p-value |
+|---|---|---|
+| Spearman ρ (sim accessibility vs JTS PT time) | **−0.247** | 2.42 × 10⁻¹² |
+| Pearson r | −0.289 | — |
+| RMSE (normalised) | 0.473 | — |
+
+The negative ρ is directionally correct: MSOAs with higher simulated accessibility have shorter
+observed PT travel times. The signal is statistically significant at p < 0.001 and stable across
+seeds (CV = 0.037).
+
+---
+
+### V1 — Empirical Accessibility Consistency
+Simulated 8am accessibility vs OD-flow empirical accessibility (n = 955 MSOAs).
+OD-flow measure is fully external — derived from Census flows, no model parameters.
+
+| Metric | Value | p-value |
+|---|---|---|
+| Spearman ρ | **+0.270** | 2.05 × 10⁻¹⁷ |
+| Pearson r | +0.417 | 2.12 × 10⁻⁴¹ |
+
+---
+
+### V2 — Congestion Amplifies Inequality
+Peak-hour Palma ratio significantly higher than off-peak
+(diff = +1.70, 95% CI [1.07, 2.53], p = 0.048, Cohen's d = 1.48).
+KS test confirms the distributional difference (D = 0.905, p = 0.002).
+
+### V4 — Distance Decay (Structural Stylised Fact)
+Spearman ρ (distance from City of London vs MSOA accessibility) = **−0.292** (p = 3.63 × 10⁻²⁰).
+Monotonic gradient confirmed across five 5-km distance bands.
+
+### Robustness
+Results stable across three seeds (CV of ρ = 0.037) and converge at n ≥ 2,000 commuters.
+            """, style="padding:16px;")

@@ -1,17 +1,15 @@
 import mesa
-import mesa_geo as mg
 import geopandas as gpd
 import pandas as pd
 import numpy as np
 import os
 from agents import MSOAAgent, CommuterAgent
-from shapely.geometry import Point
 
 
 class LondonCommuteModel(mesa.Model):
     """
     Agent-Based Model of daily commuting in London.
-    Each step = one hour (6am-9pm, 16 steps per day).
+    Each step = one hour (0am-11pm, 24 steps per day).
     Commuters have fixed workplaces from real OD flow probabilities.
     Travel time computed via BPR function using straight-line distance
     with circuity factor as free-flow time proxy.
@@ -24,8 +22,7 @@ class LondonCommuteModel(mesa.Model):
 
         self.n_commuters = n_commuters
         self.alpha = alpha
-        self.space = mg.GeoSpace(warn_crs_conversion=False)
-        self.current_hour = 6
+        self.current_hour = 0
         self.beta_acc = 1.0
 
         # BPR parameters
@@ -35,24 +32,33 @@ class LondonCommuteModel(mesa.Model):
         self.avg_speed_kmh = 20.0
 
         # Hourly flow multiplier (relative traffic volume, peak=1.0)
+        # index 0=0am, 1=1am, ..., 23=11pm
         # Used to scale car flow in BPR — derived from typical London traffic patterns
         self.hourly_flow_multiplier = [
-            0.3,   # 6am
-            0.6,   # 7am
-            1.0,   # 8am  ← morning peak (baseline)
-            0.95,  # 9am
-            0.7,   # 10am
-            0.65,  # 11am
-            0.65,  # 12pm
-            0.65,  # 1pm
+            0.05,  # 0am - 深夜
+            0.03,  # 1am
+            0.02,  # 2am
+            0.02,  # 3am
+            0.05,  # 4am
+            0.15,  # 5am
+            0.35,  # 6am
+            0.65,  # 7am
+            1.00,  # 8am  ← morning peak (baseline)
+            0.90,  # 9am
+            0.70,  # 10am
+            0.60,  # 11am
+            0.60,  # 12pm
+            0.60,  # 1pm
             0.65,  # 2pm
-            0.7,   # 3pm
-            0.8,   # 4pm
+            0.70,  # 3pm
+            0.80,  # 4pm
             0.95,  # 5pm  ← evening peak
-            0.9,   # 6pm
-            0.6,   # 7pm
-            0.4,   # 8pm
-            0.2,   # 9pm
+            0.85,  # 6pm
+            0.60,  # 7pm
+            0.40,  # 8pm
+            0.25,  # 9pm
+            0.15,  # 10pm
+            0.08,  # 11pm
         ]
 
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -73,17 +79,17 @@ class LondonCommuteModel(mesa.Model):
             weights = group['count'].values.astype(float)
             self.work_weights[home] = (weights / weights.sum()).tolist()
 
-        # OD capacity = observed flow
-        self.od_capacity = {
-            (row['MSOA21CD_home'], row['MSOA21CD_work']): max(1, row['count'])
-            for _, row in self.od_df.iterrows()
-        }
+        # OD capacity = observed flow (vectorised — avoid slow iterrows)
+        _cap = self.od_df[['MSOA21CD_home', 'MSOA21CD_work', 'count']].copy()
+        _cap['count'] = _cap['count'].clip(lower=1)
+        self.od_capacity = dict(zip(
+            zip(_cap['MSOA21CD_home'], _cap['MSOA21CD_work']),
+            _cap['count']
+        ))
 
         # Create MSOA Agents
         self.msoa_agents = {}
-        ac = mg.AgentCreator(MSOAAgent, model=self)
-        msoa_agents_list = ac.from_GeoDataFrame(self.gdf)
-        self.space.add_agents(msoa_agents_list)
+        msoa_agents_list = [MSOAAgent(model=self) for _ in range(len(self.gdf))]
 
         for agent, (_, row) in zip(msoa_agents_list, self.gdf.iterrows()):
             agent.msoa_code = row['MSOA21CD']
@@ -95,32 +101,32 @@ class LondonCommuteModel(mesa.Model):
             )
             self.msoa_agents[row['MSOA21CD']] = agent
 
-        # Pre-compute free-flow travel time for all observed OD pairs
-        self.free_flow_time = {}
-        for _, row in self.od_df.iterrows():
-            home = row['MSOA21CD_home']
-            work = row['MSOA21CD_work']
-            if home in self.msoa_agents and work in self.msoa_agents:
-                h = self.msoa_agents[home]
-                w = self.msoa_agents[work]
-                dist_deg = ((h.lat - w.lat)**2 + (h.lon - w.lon)**2)**0.5
-                dist_km = dist_deg * 111 * self.circuity_factor
-                t0 = max(0.5/60, dist_km / self.avg_speed_kmh)
-                self.free_flow_time[(home, work)] = t0
+        # Pre-compute free-flow travel time for all observed OD pairs (vectorised)
+        _coords = self.gdf.set_index('MSOA21CD')[['LAT', 'LONG']]
+        _od = self.od_df[['MSOA21CD_home', 'MSOA21CD_work']].copy()
+        _od = _od.merge(_coords.rename(columns={'LAT': 'h_lat', 'LONG': 'h_lon'}),
+                        left_on='MSOA21CD_home', right_index=True, how='inner')
+        _od = _od.merge(_coords.rename(columns={'LAT': 'w_lat', 'LONG': 'w_lon'}),
+                        left_on='MSOA21CD_work', right_index=True, how='inner')
+        _od = _od.reset_index(drop=True)
+        _dist_deg = np.sqrt((_od['h_lat'] - _od['w_lat'])**2 +
+                            (_od['h_lon'] - _od['w_lon'])**2)
+        _t0 = np.maximum(0.5 / 60,
+                         _dist_deg * 111 * self.circuity_factor / self.avg_speed_kmh)
+        _mask = _t0 <= 2.0
+        self.free_flow_time = dict(zip(
+            zip(_od.loc[_mask, 'MSOA21CD_home'], _od.loc[_mask, 'MSOA21CD_work']),
+            _t0[_mask]
+        ))
 
-        # Filter: only keep OD pairs with free-flow time <= 2 hours
-        self.free_flow_time = {
-            k: v for k, v in self.free_flow_time.items() if v <= 2.0
-        }
-
-        # Load TomTom hourly congestion ratios per MSOA
+        # Load TomTom hourly congestion ratios per MSOA (vectorised)
         congestion_path = os.path.join(data_dir, 'msoa_hourly_congestion.csv')
         congestion_df = pd.read_csv(congestion_path)
-        self.msoa_congestion = {}
-        for _, row in congestion_df.iterrows():
-            self.msoa_congestion[row['MSOA21CD']] = {
-                h: row[f'hour_{h}'] for h in range(24)
-            }
+        hour_cols = [f'hour_{h}' for h in range(24)]
+        self.msoa_congestion = {
+            row['MSOA21CD']: {h: row[f'hour_{h}'] for h in range(24)}
+            for row in congestion_df[['MSOA21CD'] + hour_cols].to_dict('records')
+        }
 
         # Load commute mode proportions
         mode_path = os.path.join(data_dir, 'london_commute_mode_msoa.csv')
@@ -146,18 +152,14 @@ class LondonCommuteModel(mesa.Model):
         bres_df = pd.read_csv(bres_path)
         self.work_msoa_employment = bres_df.set_index('MSOA21CD')['total_employment'].to_dict()
         
-        # Real accessibility: gravity model with exponential decay
-        real_acc = {}
-        for _, row in self.od_df.iterrows():
-            home = row['MSOA21CD_home']
-            work = row['MSOA21CD_work']
-            t0 = self.free_flow_time.get((home, work), None)
-            if t0 is None:
-                continue
-            emp_attr = self.employment_attraction.get(work, 0)
-            acc = emp_attr * np.exp(-self.beta_acc * t0)
-            real_acc[home] = real_acc.get(home, 0) + acc
-        self.real_accessibility = real_acc
+        # Real accessibility: gravity model with exponential decay (vectorised)
+        _ff_df = pd.DataFrame(
+            [(h, w, t) for (h, w), t in self.free_flow_time.items()],
+            columns=['home', 'work', 't0']
+        )
+        _ff_df['emp_attr'] = _ff_df['work'].map(self.employment_attraction).fillna(0)
+        _ff_df['acc'] = _ff_df['emp_attr'] * np.exp(-self.beta_acc * _ff_df['t0'])
+        self.real_accessibility = _ff_df.groupby('home')['acc'].sum().to_dict()
 
         # Create Commuter Agents
         home_counts = self.od_df.groupby('MSOA21CD_home')['count'].sum()
@@ -165,10 +167,9 @@ class LondonCommuteModel(mesa.Model):
         weights = home_counts.values / home_counts.values.sum()
         sampled_homes = self.rng.choice(home_msoas, size=n_commuters, p=weights)
 
+        commuter_list = []
         for home_code in sampled_homes:
-            msoa = self.msoa_agents[home_code]
-            point = Point(msoa.lon, msoa.lat)
-            commuter = CommuterAgent(model=self, geometry=point, crs="EPSG:4326")
+            commuter = CommuterAgent(model=self)
             commuter.home_msoa = home_code
 
             # Assign occupation based on home MSOA proportions
@@ -217,15 +218,10 @@ class LondonCommuteModel(mesa.Model):
                     candidates, weights=blended.tolist(), k=1
                 )[0]
 
-            self.space.add_agents(commuter)
+            commuter_list.append(commuter)
 
-        # Cache agent lists
-        self._msoa_agent_list = [
-            a for a in self.space.agents if isinstance(a, MSOAAgent)
-        ]
-        self._commuter_agent_list = [
-            a for a in self.space.agents if isinstance(a, CommuterAgent)
-        ]
+        self._msoa_agent_list = msoa_agents_list
+        self._commuter_agent_list = commuter_list
 
         # Initialise accessibility at off-peak (hour=12)
         self._initialise_accessibility()
@@ -322,7 +318,7 @@ class LondonCommuteModel(mesa.Model):
     def _initialise_accessibility(self):
         """Initialise accessibility at off-peak (hour=12)."""
         init_hour = 12
-        flow_multiplier = self.hourly_flow_multiplier[init_hour - 6]
+        flow_multiplier = self.hourly_flow_multiplier[init_hour]
 
         od_flow = {}
         for agent in self._commuter_agent_list:
@@ -353,8 +349,8 @@ class LondonCommuteModel(mesa.Model):
             agent.accessibility = home_accessibility.get(agent.msoa_code, 0.0)
 
     def step(self):
-        hour_idx = self.steps % len(self.hourly_flow_multiplier)
-        self.current_hour = hour_idx + 6
+        hour_idx = self.steps % 24
+        self.current_hour = hour_idx
         flow_multiplier = self.hourly_flow_multiplier[hour_idx]
 
         # Split flows by commute mode

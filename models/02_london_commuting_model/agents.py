@@ -1,11 +1,11 @@
-import mesa_geo as mg
+import mesa
 
 
-class MSOAAgent(mg.GeoAgent):
+class MSOAAgent(mesa.Agent):
     """Represents an MSOA zone in London."""
 
-    def __init__(self, model, geometry, crs):
-        super().__init__(model, geometry, crs)
+    def __init__(self, model):
+        super().__init__(model)
         self.msoa_code = None
         self.msoa_name = None
         self.lat = None
@@ -17,14 +17,14 @@ class MSOAAgent(mg.GeoAgent):
         pass
 
 
-class CommuterAgent(mg.GeoAgent):
+class CommuterAgent(mesa.Agent):
     """
     Represents a commuter with a fixed workplace assigned at initialisation
     based on real OD flow probabilities.
     """
 
-    def __init__(self, model, geometry, crs):
-        super().__init__(model, geometry, crs)
+    def __init__(self, model):
+        super().__init__(model)
         self.home_msoa = None
         self.chosen_work_msoa = None
         self.commute_mode = None  # 'car', 'pt', 'active'
