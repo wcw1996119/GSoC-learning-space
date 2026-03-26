@@ -22,7 +22,8 @@ class LondonCommuteModel(mesa.Model):
 
         self.n_commuters = n_commuters
         self.alpha = alpha
-        self.current_hour = 0
+        self.start_hour = 5
+        self.current_hour = self.start_hour
         self.beta_acc = 1.0
 
         # BPR parameters
@@ -316,8 +317,8 @@ class LondonCommuteModel(mesa.Model):
         return np.mean(times) if times else 0.0
 
     def _initialise_accessibility(self):
-        """Initialise accessibility at off-peak (hour=12)."""
-        init_hour = 12
+        """Initialise accessibility at start hour (5am — free-flow reference)."""
+        init_hour = self.start_hour
         flow_multiplier = self.hourly_flow_multiplier[init_hour]
 
         od_flow = {}
@@ -349,7 +350,7 @@ class LondonCommuteModel(mesa.Model):
             agent.accessibility = home_accessibility.get(agent.msoa_code, 0.0)
 
     def step(self):
-        hour_idx = self.steps % 24
+        hour_idx = (self.start_hour + self.steps) % 24
         self.current_hour = hour_idx
         flow_multiplier = self.hourly_flow_multiplier[hour_idx]
 
