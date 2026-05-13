@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Methods — ML-ABM Framework for Urban Commuting</title>
+<script>
+window.MathJax = {
+  tex: {
+    inlineMath: [['$', '$'], ['\\(', '\\)']],
+    displayMath: [['$$', '$$'], ['\\[', '\\]']],
+    processEscapes: true,
+    tags: 'ams'
+  },
+  options: {
+    skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+  }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+<style>
+  @page { size: A4; margin: 2.2cm 1.8cm; }
+  body {
+    font-family: "Charter", "Source Serif Pro", "Georgia", "Times New Roman", serif;
+    max-width: 760px;
+    margin: 30px auto 60px;
+    padding: 0 32px;
+    color: #1a1a1a;
+    line-height: 1.62;
+    font-size: 11.5pt;
+    text-align: justify;
+    hyphens: auto;
+  }
+  h1, h2, h3 {
+    font-family: "Helvetica Neue", "Arial", sans-serif;
+    color: #111;
+    font-weight: 600;
+    line-height: 1.25;
+  }
+  h1 { font-size: 1.55em; margin: 0 0 12px; }
+  h2 { font-size: 1.18em; margin: 32px 0 8px;
+        padding-bottom: 4px; border-bottom: 1.5px solid #ddd; }
+  h3 { font-size: 1.0em;  margin: 20px 0 6px; color: #333; }
+  p  { margin: 6px 0 10px; }
+  ul { margin: 4px 0 10px 0; padding-left: 22px; }
+  li { margin: 2px 0; }
+  table {
+    border-collapse: collapse; margin: 12px 0 16px;
+    font-size: 0.92em; width: 100%;
+  }
+  th, td {
+    border: 1px solid #bbb; padding: 4px 8px;
+    text-align: left; vertical-align: top;
+  }
+  th { background: #eef0f3; font-weight: 600; }
+  pre {
+    background: #f6f6f4; border-left: 3px solid #ccc;
+    padding: 10px 14px; overflow-x: auto;
+    font-size: 0.78em; line-height: 1.4;
+    font-family: "Consolas", "Menlo", monospace;
+    margin: 12px 0 16px;
+    white-space: pre-wrap; word-wrap: break-word;
+  }
+  code {
+    background: #f0efed; padding: 1px 4px; border-radius: 3px;
+    font-size: 0.88em; font-family: "Consolas", "Menlo", monospace;
+  }
+  blockquote {
+    margin: 8px 16px; padding: 6px 14px;
+    border-left: 3px solid #aaa; font-style: italic; color: #444;
+  }
+  hr { border: 0; border-top: 1px solid #ccc; margin: 24px 0; }
+  .eqno {
+    float: right; font-family: "Helvetica Neue", sans-serif;
+    color: #444; font-size: 0.85em;
+  }
+  /* Print styles */
+  @media print {
+    body { font-size: 10.5pt; padding: 0; max-width: none; }
+    h2 { break-after: avoid; }
+    table, pre, blockquote { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<h1>2 Methods</h1>
+<h2>2.1 Framework Overview</h2>
+<p>We propose an <strong>ML-ABM hybrid framework</strong> for urban commuting analysis. The framework has two stages tied together by a single set of learned parameters (Figure 1):</p>
+<ul><li><strong>Stage 1 (machine learning)</strong> — A spatio-temporal graph neural network</li></ul>
+<p>is trained, end-to-end on observed hourly origin-destination flows, to produce two outputs: a destination-attractiveness embedding $V_{j,t}$ for every destination grid $j$ at every hour $t$, and a small set of behavioural coefficients $(\beta, \gamma, \delta, \kappa)$ governing how commuters trade off travel time, distance, labour-market match, and income-tier heterogeneity.</p>
+<ul><li><strong>Stage 2 (agent-based modelling)</strong> — At deployment time, the same</li></ul>
+<p>$V_{j,t}$ and the same behavioural coefficients are used by a population of synthetic agents to make individual workplace decisions. Aggregating individual choices over the population reproduces, by construction, the population-level flow distribution the ML stage was trained against; perturbing inputs at this stage (e.g., adding 65,000 jobs at a candidate Old Oak Common cluster) lets us simulate counterfactual policy interventions while preserving the data-fitted decision mechanism.</p>
+<p>The bridge between the two stages is a multinomial logit choice formulation (McFadden, 1974). Under this formulation the cross-entropy loss used in Stage 1 is <em>numerically identical</em> to the maximum log-likelihood objective for individual choices in Stage 2; we develop this identity in §2.7. The same formulation also lets us read the fitted $\beta$, $\gamma$, $\delta$, $\kappa$ as <strong>behavioural parameters</strong> rather than uninterpretable network weights — supporting both the predictive power of deep learning and the behavioural interpretability that urban-policy questions require.</p>
+<p><img src="paper_methods_architecture.png" alt="Figure 1 — ML-ABM hybrid framework. Stage 1 (left, green) is supervised ML training: the dual-branch encoder produces destination attractiveness $V_{j,t}$; the behavioural choice layer (mode × tier mixture multinomial logit) outputs $P(j \mid i, t)$ matched against observed hourly OD via cross-entropy. Stage 2 (right, red) is agent-based deployment with congestion feedback (orange): agents pick destinations using free-flow $t_{ij}$, aggregated flows are passed to a BPR equilibrium that returns congested $t_{ij}$, and agents re-evaluate utility under congestion until convergence. The shared-parameter bus (dark green, dashed) connects training to deployment." style="max-width:100%; display:block; margin:8px auto;"/></p>
+<p>A schematic system view is also given for plain-text viewers:</p>
+<pre>Figure 1 (system view).  ML-ABM hybrid framework — two stages sharing learned parameters.
+
+  Stage 1: Machine Learning (training)
+  -------------------------------------
+   X_static (1725, 22)   ─→  Static branch (GraphSAGE × 2)
+                                    ↓
+                              h_static (1725, 32)
+                                    │
+   X_dynamic (24, 1725, 5)            │
+    · congestion ratio                │
+    · hourly destination inflow       │
+    · queue residual placeholder      │
+    · sin/cos hour-of-day  ─→  Dynamic branch
+                                    │
+                            (per-hour SAGE × 2)
+                                    ↓
+                            (GRU, 24-step) + (multi-scale TCN: kernels 3,5,7)
+                                    ↓ fuse
+                              h_dynamic (24, 1725, 32)
+                                    │
+                                    ↓
+                              Gated fusion
+                                    ↓
+                              V_jt (24, 1725)
+                                    │
+                                    ↓
+                              Behavioural choice layer
+                              (multinomial logit; mode × tier mixture)
+                                    │
+                                    ↓
+                              P(j | i, t)  = softmax over destinations
+                                    │
+                                    ↓
+                              cross-entropy loss vs F_{ij,t}
+                                    │
+                                    ↓
+                              AdamW updates encoder + behavioural coefficients
+
+
+  Stage 2: Agent-Based Modelling (deployment / counterfactuals)
+  -------------------------------------------------------------
+   N_agents synthetic commuters, each with attributes (i, t, m, k):
+       i ∈ origin grid, t ∈ hour, m ∈ mode, k ∈ income tier
+                                    ↓
+   For each agent, evaluate utility for every candidate destination j:
+       U_{ij,t}^{(m,k)} = α V_{j,t} + β_{t,m,k} t_{ij}^{(m)}
+                          + γ log d_{ij} + δ_k OccMatch_{ij}
+                          + ε_{ij}            (ε ~ Gumbel)
+                                    ↓
+   Agent picks j* = argmax_j U_{ij,t}^{(m,k)}
+                                    ↓
+   Aggregate over agents → simulated F̂_{ij,t}
+                                    ↓
+   Counterfactual: replace inputs with intervention (e.g. +65,000 jobs at OOC)
+                  → recompute V_{j,t} under intervention via the trained encoder
+                  → re-run agent-level decisions with **same** behavioural coefficients
+                  → simulated counterfactual F̂_{ij,t}'</pre>
+<h2>2.2 Aggregate OD as Supervised Classification</h2>
+<p>Let $N$ be the number of grid cells in the study area and $T$ the number of hour-of-day windows ($N = 1{,}725$, $T = 24$ in our London implementation). The training data are an observed flow tensor</p>
+<p>$$ \mathbf{F} \in \mathbb{Z}_{\geq 0}^{T \times N \times N},
+\qquad
+F_{ij,t} = \text{number of observed trips from grid } i \text{ to grid } j \text{ during hour } t.  $$</p>
+<p>A natural framing of the modelling task is supervised classification: <em>for each (origin, hour) example $(i, t)$, predict the share of trips going to each of the $N$ candidate destinations</em>.</p>
+<p>Concretely, for each $(i, t)$ the model outputs a probability vector $\mathbf{P}_{i,t} \in \Delta^{N-1}$ over the $N$ destinations, and the training label is the empirical share $\hat{q}_{ij,t} = F_{ij,t} / O_{i,t}$ where $O_{i,t} = \sum_j F_{ij,t}$ is the total outflow. The loss is the standard weighted cross-entropy</p>
+<p>$$ \mathcal{L}(\boldsymbol{\theta})
+= - \sum_{t=1}^{T} \sum_{i \in \mathcal{I}_{\text{train}}} \sum_{j=1}^{N}
+   F_{ij,t} \log P(j \mid i, t;\, \boldsymbol{\theta}),
+\tag{1}  $$</p>
+<p>where $\mathcal{I}_{\text{train}}$ is the set of training origins (87% of the 1,725 grids; the remaining 13% are held out for validation; see §2.11). The weighting by $F_{ij,t}$ makes high-flow OD pairs contribute more to the loss than rare OD pairs — equivalent to multinomial log-likelihood on the per-origin choice distribution.</p>
+<p>Equation (1) is identical to the negative log-likelihood of a multinomial choice model in which each of $O_{i,t}$ commuters chooses independently from origin $i$ during hour $t$. We exploit this dual identity in §2.7. The remainder of this section specifies the parameterisation of $P(j \mid i, t; \boldsymbol{\theta})$.</p>
+<h2>2.3 Spatial Graph and Node Features</h2>
+<p><strong>Spatial graph.</strong> We construct a fixed undirected graph $\mathcal{G} = (\mathcal{V}, \mathcal{E})$ where $\mathcal{V} = \{1, \ldots, N\}$ indexes the 1 km grid cells covering Greater London. Two cells are connected by an edge if their centroid-to-centroid Euclidean distance is below 1.5 km. The resulting graph has 13,180 directed edges (mean out-degree 7.6); a self-loop is added at each node so isolated cells do not vanish under neighbour aggregation. The graph is <em>static</em>: edges do not change over time. The decision to use a fixed geographic adjacency rather than a learned data-driven graph (in the style of Wu et al. 2019; Lan et al. 2022) is deliberate — it preserves identifiability under aggregate observation (§2.8) and ensures the graph structure is directly transferable to other cities.</p>
+<p><strong>Static node features</strong> $\mathbf{X}^{\mathrm{static}} \in \mathbb{R}^{N \times F_{s}}$ ($F_s = 22$). For each grid cell we compute time-invariant attributes:</p>
+<ul><li>POI category counts (nine categories) from OpenStreetMap (Boeing, 2017);</li><li>employment counts by industry (eight categories) from BRES 2024;</li><li>residential population from Census 2021;</li><li>transport infrastructure flags (rail station, tube station).</li></ul>
+<p>All features are z-scored across cells.</p>
+<p><strong>Dynamic node features</strong> $\mathbf{X}^{\mathrm{dyn}} \in \mathbb{R}^{T \times N \times F_{d}}$ ($F_d = 5$). For each (hour, cell):</p>
+<ul><li>TomTom borough × hour-of-day congestion ratio, mapped to grid cells</li></ul>
+<p>(z-scored);</p>
+<ul><li>Hourly destination inflow $\sum_i F_{ij,t}$ (z-scored), constructed</li></ul>
+<p>from the same OD tensor but used only as an explanatory variable in the encoder;</p>
+<ul><li>Queue residual placeholder (zero during training; populated during</li></ul>
+<p>counterfactual simulation to carry hour-to-hour congestion spillover);</p>
+<ul><li>Sinusoidal time-of-day embedding $(\sin(2\pi t / T), \cos(2\pi t / T))$.</li></ul>
+<p>The decision to keep static features static (and <em>not</em> tile them across $T$) reflects an architectural prior: 22 of the 25 dimensions in our encoder input genuinely do not vary at hourly resolution, so feeding them through a temporal mechanism wastes capacity. We discuss the two-branch consequence in §2.4.</p>
+<p><strong>Travel time matrices.</strong> For each travel mode $m \in \{\text{car}, \text{transit}, \text{walk}\}$ we precompute a mode-specific travel time matrix $t_{ij}^{(m)} \in \mathbb{R}^{N \times N}$ in minutes:</p>
+<ul><li>$t_{ij}^{(\mathrm{car})}$: free-flow OS Open Roads driving time computed</li></ul>
+<p>via OSMnx (Boeing, 2017); range 0–68 min, median 32.5 min.</p>
+<ul><li>$t_{ij}^{(\mathrm{transit})}$: piecewise-linear approximation from</li></ul>
+<p>Euclidean distance — 12 km/h for $d_{ij} < 3$ km, 25 km/h with 8 min waiting/transfer overhead otherwise; range 0–150 min, median 59 min. We replace this with <code>r5r</code> GTFS routing in future work; see §2.11.</p>
+<ul><li>$t_{ij}^{(\mathrm{walk})}$: $d_{ij} / 5\,\mathrm{km/h}$, capped at 180 min;</li></ul>
+<p>median 180 min (because most OD pairs in London exceed 15 km).</p>
+<p>A pairwise log-distance matrix $\log d_{ij}$ provides a separate distance-decay covariate.</p>
+<p><strong>Labour-market match.</strong> $\mathrm{OccMatch}_{ij}$ is the cosine similarity between origin $i$'s SOC9 occupation distribution (Census 2021) and destination $j$'s industry-implied occupation demand (Pellegrini & Fotheringham, 2002), pre-computed once.</p>
+<h2>2.4 Stage 1 — Dual-Branch Spatio-Temporal Encoder</h2>
+<p>The encoder maps $(\mathbf{X}^{\mathrm{static}}, \mathbf{X}^{\mathrm{dyn}}, \mathcal{E})$ to a destination attractiveness scalar $V_{j,t}$ for every $(j, t) \in \{1, \ldots, N\} \times \{1, \ldots, T\}$. It has three components — a static branch, a dynamic branch, and a gated fusion.</p>
+<p><strong>Static branch.</strong> Two GraphSAGE layers (Hamilton et al., 2017) with mean aggregation:</p>
+<p>$$ \mathbf{h}_{i}^{(\ell+1)}
+= \sigma\!\left( W_{\mathrm{self}}^{(\ell)} \mathbf{h}_{i}^{(\ell)}
+   + W_{\mathrm{nb}}^{(\ell)} \frac{1}{|\mathcal{N}(i)|} \sum_{j \in \mathcal{N}(i)} \mathbf{h}_{j}^{(\ell)} \right),
+\quad \ell = 0, 1,
+\tag{2}  $$</p>
+<p>where $\sigma$ is the ReLU, $\mathcal{N}(i)$ are the neighbours of $i$ including a self-loop, and $\mathbf{h}_{i}^{(0)} = \mathbf{X}^{\mathrm{static}}_{i}$. Two layers give a two-hop receptive field per destination. The output $\mathbf{h}^{\mathrm{static}} \in \mathbb{R}^{N \times d}$ ($d = 32$) encodes long-run destination desirability — POI mix, employment density, transport infrastructure, and their two-hop spatial spillovers.</p>
+<p><strong>Dynamic branch.</strong> For each hour $t$, we apply two GraphSAGE layers (2) to $\mathbf{X}^{\mathrm{dyn}}_{t}$, yielding 24 hidden states $\{\tilde{\mathbf{h}}_{t}\}_{t=0}^{23}$. We pass these through two parallel temporal mechanisms:</p>
+<ul><li>A <strong>gated recurrent unit (GRU)</strong> sweeping forward in $t$:</li></ul>
+<p>$\mathbf{h}_{t}^{\mathrm{gru}} = \mathrm{GRU}(\tilde{\mathbf{h}}_{t}, \mathbf{h}_{t-1}^{\mathrm{gru}})$ (Cho et al., 2014). This carries hourly sequential dependence — the state at hour 9 inherits information from hours 0–8, which we use as the model's representation of <em>carry-over</em> effects (e.g., how rush-hour congestion at 8 a.m. shapes 9 a.m. accessibility).</p>
+<ul><li>A <strong>multi-scale temporal convolutional block</strong> with three parallel</li></ul>
+<p>causal 1D convolutions of kernel sizes 3, 5, and 7, followed by concatenation and a linear projection. Circular padding lets the model treat the 24-hour cycle as periodic. Different kernels capture different bandwidths of intra-day pattern.</p>
+<p>The two outputs are concatenated and passed through a linear layer to yield $\mathbf{h}^{\mathrm{dyn}} \in \mathbb{R}^{T \times N \times d}$.</p>
+<p><strong>Gated fusion.</strong> A scalar gate per $(t, j)$,</p>
+<p>$$ g_{j,t} = \sigma\!\left( \mathbf{w}^{\top} [\mathbf{h}_{j}^{\mathrm{static}};\, \mathbf{h}_{j,t}^{\mathrm{dyn}}] \right) \in [0, 1],
+\tag{3}  $$</p>
+<p>combines the two representations,</p>
+<p>$$ \mathbf{h}_{j,t} = g_{j,t} \cdot \mathbf{h}_{j}^{\mathrm{static}}
+                + (1 - g_{j,t}) \cdot \mathbf{h}_{j,t}^{\mathrm{dyn}},
+\tag{4}  $$</p>
+<p>and a final linear layer collapses to a scalar $V_{j,t} = \mathbf{w}_{V}^{\top} \mathbf{h}_{j,t}$. We then z-score $V_{j,t}$ across all $(j, t)$ jointly to enforce zero mean and unit standard deviation; this fixes the otherwise-arbitrary scale of $V$ and is a standard identification trick for deep multinomial-choice models (Wang & Klabjan, 2018).</p>
+<p>The gated fusion lets the model decide, for each (hour, destination) cell, whether to rely more on the static long-run desirability or the dynamic this-hour signal. Empirically the gate concentrates near 1 at midnight (static features carry the day) and shifts toward 0.5 at peak hours (dynamic inflow contains independent information).</p>
+<p>The encoder has approximately 33,000 parameters in total.</p>
+<h2>2.5 Stage 1 — Behavioural Choice Layer (Mode × Tier Mixture)</h2>
+<p>We model commuters as heterogeneous along two observable dimensions:</p>
+<ul><li><strong>Travel mode</strong> $m \in \{\text{car}, \text{transit}, \text{walk}\}$,</li></ul>
+<p>with origin-level mode share $\pi_m^{\mathrm{origin}}(i)$ obtained from Census 2011 <em>Method of travel to work</em> aggregated to the 1 km grid;</p>
+<ul><li><strong>Income tier</strong> $k \in \{1, 2, 3\}$ (low / middle / high), with</li></ul>
+<p>tier weights $\pi_k(i)$ derived from the IMD 2019 income score (Department for Communities and Local Government, 2019).</p>
+<p><strong>Distance-aware choice set.</strong> Following the choice-set generation literature (Manski, 1977; Ben-Akiva & Boccara, 1995), we further restrict the walking option to feasible distances. Specifically we build a <em>pair-level</em> mode share $\pi_m(i, j)$ such that $\pi_{\mathrm{walk}}(i, j) = 0$ whenever $d_{ij} \geq 5$ km, with the removed mass redistributed proportionally between the motorised modes:</p>
+<p>$$ \pi_{m}(i, j) = \begin{cases}
+\pi_{m}^{\mathrm{origin}}(i)                                    & \text{if } d_{ij} < 5 \text{ km}, \\
+\pi_{m}^{\mathrm{origin}}(i)\,\dfrac{1}{1 - \pi_{\mathrm{walk}}^{\mathrm{origin}}(i)} & \text{if } d_{ij} \geq 5 \text{ km}, m \neq \mathrm{walk}, \\
+0                                                                & \text{if } d_{ij} \geq 5 \text{ km}, m = \mathrm{walk}.
+\end{cases}
+\tag{5}  $$</p>
+<p>This restriction has two motivations. First, walking commute share in London (≈11%) is concentrated in short trips — long-distance walking is empirically negligible. Second, it improves identifiability of the walking time coefficient $\beta_{t,\mathrm{walk}}$ by anchoring its estimation to the subset of OD pairs where walking is actually a realistic option; see §2.8.</p>
+<p><strong>Profile-specific systematic utility.</strong> Each (mode, tier) profile at origin $i$ faces its own systematic utility for candidate destination $j$ at hour $t$:</p>
+<p>$$ V_{ij,t}^{(m,k)}
+= \alpha\, V_{j,t}
++ \beta_{t,m,k}\, t_{ij}^{(m)}
++ \gamma\, \log d_{ij}
++ \delta_{k}\, \mathrm{OccMatch}_{ij}.
+\tag{6}  $$</p>
+<p>with the following components:</p>
+<ul><li>$V_{j,t}$ from (4); $\alpha = 1$ is a fixed buffer (the GNN absorbs</li></ul>
+<p>the scale; see §2.8).</p>
+<ul><li>$\beta_{t,m,k} = \beta_{t,m} \cdot \kappa_{k}$ factorises mode and</li></ul>
+<p>tier effects on time sensitivity. $\beta_{t,m}$ has shape $(T, M)$ (per-hour, per-mode); $\kappa_{k}$ is a tier-specific multiplicative scalar. We constrain $\kappa_{1} = 1$ (anchor) and $\kappa_{k > 1} = 1 + \mathrm{softplus}(\rho_{k})$ to enforce monotone non-decreasing tier scaling. Time sensitivity is non-positive by construction: $\beta_{t,m} = -\mathrm{softplus}(\eta_{t,m})$.</p>
+<ul><li>$\gamma = -\mathrm{softplus}(\zeta)$: a single distance-friction</li></ul>
+<p>coefficient (negative).</p>
+<ul><li>$\delta_{k}$: tier-specific labour-match coefficient, with</li></ul>
+<p>$\delta_{1} = 0$ as anchor and $\delta_{k > 1}$ free.</p>
+<p><strong>Choice probability.</strong> Each commuter is assumed to evaluate (6) for each candidate destination $j$, add an independent Type-1 Extreme Value error $\varepsilon$, and pick the destination of maximum utility. The classical McFadden (1974) result gives a closed-form softmax for a single (mode, tier) profile,</p>
+<p>$$ P(j \mid i, t, m, k) = \frac{\exp(V_{ij,t}^{(m,k)})}{\sum_{j'=1}^{N} \exp(V_{ij',t}^{(m,k)})},
+\tag{7}  $$</p>
+<p>and the population-level destination probability marginalises over the mode-tier profile distribution at origin $i$:</p>
+<p>$$ P(j \mid i, t) = \sum_{m=1}^{M} \sum_{k=1}^{K} \pi_m(i, j)\, \pi_k(i)\, P(j \mid i, t, m, k).
+\tag{8}  $$</p>
+<p>In our implementation we accumulate (8) by incremental log-sum-exp over the $M \cdot K = 9$ inner softmaxes to avoid materialising a $(T, N, N, M, K)$ tensor.</p>
+<h2>2.6 Stage 2 — Agent-Based Deployment with Congestion Feedback</h2>
+<p>The trained parameters from Stage 1 are deployed in a population-level agent-based simulator with an explicit congestion-feedback loop. Each synthetic agent $n$ has attributes $(i_n, t_n, m_n, k_n)$ — origin grid, departure hour, travel mode, income tier — drawn from the empirical joint distribution $(\pi_m(i, \cdot), \pi_k(i))$. The deployment proceeds in five sub-steps:</p>
+<p><strong>Step 2a — Initial utility evaluation (free-flow).</strong> For each candidate workplace $j$, agent $n$ evaluates</p>
+<p>$$ U_{nj} = V_{i_n j, t_n}^{(m_n, k_n)}\big[t_{ij}^{(m)} \!\leftarrow\! t_{ij}^{(m), \mathrm{free}}\big]
+       + \varepsilon_{nj},
+\quad \varepsilon_{nj} \overset{\mathrm{iid}}{\sim} \mathrm{Gumbel}(0, 1),
+\tag{9}  $$</p>
+<p>and picks $j_n^{*} = \arg\max_j U_{nj}$. Note that $V_{i_n j, t_n}^{(m_n, k_n)}$ in (9) is evaluated with the <strong>free-flow</strong> travel time $t_{ij}^{(m), \mathrm{free}}$, the same convention used during training (Section 2.7). The Gumbel-max trick (McFadden, 1974) ensures that individual choices, aggregated over $N_{\mathrm{agents}}$ commuters, reproduce the softmax distribution (7) — closing the loop with the training target.</p>
+<p><strong>Step 2b — Flow aggregation.</strong> Individual choices are aggregated to predicted hourly destination inflow $\widehat{F}_{j,t} = \sum_{n: t_n = t} \mathbb{1}\{j_n^* = j\}$.</p>
+<p><strong>Step 2c — BPR congestion estimation.</strong> For each (origin, destination, hour, mode = car), we apply the Bureau of Public Roads volume-delay function (Beckmann et al., 1956):</p>
+<p>$$ t_{ij,t}^{(\mathrm{car}), \mathrm{cong}}
+= t_{ij}^{(\mathrm{car}), \mathrm{free}}
+  \cdot \big(1 + a (\widehat{F}_{j,t} / C_j)^b \big),
+\qquad a = 0.15,\; b = 4,
+\tag{10}  $$</p>
+<p>where $C_j$ is a per-grid capacity proxy (workplace density × per-hour car-equivalent capacity factor). Public-transit and walk travel times are not subject to congestion in this formulation. The BPR multiplier is capped at 3.0 to avoid runaway iteration under heavy oversaturation.</p>
+<p><strong>Step 2d — Re-evaluation under congestion.</strong> Agents recompute (9) substituting $t_{ij}^{(\mathrm{car}), \mathrm{free}}$ with $t_{ij,t}^{(\mathrm{car}), \mathrm{cong}}$ from (10), and re-pick $j_n^*$. Steps 2b–2d iterate until $\widehat{F}_{j,t}$ changes by less than 0.5% across iterations or a maximum of 10 iterations is reached (typical convergence: 5–8 iterations).</p>
+<p><strong>Step 2e — Final outputs.</strong> The fixed-point flow tensor $\widehat{F}_{ij,t}^{*}$ and the equilibrium congested travel-time matrix $t_{ij,t}^{(\mathrm{car}), *}$ are reported as the deployment outputs.</p>
+<p><strong>Why training and deployment treat $t$ differently.</strong> During training (Section 2.7) we use only free-flow $t_{ij}^{(m), \mathrm{free}}$ as input to (6), and $\beta_{t,m}$ is identified as the sensitivity of utility to <em>free-flow</em> travel time. The training labels $F_{ij,t}$ themselves reflect commuter responses to congested conditions in the real world, so $\beta_{t,m}$ implicitly absorbs the average level of congestion that actual London commuters experienced in 2019 — but the input is free-flow, by convention. At deployment (Section 2.6), the BPR loop (10) explicitly recomputes $t$ as a function of predicted flow, <em>using the same $\beta_{t,m}$</em>. This separation has two benefits: (i) the training loss (1) is a clean multinomial likelihood without an inner fixed-point, preserving MLE asymptotics for $\beta$; (ii) at deployment, $\beta$ has a well-defined interpretation (free-flow-time sensitivity) under both free-flow and congested conditions because the only difference is which $t$ enters $\beta \cdot t$. We avoid the simultaneity that the "all stages must use the same $t$" view would create (Sheffi, 1985).</p>
+<p><strong>Counterfactual evaluation.</strong> Counterfactuals are then a matter of perturbing inputs and re-running both stages. For an <em>origin-side</em> policy (e.g., +65,000 jobs at Old Oak Common, Section 2.9), we modify $\mathbf{X}^{\mathrm{static}}$ at the affected grid cells, re-evaluate the trained encoder to obtain a new $V_{j,t}'$, and re-simulate agent choices and BPR under the same trained $(\beta, \gamma, \delta, \kappa)$. For a <em>temporal-side</em> policy (e.g., 50% morning-peak load shifted to shoulder hours), we perturb $\mathbf{X}^{\mathrm{dyn}}$ analogously. The behavioural coefficients are <em>not</em> re-estimated under intervention — this is the hybrid framework's identifying assumption (Schölkopf et al., 2021, single-component invariance): the <em>mechanism</em> of choice is structural and stable; only the <em>inputs</em> to the mechanism change. We report each scenario both with and without the BPR loop active, so the gap between the two reads the magnitude of congestion damping on the policy effect.</p>
+<h2>2.7 Training: End-to-End Cross-Entropy</h2>
+<p>The full parameter vector $\boldsymbol{\theta} = (\Theta_{\mathrm{enc}}, \beta, \kappa, \gamma, \delta)$ combines approximately 33,000 encoder weights $\Theta_{\mathrm{enc}}$ with 76 behavioural coefficients $(\beta, \kappa, \gamma, \delta)$. We fit $\boldsymbol{\theta}$ by minimising the cross-entropy loss (1) with stochastic gradient descent. Specifically we use AdamW (Loshchilov & Hutter, 2019) with two parameter groups: encoder weights with learning rate $10^{-3}$ and weight decay $10^{-4}$; behavioural coefficients with learning rate $10^{-2}$ and zero weight decay.</p>
+<p><strong>ML / econometrics duality.</strong> The negative cross-entropy in (1) is <em>term-for-term equal</em> to the negative multinomial log-likelihood of the choice model (8):</p>
+<p>$$ - \mathcal{L}(\boldsymbol{\theta})
+= \sum_{i,j,t} F_{ij,t}\, \log P(j \mid i, t;\, \boldsymbol{\theta})
+= \log \mathrm{Multinomial}(\mathbf{F}_{i,\cdot,t} \mid O_{i,t}, P(\cdot \mid i, t)),
+\tag{11}  $$</p>
+<p>so the gradient-descent estimates we obtain by backpropagation are maximum-likelihood estimates and inherit the standard MLE asymptotics (consistency, asymptotic normality; Bentz & Merunka, 2000). This duality is what licences the behavioural reading of $\beta$, $\gamma$, $\delta$ as time-, distance-, and labour-match-disutility coefficients respectively.</p>
+<p><strong>Optimisation details.</strong> Origins are split 87% / 13% into training and validation pools. The cross-entropy in (1) is computed only over training origins; the validation pool is used for early stopping (patience 30 epochs) and for reporting performance metrics. Gradient clipping at norm 1.0 is applied to all parameters jointly. Each training run uses 200 epochs and a single random seed; we report multi-seed mean ± standard deviation across three seeds.</p>
+<h2>2.8 Identifiability and Parameter Constraints</h2>
+<p>Aggregate flow data does not identify every parameter we might wish to recover. We deal with three identifiability problems by structural constraints rather than data-derived estimates:</p>
+<p><strong>(i) The scale of $V_{j,t}$.</strong> The product $\alpha \cdot V_{j,t}$ is identified only up to a positive scaling. We resolve by fixing $\alpha = 1$ (a buffer, not a parameter) and z-scoring the GNN output, leaving the GNN to absorb all scale variation. This is standard practice in deep multinomial-choice models (Wang & Klabjan, 2018; conditional-logit identification in Train, 2009 §3).</p>
+<p><strong>(ii) The walking time coefficient $\beta_{t,\mathrm{walk}}$.</strong> Within the 1,725 × 1,725 OD pair set the walking time matrix $t_{ij}^{(\mathrm{walk})} = d_{ij} / 5\,\mathrm{km/h}$ is severely collinear with $\log d_{ij}$ on the small subset of pairs where walking is feasible ($d_{ij} \lesssim 5$ km). The distance-aware choice set restriction in (5) addresses this by removing infeasible walking from the model entirely. After the restriction, $\beta_{t,\mathrm{walk}}$ is identified only from the walkable subset and converges robustly to $\approx -0.05$ across random restarts. We interpret this estimate as the time-disutility coefficient for short-distance walking commute (cf. Wardman, 2014's finding that walking VOT scales sub-linearly with trip length).</p>
+<p><strong>(iii) Tier-2 vs tier-3 collapse.</strong> Empirically the data does not support distinct $\kappa$ or $\delta$ for IMD income tiers 2 and 3 — they consistently estimate to identical values across random restarts ($\kappa_2 = \kappa_3 \approx 1.97$, $\delta_2 = \delta_3 \approx 0.22$). This reflects the limited variation in IMD income score across origin grids in inner London. We report the collapse as an empirical finding and document it as a data-resolution limitation; access to individual-level income data (planned for the Beijing replication) would be required to discriminate tiers 2 and 3.</p>
+<p>The remaining 76 RUM parameters and ≈ 33,000 encoder parameters are fit against approximately 5.7 million observed (origin, destination, hour) cells — strongly over-identified.</p>
+<h2>2.9 Counterfactual Scenario Design</h2>
+<p>We evaluate the framework on two policy scenarios that span the spatial / temporal spectrum of urban interventions:</p>
+<p><strong>Scenario A — Old Oak Common employment cluster.</strong> A spatial intervention modelled as a uniform addition of 65,000 jobs to the nine 1 km grid cells covering the proposed Old Oak Common employment cluster (Hammersmith / Ealing boundary). At simulation time, the employment count features in $\mathbf{X}^{\mathrm{static}}$ for these nine cells are increased proportionally; the trained encoder recomputes $V_{j,t}$ under intervention; agents re-run their destination choices using the same behavioural coefficients.</p>
+<p><strong>Scenario B — Flexible-hours peak shifting.</strong> A temporal intervention modelled as moving 50% of the 7–9 a.m. peak commuting load to the 10–15 shoulder window. Concretely, the hourly inflow feature in $\mathbf{X}^{\mathrm{dyn}}$ is multiplied by 0.5 at peak hours and increased proportionally at shoulder hours, preserving the 24-hour total. The trained encoder recomputes $V_{j,t}$; agents re-run destination choices.</p>
+<p>For each scenario we report the change in cell-level Hansen accessibility,</p>
+<p>$$ A_i = \sum_{j} E_j \exp(-|\beta_{\mathrm{car}}|\, t_{ij}^{(\mathrm{car})}),
+\tag{12}  $$</p>
+<p>where $E_j$ is employment at $j$, and the change in commuting-flow inequality measured by the Gini coefficient and Palma ratio of the population-weighted accessibility distribution. We compute results both under free-flow $t_{ij}^{(\mathrm{car})}$ and under a BPR user-equilibrium congestion assignment (Beckmann et al., 1956); the two settings bracket the "no-feedback" and "with-feedback" counterfactual reads.</p>
+<h2>2.10 Performance Metrics</h2>
+<p>Aggregate predictive performance is summarised by seven complementary metrics computed on validation-pool origins:</p>
+<ul><li><strong>Common Part of Commuters (CPC)</strong> (Lenormand et al., 2012):</li></ul>
+<p>$$ \mathrm{CPC} = \frac{2 \sum_{i,j,t} \min(\widehat{F}_{ij,t}, F_{ij,t})}{\sum_{i,j,t} \widehat{F}_{ij,t} + \sum_{i,j,t} F_{ij,t}}, \quad \in [0, 1].
+\tag{13}  $$</p>
+<ul><li><strong>Root mean squared error (RMSE)</strong> of cell-level flow:</li></ul>
+<p>$\sqrt{\mathrm{mean}((\widehat{F}_{ij,t} - F_{ij,t})^2)}$.</p>
+<ul><li><strong>Mean absolute error (MAE)</strong>: $\mathrm{mean}(|\widehat{F}_{ij,t} - F_{ij,t}|)$.</li><li><strong>Pearson correlation</strong> between predicted and observed flow vectors.</li><li><strong>Spearman rank correlation</strong> (rank-stable variant).</li><li><strong>KL divergence</strong> $D_{\mathrm{KL}}(F_{ij,t} / O_{i,t} \,\|\, P(j \mid i, t))$</li></ul>
+<p>averaged over active (origin, hour) pairs.</p>
+<ul><li><strong>Top-10 destination accuracy</strong>: the average fraction of an origin's</li></ul>
+<p>top-10 observed destinations that the model also assigns to the top-10 predicted destinations.</p>
+<p>CPC is the most common headline metric in OD-flow literature (Lenormand et al., 2012; Simini et al., 2021); the others provide complementary views. CPC is robust to total-flow mismatch but insensitive to per-cell magnitude; RMSE penalises high-flow errors heavily; KL emphasises destination-distribution fit per origin; and top-K accuracy directly tests the model's ability to identify high-volume destinations.</p>
+<h2>2.11 Implementation, Reproducibility, and Software</h2>
+<p>The full pipeline is implemented in PyTorch 2.0 with no external graph neural network library (we use a lightweight <code>_SAGELayer</code> of our own that supports both CPU and CUDA backends). Training is performed on a single NVIDIA T4 (16 GB) for the dual-branch and mixture variants (<6 minutes per epoch on London-scale data) and on a CPU for the baselines. Random seeds are fixed (PyTorch + NumPy) and three random restarts are run per experiment. All code, configurations, and trained checkpoints are deposited at \[anonymous repository URL\] for review. Data ingestion scripts for Census, IMD, OSM-POI, BRES, TomTom, and GEODS sources are provided; the recipe is fully reproducible from public data sources.</p>
+<p><strong>Limitations of the present implementation.</strong> Three are worth flagging explicitly:</p>
+<ul><li>$t_{ij}^{(\mathrm{transit})}$ is a piecewise-linear approximation</li></ul>
+<p>rather than a true GTFS routing computation. We plan to replace this with <code>r5r</code> GTFS-based shortest-path matrices in future work; for the Beijing replication (Paper B), real-time bus position data and the Amap routing API will provide hour-specific transit times that substantially exceed the present approximation.</p>
+<ul><li>Mode share is from Census 2011 (we have no MSOA-level mode share for</li></ul>
+<p>the 2019 GEODS OD release). The 2011 / 2019 mismatch is ≈10% in aggregate and is documented as a limitation.</p>
+<ul><li>The BPR user-equilibrium computation in Scenario A and B uses</li></ul>
+<p>origin-side capacity proxies derived from grid-level workplace density rather than link-level capacity, and is therefore best read as an order-of-magnitude congestion sensitivity rather than a literal traffic-equilibrium prediction.</p>
+<hr>
+<p><strong>References (selected; full reference list with the paper).</strong></p>
+<p>Beckmann, M., McGuire, C. B., Winsten, C. B. (1956). <em>Studies in the Economics of Transportation.</em> Yale University Press. Ben-Akiva, M., Boccara, B. (1995). <em>Discrete choice models with latent choice sets.</em> International Journal of Research in Marketing, 12(1), 9–24. Bentz, Y., Merunka, D. (2000). <em>Neural networks and the multinomial logit for brand choice modelling: A hybrid approach.</em> Journal of Forecasting, 19(3), 177–200. Boeing, G. (2017). <em>OSMnx: New methods for acquiring, constructing, analyzing, and visualizing complex street networks.</em> Computers, Environment and Urban Systems, 65, 126–139. Cho, K. et al. (2014). <em>Learning phrase representations using RNN encoder-decoder for statistical machine translation.</em> EMNLP. Department for Communities and Local Government (2019). <em>English indices of deprivation 2019.</em> Hamilton, W., Ying, Z., Leskovec, J. (2017). <em>Inductive representation learning on large graphs.</em> NeurIPS. Lan, S. et al. (2022). <em>DSTAGNN: Dynamic spatial-temporal aware graph neural network for traffic flow forecasting.</em> ICML. Lenormand, M., Picornell, M., Cantú-Ros, O. G., Tugores, A., Louail, T., Herranz, R., Barthelemy, M., Frías-Martínez, E., Ramasco, J. J. (2012). <em>Cross-checking different sources of mobility information.</em> PLoS ONE, 9(8), e105184. Loshchilov, I., Hutter, F. (2019). <em>Decoupled weight decay regularization.</em> ICLR. Manski, C. (1977). <em>The structure of random utility models.</em> Theory and Decision, 8(3), 229–254. McFadden, D. (1974). <em>Conditional logit analysis of qualitative choice behavior.</em> In <em>Frontiers in Econometrics</em>, ed. P. Zarembka. Pellegrini, P. A., Fotheringham, A. S. (2002). <em>Modelling spatial choice: A review and synthesis in a migration context.</em> Progress in Human Geography, 26(4), 487–510. Schölkopf, B., Locatello, F., Bauer, S., Ke, N. R., Kalchbrenner, N., Goyal, A., Bengio, Y. (2021). <em>Toward causal representation learning.</em> Proceedings of the IEEE, 109(5), 612–634. Simini, F., Barlacchi, G., Luca, M., Pappalardo, L. (2021). <em>A Deep Gravity model for mobility flows generation.</em> Nature Communications, 12, 6576. Train, K. (2009). <em>Discrete Choice Methods with Simulation</em>, 2nd ed. Cambridge University Press. Wang, S., Klabjan, D. (2018). <em>An End-to-End Deep Reinforcement Learning-Based Intelligent Agent for Discrete Choice.</em> arXiv:1810.04644. Wardman, M. (2014). <em>Valuing convenience in public transport.</em> ITF Round Tables, OECD Publishing. Wu, Z., Pan, S., Long, G., Jiang, J., Zhang, C. (2019). <em>Graph WaveNet for deep spatial-temporal graph modeling.</em> IJCAI.</p>
+</body>
+</html>

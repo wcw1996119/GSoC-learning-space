@@ -1,0 +1,493 @@
+% Conceptual Framework v3 — bridge view.
+%   LEFT  panel: 4 OD patterns we observe → each implies a trade-off
+%   CENTER:      4 trade-off icon cards (the shared structural primitives)
+%   RIGHT panel: forward simulation with explicit congestion feedback loop
+%   Big arrows:  LEFT → CENTER (inverse), CENTER → RIGHT (forward).
+%
+% Compile: pdflatex figure_conceptual_v3.tex
+
+\documentclass[border=10pt]{standalone}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath, amssymb}
+\usepackage{tikz}
+\usepackage{xcolor}
+
+\usetikzlibrary{
+  positioning, arrows.meta, shapes.geometric, shapes.symbols,
+  shapes.misc, calc, fit, backgrounds, decorations.pathmorphing,
+}
+
+\definecolor{cObsBg}      {HTML}{E0F2FE}    % blue — observed
+\definecolor{cObsBorder}  {HTML}{0369A1}
+\definecolor{cTradeBg}    {HTML}{F3E8FF}    % purple — trade-offs
+\definecolor{cTradeBorder}{HTML}{6D28D9}
+\definecolor{cSimBg}      {HTML}{FFEDD5}    % orange — simulation
+\definecolor{cSimBorder}  {HTML}{C2410C}
+
+\definecolor{cTime}       {HTML}{C44E52}
+\definecolor{cDist}       {HTML}{F59E0B}
+\definecolor{cMatch}      {HTML}{0E7490}
+\definecolor{cTier}       {HTML}{8172B2}
+
+\definecolor{cText}       {HTML}{1F2937}
+\definecolor{cMuted}      {HTML}{6B7280}
+\definecolor{cFlow}       {HTML}{E07A5F}
+\definecolor{cBPR}        {HTML}{F59E0B}
+\definecolor{cFeedback}   {HTML}{DC2626}
+
+\definecolor{cAgentWalk}    {HTML}{10B981}
+\definecolor{cAgentTransit} {HTML}{F59E0B}
+\definecolor{cAgentCar}     {HTML}{3B82F6}
+\definecolor{cTierLow}      {HTML}{93C5FD}
+\definecolor{cTierMid}      {HTML}{C4B5FD}
+\definecolor{cTierHigh}     {HTML}{F0ABFC}
+
+\begin{document}
+
+\begin{tikzpicture}[
+  font=\sffamily,
+  thick,
+  >={Stealth[length=4.5pt, width=4.5pt]},
+  every node/.style={align=center, text=cText},
+  panelObs/.style={
+    rectangle, rounded corners=6pt,
+    draw=cObsBorder, fill=cObsBg!40, line width=1.0pt,
+    inner xsep=4mm, inner ysep=5mm,
+  },
+  panelTrade/.style={
+    rectangle, rounded corners=6pt,
+    draw=cTradeBorder, fill=cTradeBg!40, line width=1.0pt,
+    inner xsep=4mm, inner ysep=5mm,
+  },
+  panelSim/.style={
+    rectangle, rounded corners=6pt,
+    draw=cSimBorder, fill=cSimBg!40, line width=1.0pt,
+    inner xsep=4mm, inner ysep=5mm,
+  },
+  patternBox/.style={
+    rectangle, rounded corners=3pt,
+    draw=cObsBorder!50, fill=white, line width=0.5pt,
+    minimum width=80mm, minimum height=22mm,
+    font=\sffamily\footnotesize,
+  },
+  tradeCard/.style={
+    rectangle, rounded corners=3pt,
+    draw=#1, fill=white, line width=0.9pt,
+    minimum width=66mm, minimum height=28mm,
+    font=\sffamily\footnotesize,
+  },
+  simStep/.style={
+    rectangle, rounded corners=3pt,
+    draw=cSimBorder!60, fill=white, line width=0.5pt,
+    minimum width=86mm, minimum height=22mm,
+    font=\sffamily\footnotesize,
+  },
+  bigarrFwd/.style={->, line width=2.5pt, draw=cFlow},
+  arrFB/.style={->, line width=1.4pt, draw=cFeedback, dashed},
+  arrInfer/.style={->, line width=0.9pt, draw=cObsBorder!70},
+  arrDeploy/.style={->, line width=0.9pt, draw=cTradeBorder!70},
+]
+
+% ════════════════════════════════════════════════════════════════════════
+%  TITLE
+% ════════════════════════════════════════════════════════════════════════
+
+\node[font=\sffamily\bfseries\Large, anchor=south west, text=cText]
+  at (-100mm, 90mm)
+  {Conceptual Framework — \emph{learn} from observed flow,\;\emph{simulate} forward with congestion feedback};
+\node[font=\sffamily\itshape\normalsize, anchor=south west, text=cMuted]
+  at (-100mm, 86mm)
+  {the 4 trade-offs are the \textbf{shared structural object} bridging both directions};
+
+% ════════════════════════════════════════════════════════════════════════
+%  PANEL A — LEFT — Observed OD patterns (each pattern → one trade-off)
+% ════════════════════════════════════════════════════════════════════════
+
+% Top label
+\node[font=\sffamily\bfseries\small, text=cObsBorder, anchor=north]
+  at (-58mm, 80mm)
+  {What we OBSERVE in the data};
+\node[font=\sffamily\scriptsize\itshape, text=cMuted, anchor=north,
+       text width=85mm]
+  at (-58mm, 76mm)
+  {hourly aggregate OD flow $F_{ij,t}$ — no individual labels, no choice records};
+
+% Pattern 1: peak vs off-peak (→ β)
+\node[patternBox, anchor=north] (p1) at (-58mm, 70mm) {};
+\node[font=\sffamily\bfseries\scriptsize, text=cTime, anchor=north west]
+  at ($(p1.north west)+(2mm,-1mm)$) {peak \,/\, off-peak structure};
+\begin{scope}[shift={($(p1.center)+(-22mm, -2mm)$)}]
+  \draw[->, line width=0.4pt, draw=cMuted] (-1mm, 0) -- (28mm, 0);
+  \draw[->, line width=0.4pt, draw=cMuted] (0, -1mm) -- (0, 7mm);
+  \foreach \h/\hr in {1.0/0, 1.2/2, 1.5/4, 4.5/6, 6.0/8, 4.0/10, 2.5/12,
+                      2.5/14, 5.5/16, 5.0/18, 3.0/20, 1.5/22}{
+    \pgfmathtruncatemacro{\xc}{\hr}
+    \fill[cTime!80] (\xc*1.2mm + 0.5mm, 0) rectangle (\xc*1.2mm + 1.4mm, \h mm);
+  }
+  \node[font=\sffamily\tiny, text=cMuted] at (15mm, -2.5mm) {hour of day};
+\end{scope}
+\node[font=\sffamily\tiny, text=cText, anchor=west, text width=46mm]
+  at ($(p1.east)+(-50mm,-1mm)$)
+  {two clear peaks $\to$ \emph{time-of-day matters},\\differently per mode};
+
+% Pattern 2: distance decay (→ γ)
+\node[patternBox, anchor=north] (p2) at (-58mm, 46mm) {};
+\node[font=\sffamily\bfseries\scriptsize, text=cDist, anchor=north west]
+  at ($(p2.north west)+(2mm,-1mm)$) {distance decay};
+\begin{scope}[shift={($(p2.center)+(-22mm, -2mm)$)}]
+  \draw[->, line width=0.4pt, draw=cMuted] (-1mm, 0) -- (28mm, 0);
+  \draw[->, line width=0.4pt, draw=cMuted] (0, -1mm) -- (0, 7mm);
+  % scatter of points + decay curve
+  \foreach \dx/\dy in {2/5.5, 4/4.8, 6/4.0, 8/3.4, 10/2.7, 12/2.2, 14/1.8,
+                       16/1.4, 18/1.0, 20/0.8, 22/0.6, 24/0.5, 26/0.4}{
+    \fill[cDist!70] (\dx mm, \dy mm) circle (0.4mm);
+  }
+  \draw[cDist, line width=0.7pt, smooth, samples=15, domain=2:26]
+        plot ({\x mm}, {6 * exp(-0.13*\x) mm});
+  \node[font=\sffamily\tiny, text=cMuted] at (15mm, -2.5mm) {distance};
+\end{scope}
+\node[font=\sffamily\tiny, text=cText, anchor=west, text width=46mm]
+  at ($(p2.east)+(-50mm,-1mm)$)
+  {flow drops off with distance\\$\to$ \emph{willingness-to-travel}};
+
+% Pattern 3: sector clustering (→ δ)
+\node[patternBox, anchor=north] (p3) at (-58mm, 22mm) {};
+\node[font=\sffamily\bfseries\scriptsize, text=cMatch, anchor=north west]
+  at ($(p3.north west)+(2mm,-1mm)$) {sector-skill clustering};
+\begin{scope}[shift={($(p3.center)+(-22mm, -2mm)$)}]
+  % origin pies (worker types)
+  \draw[draw=cMatch, fill=cMatch!10, line width=0.3pt] (-2mm, 4mm) circle (3mm);
+  \node[font=\sffamily\tiny, text=cMatch] at (-2mm, 4mm) {fin};
+  \draw[draw=cMatch, fill=cMatch!10, line width=0.3pt] (-2mm, -2mm) circle (3mm);
+  \node[font=\sffamily\tiny, text=cMatch] at (-2mm, -2mm) {ret};
+
+  % destination pies (sector mix)
+  \draw[draw=cMatch!50, fill=cMatch!30, line width=0.3pt] (24mm, 4mm) circle (3mm);
+  \node[font=\sffamily\tiny, text=cMatch!50!black] at (24mm, 4mm) {fin};
+  \draw[draw=cMatch!50, fill=cMatch!30, line width=0.3pt] (24mm, -2mm) circle (3mm);
+  \node[font=\sffamily\tiny, text=cMatch!50!black] at (24mm, -2mm) {ret};
+
+  % strong same-sector arrows (thick)
+  \draw[->, line width=0.9pt, draw=cMatch] (1mm, 4mm) -- (21mm, 4mm);
+  \draw[->, line width=0.9pt, draw=cMatch] (1mm, -2mm) -- (21mm, -2mm);
+  % weak cross-sector (thin dashed)
+  \draw[->, line width=0.3pt, draw=cMatch!40, dashed] (1mm, 3mm) -- (21mm, -1mm);
+  \draw[->, line width=0.3pt, draw=cMatch!40, dashed] (1mm, -1mm) -- (21mm, 3mm);
+\end{scope}
+\node[font=\sffamily\tiny, text=cText, anchor=west, text width=46mm]
+  at ($(p3.east)+(-50mm,-1mm)$)
+  {finance origin $\to$ finance jobs much stronger\\$\to$ \emph{occupational matching}};
+
+% Pattern 4: income tier gradient (→ κ)
+\node[patternBox, anchor=north] (p4) at (-58mm, -2mm) {};
+\node[font=\sffamily\bfseries\scriptsize, text=cTier, anchor=north west]
+  at ($(p4.north west)+(2mm,-1mm)$) {income-tier gradient};
+\begin{scope}[shift={($(p4.center)+(-24mm, -2mm)$)}]
+  \draw[->, line width=0.4pt, draw=cMuted] (-1mm, 0) -- (28mm, 0);
+  \draw[->, line width=0.4pt, draw=cMuted] (0, -1mm) -- (0, 7mm);
+  % three different decay curves (low/mid/high)
+  \draw[cTierLow, line width=0.9pt, smooth, samples=15, domain=2:26]
+        plot ({\x mm}, {6 * exp(-0.18*\x) mm});
+  \draw[cTierMid, line width=0.9pt, smooth, samples=15, domain=2:26]
+        plot ({\x mm}, {6 * exp(-0.13*\x) mm});
+  \draw[cTierHigh, line width=0.9pt, smooth, samples=15, domain=2:26]
+        plot ({\x mm}, {6 * exp(-0.09*\x) mm});
+  \node[font=\sffamily\tiny, text=cTierLow!50!black] at (16mm, 1mm) {low};
+  \node[font=\sffamily\tiny, text=cTierMid!50!black] at (20mm, 2.6mm) {mid};
+  \node[font=\sffamily\tiny, text=cTierHigh!50!black] at (24mm, 3.5mm) {high};
+\end{scope}
+\node[font=\sffamily\tiny, text=cText, anchor=west, text width=46mm]
+  at ($(p4.east)+(-50mm,-1mm)$)
+  {tiers travel different distances\\$\to$ \emph{income shapes trade-offs}};
+
+% LEFT panel background
+\begin{pgfonlayer}{background}
+  \node[panelObs, fit=(p1)(p4)] (panelLeft) {};
+\end{pgfonlayer}
+
+% ════════════════════════════════════════════════════════════════════════
+%  PANEL B — CENTER — 4 trade-off icon cards (the bridge)
+% ════════════════════════════════════════════════════════════════════════
+
+% Top label
+\node[font=\sffamily\bfseries\small, text=cTradeBorder, anchor=north]
+  at (37mm, 80mm)
+  {The structural trade-offs};
+\node[font=\sffamily\scriptsize\itshape, text=cMuted, anchor=north,
+       text width=72mm]
+  at (37mm, 76mm)
+  {what each commuter implicitly weighs --- shared by both directions};
+
+% Card 1 — TIME
+\node[tradeCard=cTime, anchor=north] (c1) at (37mm, 70mm) {};
+\begin{scope}[shift={($(c1.west)+(7mm, 0)$)}]
+  % clock icon
+  \draw[draw=cTime, fill=cTime!10, line width=0.7pt] (0, 0) circle (4mm);
+  \draw[cTime, line width=0.7pt] (0, 0) -- (0, 2.5mm);
+  \draw[cTime, line width=0.7pt] (0, 0) -- (2.5mm, 0);
+\end{scope}
+\node[font=\sffamily\bfseries\small, text=cTime, anchor=north west]
+  at ($(c1.north west)+(16mm, -3mm)$) {Time sensitivity};
+\node[font=\sffamily\tiny, text=cMuted, anchor=north west, text width=42mm]
+  at ($(c1.north west)+(16mm, -8mm)$)
+  {how strongly travel time discourages\\an option, by hour\,$\times$\,mode};
+\node[font=\sffamily\tiny\itshape, text=cTime, anchor=south east]
+  at ($(c1.south east)+(-2mm, 1mm)$) {$\beta_{t,m}$};
+
+% Card 2 — DISTANCE
+\node[tradeCard=cDist, anchor=north] (c2) at (37mm, 41mm) {};
+\begin{scope}[shift={($(c2.west)+(7mm, 0)$)}]
+  % decay curve
+  \draw[->, line width=0.4pt, draw=cMuted] (-3mm, -3mm) -- (5mm, -3mm);
+  \draw[->, line width=0.4pt, draw=cMuted] (-3mm, -3mm) -- (-3mm, 4mm);
+  \draw[cDist, line width=0.9pt, smooth, samples=15, domain=-3:5]
+        plot ({\x mm}, {3 * exp(-0.5*(\x+3)) - 3 mm});
+\end{scope}
+\node[font=\sffamily\bfseries\small, text=cDist, anchor=north west]
+  at ($(c2.north west)+(16mm, -3mm)$) {Distance decay};
+\node[font=\sffamily\tiny, text=cMuted, anchor=north west, text width=42mm]
+  at ($(c2.north west)+(16mm, -8mm)$)
+  {how fast attractiveness drops as\\distance grows};
+\node[font=\sffamily\tiny\itshape, text=cDist, anchor=south east]
+  at ($(c2.south east)+(-2mm, 1mm)$) {$\gamma$};
+
+% Card 3 — OCC MATCH
+\node[tradeCard=cMatch, anchor=north] (c3) at (37mm, 12mm) {};
+\begin{scope}[shift={($(c3.west)+(7mm, 0)$)}]
+  \draw[draw=cMatch, fill=cMatch!15, line width=0.6pt] (-4mm, -3mm) rectangle (-1mm, 3mm);
+  \draw[draw=cMatch, fill=cMatch!15, line width=0.6pt] (1mm, -3mm) rectangle (4mm, 3mm);
+  \draw[<->, line width=0.6pt, draw=cMatch] (-1mm, 0) -- (1mm, 0);
+\end{scope}
+\node[font=\sffamily\bfseries\small, text=cMatch, anchor=north west]
+  at ($(c3.north west)+(16mm, -3mm)$) {Occupational matching};
+\node[font=\sffamily\tiny, text=cMuted, anchor=north west, text width=42mm]
+  at ($(c3.north west)+(16mm, -8mm)$)
+  {how strongly worker skill aligns\\with destination job sectors};
+\node[font=\sffamily\tiny\itshape, text=cMatch, anchor=south east]
+  at ($(c3.south east)+(-2mm, 1mm)$) {$\delta_k$};
+
+% Card 4 — INCOME TIER
+\node[tradeCard=cTier, anchor=north] (c4) at (37mm, -17mm) {};
+\begin{scope}[shift={($(c4.west)+(7mm, 0)$)}]
+  \fill[cTierLow] (-3mm, -3mm) rectangle (3mm, -1.5mm);
+  \fill[cTierMid] (-3mm, -1mm) rectangle (3mm, 0.5mm);
+  \fill[cTierHigh] (-3mm, 1mm) rectangle (3mm, 2.5mm);
+\end{scope}
+\node[font=\sffamily\bfseries\small, text=cTier, anchor=north west]
+  at ($(c4.north west)+(16mm, -3mm)$) {Income-tier scaling};
+\node[font=\sffamily\tiny, text=cMuted, anchor=north west, text width=42mm]
+  at ($(c4.north west)+(16mm, -8mm)$)
+  {how the 3 trade-offs above\\differ across income tiers};
+\node[font=\sffamily\tiny\itshape, text=cTier, anchor=south east]
+  at ($(c4.south east)+(-2mm, 1mm)$) {$\kappa_k$};
+
+\begin{pgfonlayer}{background}
+  \node[panelTrade, fit=(c1)(c4)] (panelCenter) {};
+\end{pgfonlayer}
+
+% ════════════════════════════════════════════════════════════════════════
+%  PANEL C — RIGHT — Forward simulation with explicit congestion loop
+% ════════════════════════════════════════════════════════════════════════
+
+% Top label
+\node[font=\sffamily\bfseries\small, text=cSimBorder, anchor=north]
+  at (130mm, 80mm)
+  {How we SIMULATE forward};
+\node[font=\sffamily\scriptsize\itshape, text=cMuted, anchor=north,
+       text width=92mm]
+  at (130mm, 76mm)
+  {trade-offs $+$ a hypothetical city configuration $\to$ predicted flow,\\with congestion built up by simultaneous choices};
+
+% Step 1: hypothetical world
+\node[simStep, anchor=north] (s1) at (130mm, 70mm) {};
+\node[font=\sffamily\bfseries\scriptsize, text=cSimBorder, anchor=north west]
+  at ($(s1.north west)+(2mm,-1mm)$) {1.\;A hypothetical world};
+\begin{scope}[shift={($(s1.center)+(-30mm, -2mm)$)}]
+  \foreach \r in {0,1,2}{
+    \foreach \c in {0,1,2,3,4,5,6}{
+      \pgfmathsetmacro{\dist}{sqrt((\c-3)*(\c-3) + (\r-1)*(\r-1))}
+      \pgfmathsetmacro{\op}{0.15 + 0.5*exp(-0.5*\dist)}
+      \fill[cSimBorder, opacity=\op]
+            (\c*2.5mm, -\r*2.5mm) rectangle (\c*2.5mm + 2mm, -\r*2.5mm + 2mm);
+    }
+  }
+  % highlighted cell — "more jobs here"
+  \draw[draw=cFeedback, line width=1.0pt] (5*2.5mm - 0.4mm, -1*2.5mm - 0.4mm) rectangle (5*2.5mm + 2.4mm, -1*2.5mm + 2.4mm);
+  \draw[->, line width=0.4pt, draw=cFeedback]
+        (24mm, 0) -- (5*2.5mm + 1mm, 0)
+        node[pos=0, right, font=\sffamily\tiny, text=cFeedback]
+        {\;more jobs};
+\end{scope}
+\node[font=\sffamily\tiny, text=cText, anchor=west, text width=42mm]
+  at ($(s1.east)+(-44mm,-1mm)$)
+  {a counterfactual config\\(e.g.\ new employment center)};
+
+% Step 2: each agent evaluates
+\node[simStep, anchor=north] (s2) at (130mm, 46mm) {};
+\node[font=\sffamily\bfseries\scriptsize, text=cSimBorder, anchor=north west]
+  at ($(s2.north west)+(2mm,-1mm)$) {2.\;Each agent applies the 4 trade-offs};
+\begin{scope}[shift={($(s2.center)+(-30mm, -2mm)$)}]
+  % single agent
+  \fill[cAgentCar] (-2mm, 0) circle (1.4mm);
+  \node[font=\sffamily\tiny, text=cMuted, anchor=south] at (-2mm, 1.5mm) {agent $n$};
+  % arrow
+  \draw[->, line width=0.4pt, draw=cMuted] (1mm, 0) -- (5mm, 0);
+  % U bars
+  \foreach \k/\h in {0/1.8, 1/2.5, 2/3.5, 3/5.0, 4/4.0, 5/2.5, 6/1.5}{
+    \fill[cSimBorder, opacity=0.7]
+          (6mm + \k*1.5mm, -2mm) rectangle (7mm + \k*1.5mm, -2mm + \h*0.9mm);
+  }
+  \node[font=\sffamily\tiny, text=cSimBorder] at (12mm, 5mm) {$U_{n,j}$};
+\end{scope}
+\node[font=\sffamily\tiny, text=cText, anchor=west, text width=42mm]
+  at ($(s2.east)+(-44mm,-1mm)$)
+  {compute personal utility\\over all destinations};
+
+% Step 3: Gumbel-max → choose 1 destination
+\node[simStep, anchor=north] (s3) at (130mm, 22mm) {};
+\node[font=\sffamily\bfseries\scriptsize, text=cSimBorder, anchor=north west]
+  at ($(s3.north west)+(2mm,-1mm)$) {3.\;Gumbel-max: each agent picks ONE $j$};
+\begin{scope}[shift={($(s3.center)+(-30mm, -2mm)$)}]
+  \foreach \k/\h/\chosen in
+       {0/1.8/0, 1/2.5/0, 2/3.5/0, 3/5.0/1, 4/4.0/0, 5/2.5/0, 6/1.5/0}{
+    \pgfmathsetmacro{\op}{0.4 + 0.5*\chosen}
+    \fill[cSimBorder, opacity=\op]
+          (-3mm + \k*1.8mm, -2mm) rectangle (-2mm + \k*1.8mm, -2mm + \h*0.9mm);
+  }
+  % star on chosen
+  \node[font=\sffamily\Large, text=cAgentCar] at (-3mm + 3*1.8mm + 0.5mm, 5mm)
+       {$\bigstar$};
+  \draw[cMuted, dashed, line width=0.3pt] (-3mm + 3*1.8mm, -2mm) -- (-3mm + 3*1.8mm, 5.5mm);
+  \node[font=\sffamily\tiny, text=cAgentCar] at (12mm, 1mm) {chosen $j_n^*$};
+\end{scope}
+\node[font=\sffamily\tiny, text=cText, anchor=west, text width=42mm]
+  at ($(s3.east)+(-44mm,-1mm)$)
+  {add Gumbel noise, take argmax};
+
+% Step 4: flows aggregate, congestion forms
+\node[simStep, anchor=north, minimum height=28mm] (s4) at (130mm, -2mm) {};
+\node[font=\sffamily\bfseries\scriptsize, text=cSimBorder, anchor=north west]
+  at ($(s4.north west)+(2mm,-1mm)$) {4.\;Flows aggregate $\to$ congestion forms};
+\begin{scope}[shift={($(s4.center)+(-32mm, -2mm)$)}]
+  % many small agents on left
+  \foreach \dx/\dy/\col in {
+      -2/4/cAgentCar, -2/2/cAgentTransit, -2/0/cAgentWalk,
+      -2/-2/cAgentCar, -2/-4/cAgentTransit,
+      0/4/cAgentTransit, 0/2/cAgentCar, 0/0/cAgentTransit,
+      0/-2/cAgentWalk, 0/-4/cAgentCar}{
+    \fill[\col] (\dx mm, \dy mm) circle (0.4mm);
+  }
+  \node[font=\sffamily\tiny, text=cMuted] at (-1mm, 6.5mm) {agents};
+  % arrow into roads
+  \draw[->, line width=0.5pt, draw=cMuted] (3mm, 0) -- (8mm, 0);
+  % road network with red glow on congested segments
+  \foreach \r in {0,1,2}{
+    \draw[draw=cSimBorder!60, line width=0.6pt]
+          (10mm, -2mm - \r*2mm) -- (24mm, -2mm - \r*2mm);
+  }
+  \foreach \c in {0,1,2,3}{
+    \draw[draw=cSimBorder!60, line width=0.6pt]
+          (10mm + \c*4mm, -2mm) -- (10mm + \c*4mm, -2mm - 4mm);
+  }
+  % red overlay (congestion)
+  \fill[cFeedback!50, opacity=0.5] (16mm, -4mm) circle (3mm);
+  \node[font=\sffamily\tiny, text=cFeedback!80!black] at (16mm, -4mm) {!};
+  \node[font=\sffamily\tiny, text=cMuted] at (17mm, 2mm) {road net};
+  \node[font=\sffamily\tiny, text=cFeedback] at (24mm, -7.5mm) {congested};
+\end{scope}
+\node[font=\sffamily\tiny, text=cText, anchor=west, text width=42mm]
+  at ($(s4.east)+(-44mm,-1mm)$)
+  {high-load destinations\\become slow (BPR curve)};
+
+% Step 5: equilibrium F* output
+\node[simStep, anchor=north] (s5) at (130mm, -38mm) {};
+\node[font=\sffamily\bfseries\scriptsize, text=cSimBorder, anchor=north west]
+  at ($(s5.north west)+(2mm,-1mm)$) {5.\;Equilibrium $\widehat F^{*}$};
+\begin{scope}[shift={($(s5.center)+(-30mm, -2mm)$)}]
+  % grid heatmap
+  \foreach \r in {0,1,2,3}{
+    \foreach \c in {0,1,2,3,4,5}{
+      \pgfmathsetmacro{\op}{0.15 + 0.7*exp(-((\r-1.5)*(\r-1.5) + (\c-2.5)*(\c-2.5))*0.25)}
+      \fill[cSimBorder, opacity=\op]
+            (\c*2mm, -\r*2mm) rectangle (\c*2mm + 1.6mm, -\r*2mm + 1.6mm);
+    }
+  }
+  \node[font=\sffamily\tiny, text=cSimBorder] at (5mm, 4mm) {$\widehat F^*_{ij,t}$};
+\end{scope}
+\node[font=\sffamily\tiny, text=cText, anchor=west, text width=42mm]
+  at ($(s5.east)+(-44mm,-1mm)$)
+  {fixed-point reached when\\nobody wants to switch};
+
+% Inner forward arrows in RIGHT panel
+\draw[arrInfer, draw=cSimBorder!50] (s1.south) -- (s2.north);
+\draw[arrInfer, draw=cSimBorder!50] (s2.south) -- (s3.north);
+\draw[arrInfer, draw=cSimBorder!50] (s3.south) -- (s4.north);
+\draw[arrInfer, draw=cSimBorder!50] (s4.south) -- (s5.north);
+
+% ── EXPLICIT CONGESTION FEEDBACK LOOP ─────────────────────────────────
+% From Step 4 (congestion formed) back up to Step 2 (re-evaluate utility
+% with new t_car). Show as a bold red dashed loop on the right side.
+\draw[arrFB] ($(s4.east)+(-3mm, 0)$) .. controls
+              ($(s4.east)+(15mm, 0)$) and
+              ($(s2.east)+(15mm, 0)$) ..
+              ($(s2.east)+(-3mm, 0)$);
+\node[font=\sffamily\scriptsize\bfseries\itshape, text=cFeedback,
+       fill=white, inner sep=2pt, anchor=west]
+  at ($(s4.east)+(8mm, 13mm)$)
+  {congestion feedback};
+\node[font=\sffamily\tiny\itshape, text=cFeedback,
+       fill=white, inner sep=1pt, anchor=west]
+  at ($(s4.east)+(8mm, 9mm)$)
+  {slower roads $\to$ utilities change};
+\node[font=\sffamily\tiny\itshape, text=cFeedback,
+       fill=white, inner sep=1pt, anchor=west]
+  at ($(s4.east)+(8mm, 5mm)$)
+  {agents reconsider $\to$ loop};
+
+\begin{pgfonlayer}{background}
+  \node[panelSim, fit=(s1)(s5)(s4.east)] (panelRight) {};
+\end{pgfonlayer}
+
+% ════════════════════════════════════════════════════════════════════════
+%  BIG ARROWS BETWEEN PANELS
+% ════════════════════════════════════════════════════════════════════════
+
+% Arrow 1: LEFT → CENTER (inverse / learn)
+\draw[bigarrFwd] ($(panelLeft.east)+(0,0)$) -- ($(panelCenter.west)+(0,0)$);
+\node[font=\sffamily\bfseries\small, text=cFlow,
+       fill=white, inner sep=2pt, anchor=south]
+  at ($(panelLeft.east)!0.5!(panelCenter.west)+(0, 2mm)$) {LEARN};
+\node[font=\sffamily\scriptsize\itshape, text=cMuted,
+       fill=white, inner sep=1pt, anchor=north,
+       text width=22mm]
+  at ($(panelLeft.east)!0.5!(panelCenter.west)+(0, -1mm)$)
+  {fit aggregate OD $\to$ recover trade-offs};
+
+% Arrow 2: CENTER → RIGHT (forward / simulate)
+\draw[bigarrFwd] ($(panelCenter.east)+(0,0)$) -- ($(panelRight.west)+(0,0)$);
+\node[font=\sffamily\bfseries\small, text=cFlow,
+       fill=white, inner sep=2pt, anchor=south]
+  at ($(panelCenter.east)!0.5!(panelRight.west)+(0, 2mm)$) {SIMULATE};
+\node[font=\sffamily\scriptsize\itshape, text=cMuted,
+       fill=white, inner sep=1pt, anchor=north,
+       text width=22mm]
+  at ($(panelCenter.east)!0.5!(panelRight.west)+(0, -1mm)$)
+  {trade-offs frozen $\to$ deploy on new world};
+
+% ════════════════════════════════════════════════════════════════════════
+%  BOTTOM FOOTER
+% ════════════════════════════════════════════════════════════════════════
+
+\node[font=\sffamily\scriptsize\itshape, text=cMuted, anchor=north,
+       text width=240mm]
+  at (37mm, -55mm)
+   {Each panel of LEFT shows one observable signature in $F_{ij,t}$ that identifies one of the four structural trade-offs in CENTER.\;
+    RIGHT then deploys the same trade-offs forward: each agent applies them, picks one destination via Gumbel-max, and aggregate flow loads the road network --- where congestion endogenously builds up,
+    feeds back to slow car routes (red loop), and forces agents to reconsider until equilibrium is reached.\;
+    The four trade-offs are the \textbf{single conceptual object} shared by both directions.};
+
+\end{tikzpicture}
+
+\end{document}

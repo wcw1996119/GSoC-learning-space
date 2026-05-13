@@ -1,0 +1,367 @@
+# 2 方法
+
+## 2.1 框架总览
+
+本文提出一个**ML-ABM 混合框架**用于城市通勤分析。该框架由两个阶段组成，通过共享的可学习参数串联（图 1）：
+
+- **阶段一（机器学习）**：一个时空图神经网络（spatio-temporal graph neural network, ST-GNN）端到端地从观测的小时级 OD 流量数据中训练，输出两类参数：每个目的地网格 $j$ 在每个小时 $t$ 的吸引力嵌入 $V_{j,t}$，以及一小批描述通勤者如何权衡通勤时间、距离、劳工市场匹配度、收入层异质性的行为系数 $(\beta, \gamma, \delta, \kappa)$。
+
+- **阶段二（基于代理的建模 agent-based modelling, ABM）**：在部署阶段，由阶段一训练得到的 $V_{j,t}$ 和行为系数被一群合成 agent 用来做个体级工作地选择。把所有 agent 的选择聚合就得到群体级的流量分布，按构造方式与阶段一训练目标一致；扰动阶段二的输入（例如在候选 Old Oak Common 集群处增加 65,000 个就业岗位）就能在保留数据拟合的决策机制的前提下模拟反事实政策。
+
+两阶段之间的桥梁是**多项 logit 选择公式**（McFadden, 1974）。在该公式下，阶段一使用的交叉熵损失在数值上**与阶段二中个体选择的最大对数似然目标完全相同**；§2.7 详细推导这一等价性。同样的公式也允许我们把拟合得到的 $\beta$、$\gamma$、$\delta$、$\kappa$ 解读为**行为参数**而不是不可解释的网络权重 —— 这样我们既能保留深度学习的预测能力，也保留城市政策问题所需的行为可解释性。
+
+![图 1 —— ML-ABM 混合框架。阶段一（左侧绿色）是监督式机器学习训练：双路编码器输出目的地吸引力 $V_{j,t}$；行为选择层（mode × 收入层混合多项 logit）输出 $P(j \mid i, t)$，与观测的小时 OD 通过交叉熵匹配。阶段二（右侧红色）是基于代理的部署，含拥堵反馈循环（橙色）：agent 用自由流 $t_{ij}$ 做目的地选择 → 聚合流量 → BPR 平衡得到拥堵 $t_{ij}$ → agent 在拥堵下重选效用 → 迭代到收敛。共享参数总线（深绿虚线）把训练阶段与部署阶段连起来。](paper_methods_architecture.png)
+
+下面给出系统视图（也方便纯文本环境查看）：
+
+```
+图 1（系统视图）.  ML-ABM 混合框架 —— 两阶段共享可学习参数。
+
+  阶段一: 机器学习（训练）
+  -----------------------------
+   X_static (1725, 22)   ─→  静态分支 (GraphSAGE × 2)
+                                     ↓
+                              h_static (1725, 32)
+                                     │
+   X_dynamic (24, 1725, 5)             │
+    · 拥堵比                           │
+    · 小时入流                         │
+    · 排队残留占位项                   │
+    · sin/cos 小时编码  ─→  动态分支
+                                     │
+                            (每小时 SAGE × 2)
+                                     ↓
+                            (GRU 24 步) + (多尺度 TCN: 核 3,5,7)
+                                     ↓ fuse
+                              h_dynamic (24, 1725, 32)
+                                     │
+                                     ↓
+                              门控融合
+                                     ↓
+                              V_jt (24, 1725)
+                                     │
+                                     ↓
+                              行为选择层
+                              (multinomial logit; mode × 收入层 mixture)
+                                     │
+                                     ↓
+                              P(j | i, t) = 在目的地上的 softmax
+                                     │
+                                     ↓
+                              对 F_{ij,t} 的交叉熵损失
+                                     │
+                                     ↓
+                              AdamW 同时更新编码器权重 + 行为系数
+
+
+  阶段二: 基于代理的建模（部署 / 反事实）
+  ------------------------------------------------
+   N_agents 个合成通勤者，每个有属性 (i, t, m, k):
+       i ∈ 原点网格, t ∈ 小时, m ∈ mode, k ∈ 收入层
+                                     ↓
+   对每个 agent，对每个候选目的地 j 计算效用:
+       U_{ij,t}^{(m,k)} = α V_{j,t} + β_{t,m,k} t_{ij}^{(m)}
+                          + γ log d_{ij} + δ_k OccMatch_{ij}
+                          + ε_{ij}            (ε ~ Gumbel)
+                                     ↓
+   agent 选择 j* = argmax_j U_{ij,t}^{(m,k)}
+                                     ↓
+   聚合所有 agent → 模拟 F̂_{ij,t}
+                                     ↓
+   反事实: 输入替换为干预（如 OOC 加 65,000 就业）
+            → 通过训练好的编码器重算干预下的 V_{j,t}
+            → 用**同一套**行为系数重新跑 agent 决策
+            → 模拟反事实 F̂_{ij,t}'
+```
+
+## 2.2 聚合 OD 作为监督分类问题
+
+记 $N$ 为研究区域的网格数，$T$ 为小时窗口数（伦敦实例下 $N = 1{,}725$，$T = 24$）。训练数据是观测流量张量
+
+$$
+\mathbf{F} \in \mathbb{Z}_{\geq 0}^{T \times N \times N},
+\qquad
+F_{ij,t} = \text{小时 } t \text{ 从网格 } i \text{ 出发去网格 } j \text{ 的观测出行人次数}.
+$$
+
+把建模任务自然 frame 成监督分类：**对每个 (原点, 小时) 样本 $(i, t)$，预测在 $N$ 个候选目的地上的流量分布**。
+
+具体说：对每个 $(i, t)$，模型输出 $N$ 维概率向量 $\mathbf{P}_{i,t} \in \Delta^{N-1}$；训练 label 是经验占比 $\hat{q}_{ij,t} = F_{ij,t} / O_{i,t}$，其中 $O_{i,t} = \sum_j F_{ij,t}$ 是总流出。损失是标准的加权交叉熵：
+
+$$
+\mathcal{L}(\boldsymbol{\theta})
+= - \sum_{t=1}^{T} \sum_{i \in \mathcal{I}_{\text{train}}} \sum_{j=1}^{N}
+   F_{ij,t} \log P(j \mid i, t;\, \boldsymbol{\theta}),
+\tag{1}
+$$
+
+其中 $\mathcal{I}_{\text{train}}$ 是训练原点集合（1,725 个网格的 87%；剩余 13% 留作验证；见 §2.11）。$F_{ij,t}$ 作权重让高频 OD 对在 loss 里贡献更大 —— 这等价于在每原点的选择分布上做多项对数似然。
+
+公式 (1) 跟一个多项选择模型的负对数似然完全相同（在该模型里，每一原点 $i$ 在小时 $t$ 的 $O_{i,t}$ 个通勤者各自独立选择目的地）。我们在 §2.7 利用这个对偶身份。本节后续给出 $P(j \mid i, t; \boldsymbol{\theta})$ 的具体参数化。
+
+## 2.3 空间图与节点特征
+
+**空间图**。我们构造固定的无向图 $\mathcal{G} = (\mathcal{V}, \mathcal{E})$，其中 $\mathcal{V} = \{1, \ldots, N\}$ 索引覆盖大伦敦的 1 公里网格。两个网格之间有边当且仅当它们的中心欧氏距离小于 1.5 公里。结果有 13,180 条有向边（平均出度 7.6）；每个节点添加自环以保证孤立网格在邻居聚合下不消失。这个图是**静态的**：边不随时间变化。我们选用固定地理邻接而非数据驱动学出来的图（如 Wu et al. 2019; Lan et al. 2022），是出于两点考虑 —— 在聚合观测下保持可识别性（§2.8），并保证图结构能直接迁移到其他城市。
+
+**静态节点特征** $\mathbf{X}^{\mathrm{static}} \in \mathbb{R}^{N \times F_{s}}$（$F_s = 22$）。每个网格计算时不变属性：
+
+- 来自 OpenStreetMap（Boeing, 2017）的 9 类 POI 数；
+- 来自 BRES 2024 的 8 类按行业就业数；
+- 来自 Census 2021 的居住人口；
+- 交通基础设施 flag（是否有铁路站、地铁站）。
+
+所有特征跨网格做 z-score 标准化。
+
+**动态节点特征** $\mathbf{X}^{\mathrm{dyn}} \in \mathbb{R}^{T \times N \times F_{d}}$（$F_d = 5$）。每个 (小时, 网格)：
+
+- TomTom 按 borough 和 hour-of-day 的拥堵比，映射到网格（z-score）；
+- 小时目的地入流 $\sum_i F_{ij,t}$（z-score）—— 取自同一个 OD 张量但只作为编码器的解释变量；
+- 排队残留占位项（训练时为 0；反事实模拟时填入用于承载小时间拥堵延滞）；
+- 正弦/余弦时刻编码 $(\sin(2\pi t / T), \cos(2\pi t / T))$。
+
+让静态特征保持静态、**不**沿 $T$ 轴复制 —— 这是一个架构先验：编码器输入 25 维里有 22 维实质上不在小时尺度变化，把它们喂给时间机制是浪费容量。我们在 §2.4 讨论这个双分支选择带来的后果。
+
+**通勤时间矩阵**。对每个 mode $m \in \{\text{开车}, \text{公交}, \text{步行}\}$，预先计算按分钟的 mode 特定通勤时间矩阵 $t_{ij}^{(m)} \in \mathbb{R}^{N \times N}$：
+
+- $t_{ij}^{(\text{开车})}$：用 OSMnx（Boeing, 2017）算的 OS Open Roads 自由流开车时间；范围 0–68 分钟，中位 32.5 分钟。
+- $t_{ij}^{(\text{公交})}$：基于欧氏距离的分段线性近似 —— $d_{ij} < 3$ 公里时 12 km/h，否则 25 km/h + 8 分钟等车 / 换乘开销；范围 0–150 分钟，中位 59 分钟。后续工作我们计划用 `r5r` GTFS 路径替代；详见 §2.11。
+- $t_{ij}^{(\text{步行})}$：$d_{ij} / 5\,\mathrm{km/h}$，180 分钟封顶；中位 180 分钟（因为伦敦大部分 OD 对超过 15 公里）。
+
+成对的 $\log d_{ij}$ 矩阵作为独立的距离衰减协变量。
+
+**劳工市场匹配**。$\mathrm{OccMatch}_{ij}$ 是原点 $i$ 居民 SOC9 职业分布（Census 2021）与目的地 $j$ 行业隐含职业需求（Pellegrini & Fotheringham, 2002）的余弦相似度，预先一次性算出。
+
+## 2.4 阶段一 —— 双路时空编码器
+
+编码器把 $(\mathbf{X}^{\mathrm{static}}, \mathbf{X}^{\mathrm{dyn}}, \mathcal{E})$ 映射到每个 $(j, t) \in \{1, \ldots, N\} \times \{1, \ldots, T\}$ 的目的地吸引力标量 $V_{j,t}$。它有三个组件 —— 静态分支、动态分支、门控融合。
+
+**静态分支**。两层 GraphSAGE（Hamilton et al., 2017），均值聚合：
+
+$$
+\mathbf{h}_{i}^{(\ell+1)}
+= \sigma\!\left( W_{\mathrm{self}}^{(\ell)} \mathbf{h}_{i}^{(\ell)}
+   + W_{\mathrm{nb}}^{(\ell)} \frac{1}{|\mathcal{N}(i)|} \sum_{j \in \mathcal{N}(i)} \mathbf{h}_{j}^{(\ell)} \right),
+\quad \ell = 0, 1,
+\tag{2}
+$$
+
+其中 $\sigma$ 是 ReLU，$\mathcal{N}(i)$ 是 $i$ 的邻居（含自环），$\mathbf{h}_{i}^{(0)} = \mathbf{X}^{\mathrm{static}}_{i}$。两层给出每个目的地两跳的感受野。输出 $\mathbf{h}^{\mathrm{static}} \in \mathbb{R}^{N \times d}$（$d = 32$）编码"长期目的地吸引力"—— POI 组合、就业密度、交通基础设施，以及它们的两跳空间溢出。
+
+**动态分支**。对每个小时 $t$，把 $\mathbf{X}^{\mathrm{dyn}}_{t}$ 喂进两层 GraphSAGE (2)，得到 24 个隐藏状态 $\{\tilde{\mathbf{h}}_{t}\}_{t=0}^{23}$。把它们沿时间轴堆叠后并行喂给两个时间机制：
+
+- **门控循环单元 (GRU)** 沿 $t$ 单向扫描：$\mathbf{h}_{t}^{\mathrm{gru}} = \mathrm{GRU}(\tilde{\mathbf{h}}_{t}, \mathbf{h}_{t-1}^{\mathrm{gru}})$（Cho et al., 2014）。这承载小时间序列依赖 —— 9 点的状态继承 0–8 点的信息，模型用这个表示**累积/滞留效应**（比如 8 点高峰拥堵怎么影响 9 点可达性）。
+- **多尺度时序卷积块**：三个并行的因果一维卷积，核大小 3、5、7，concat 后线性投影。循环 padding 让模型把 24 小时当周期序列。三种核宽抓不同时段尺度的规律。
+
+两路输出 concat 后线性变换得到 $\mathbf{h}^{\mathrm{dyn}} \in \mathbb{R}^{T \times N \times d}$。
+
+**门控融合**。每个 $(t, j)$ 一个标量门：
+
+$$
+g_{j,t} = \sigma\!\left( \mathbf{w}^{\top} [\mathbf{h}_{j}^{\mathrm{static}};\, \mathbf{h}_{j,t}^{\mathrm{dyn}}] \right) \in [0, 1],
+\tag{3}
+$$
+
+把两个表示加权组合：
+
+$$
+\mathbf{h}_{j,t} = g_{j,t} \cdot \mathbf{h}_{j}^{\mathrm{static}}
+                + (1 - g_{j,t}) \cdot \mathbf{h}_{j,t}^{\mathrm{dyn}},
+\tag{4}
+$$
+
+最后线性层压成标量 $V_{j,t} = \mathbf{w}_{V}^{\top} \mathbf{h}_{j,t}$。然后我们对 $V_{j,t}$ 在所有 $(j, t)$ 上联合做 z-score 归一化，强制零均值、单位标准差；这锚住了 $V$ 否则不可识别的尺度，是深度多项选择模型的标准识别技巧（Wang & Klabjan, 2018）。
+
+门控融合让模型对每个 (小时, 目的地) 单独决定**主要看长期吸引力还是当下小时信号**。实际训练后，门值在半夜接近 1（静态特征主导），在高峰小时常常在 0.5 附近（动态入流贡献独立信息）。
+
+编码器约 33,000 个参数。
+
+## 2.5 阶段一 —— 行为选择层（mode × 收入层 混合）
+
+我们把通勤者沿两个**可观测**维度区分异质性：
+
+- **出行 mode** $m \in \{\text{开车}, \text{公交}, \text{步行}\}$，原点 $i$ 的原点级 mode share $\pi_m^{\mathrm{origin}}(i)$ 来自 Census 2011 *Method of travel to work* 聚合到 1 公里网格；
+- **收入层** $k \in \{1, 2, 3\}$（低 / 中 / 高），原点 $i$ 的层比例 $\pi_k(i)$ 来自 IMD 2019 收入分数（CLG, 2019）。
+
+**距离感知的可行集**。沿用可行集生成（choice-set generation）文献（Manski, 1977；Ben-Akiva & Boccara, 1995）的做法，我们把步行选项进一步限制在可行距离内。具体说，构造**对级** mode share $\pi_m(i, j)$ 满足 $\pi_{\text{步行}}(i, j) = 0$ 当 $d_{ij} \geq 5$ 公里，移除的份额按比例重分给两种机动 mode：
+
+$$
+\pi_{m}(i, j) = \begin{cases}
+\pi_{m}^{\mathrm{origin}}(i)                                    & \text{if } d_{ij} < 5 \text{ km}, \\
+\pi_{m}^{\mathrm{origin}}(i)\,\dfrac{1}{1 - \pi_{\text{步行}}^{\mathrm{origin}}(i)} & \text{if } d_{ij} \geq 5 \text{ km}, m \neq \text{步行}, \\
+0                                                                & \text{if } d_{ij} \geq 5 \text{ km}, m = \text{步行}.
+\end{cases}
+\tag{5}
+$$
+
+这个限制有两个动机。第一，伦敦步行通勤份额（约 11%）集中在短距离出行 —— 长距离步行经验上极少。第二，它通过把 $\beta_{t,\text{步行}}$ 的估计锚定在步行实际可行的 OD 子集上，改善了步行时间系数的可识别性；详见 §2.8。
+
+**profile 特定系统效用**。原点 $i$ 的每个 (mode, 层) profile 对候选目的地 $j$ 在小时 $t$ 有自己的系统效用：
+
+$$
+V_{ij,t}^{(m,k)}
+= \alpha\, V_{j,t}
++ \beta_{t,m,k}\, t_{ij}^{(m)}
++ \gamma\, \log d_{ij}
++ \delta_{k}\, \mathrm{OccMatch}_{ij}.
+\tag{6}
+$$
+
+各项含义：
+
+- $V_{j,t}$ 来自 (4)；$\alpha = 1$ 是固定 buffer（GNN 吸收尺度，见 §2.8）。
+- $\beta_{t,m,k} = \beta_{t,m} \cdot \kappa_{k}$ 把 mode 和层效应在时间敏感度上做因子分解。$\beta_{t,m}$ 形状 $(T, M)$（每小时、每 mode）；$\kappa_{k}$ 是层特定的乘性标量。约束 $\kappa_{1} = 1$（锚定）+ $\kappa_{k > 1} = 1 + \mathrm{softplus}(\rho_{k})$ 强制单调不减。时间敏感度结构上非正：$\beta_{t,m} = -\mathrm{softplus}(\eta_{t,m})$。
+- $\gamma = -\mathrm{softplus}(\zeta)$：单一距离摩擦系数（负值）。
+- $\delta_{k}$：层特定的劳工匹配系数，$\delta_{1} = 0$ 锚定，$\delta_{k > 1}$ 自由。
+
+**选择概率**。每个通勤者对每个候选目的地 $j$ 计算 (6)，加上独立的 Type-1 极值误差 $\varepsilon$，选择最大效用的目的地。McFadden (1974) 经典结果给出单一 (mode, 层) profile 下的闭式 softmax：
+
+$$
+P(j \mid i, t, m, k) = \frac{\exp(V_{ij,t}^{(m,k)})}{\sum_{j'=1}^{N} \exp(V_{ij',t}^{(m,k)})},
+\tag{7}
+$$
+
+群体级目的地概率对 (mode, 层) profile 分布做 marginalize：
+
+$$
+P(j \mid i, t) = \sum_{m=1}^{M} \sum_{k=1}^{K} \pi_m(i, j)\, \pi_k(i)\, P(j \mid i, t, m, k).
+\tag{8}
+$$
+
+实现上我们对 $M \cdot K = 9$ 个内部 softmax 用增量 logsumexp 累加，避免实例化 $(T, N, N, M, K)$ 张量。
+
+## 2.6 阶段二 —— 基于代理的部署（含拥堵反馈）
+
+阶段一训练得到的参数被部署到一个群体级 ABM 模拟器，含显式的拥堵反馈循环。每个合成 agent $n$ 有属性 $(i_n, t_n, m_n, k_n)$ —— 原点网格、出发小时、出行 mode、收入层 —— 从经验联合分布 $(\pi_m(i, \cdot), \pi_k(i))$ 抽取。部署分 5 个子步骤：
+
+**子步 2a —— 初始效用评估（自由流）**。对每个候选工作地 $j$，agent $n$ 计算
+
+$$
+U_{nj} = V_{i_n j, t_n}^{(m_n, k_n)}\big[t_{ij}^{(m)} \!\leftarrow\! t_{ij}^{(m), \mathrm{free}}\big]
+       + \varepsilon_{nj},
+\quad \varepsilon_{nj} \overset{\mathrm{iid}}{\sim} \mathrm{Gumbel}(0, 1),
+\tag{9}
+$$
+
+并选择 $j_n^{*} = \arg\max_j U_{nj}$。注意 (9) 中 $V_{i_n j, t_n}^{(m_n, k_n)}$ 用的是**自由流**通勤时间 $t_{ij}^{(m), \mathrm{free}}$，跟训练时（§2.7）的约定相同。Gumbel-max trick（McFadden, 1974）保证：把 $N_{\mathrm{agents}}$ 个通勤者的个体选择聚合后，期望意义上重现 softmax 分布 (7) —— 跟训练目标闭环。
+
+**子步 2b —— 流量聚合**。把个体选择聚合成预测的小时目的地入流 $\widehat{F}_{j,t} = \sum_{n: t_n = t} \mathbb{1}\{j_n^* = j\}$。
+
+**子步 2c —— BPR 拥堵估计**。对每个 (原点, 目的地, 小时, mode = 开车)，应用 Bureau of Public Roads 体积-延迟函数（Beckmann et al., 1956）：
+
+$$
+t_{ij,t}^{(\text{开车}), \mathrm{cong}}
+= t_{ij}^{(\text{开车}), \mathrm{free}}
+  \cdot \big(1 + a (\widehat{F}_{j,t} / C_j)^b \big),
+\qquad a = 0.15,\; b = 4,
+\tag{10}
+$$
+
+其中 $C_j$ 是每网格的容量代理（工作地密度 × 每小时车当量容量因子）。公交和步行通勤时间在本公式下不受拥堵影响。BPR 系数封顶 3.0，避免严重过饱和下迭代爆掉。
+
+**子步 2d —— 拥堵下重新评估**。Agent 用 (10) 给出的 $t_{ij,t}^{(\text{开车}), \mathrm{cong}}$ 替换 (9) 中的 $t_{ij}^{(\text{开车}), \mathrm{free}}$，重新计算效用并重选 $j_n^*$。子步 2b–2d 迭代到 $\widehat{F}_{j,t}$ 跨迭代变化 < 0.5% 或最多 10 次（典型收敛 5–8 次）。
+
+**子步 2e —— 最终输出**。固定点流量张量 $\widehat{F}_{ij,t}^{*}$ 和均衡拥堵通勤时间矩阵 $t_{ij,t}^{(\text{开车}), *}$ 作为部署输出报告。
+
+**为什么训练和部署对 $t$ 处理不同**。训练时（§2.7）我们只用自由流 $t_{ij}^{(m), \mathrm{free}}$ 作为 (6) 的输入，$\beta_{t,m}$ 反推为效用对**自由流**通勤时间的敏感度。训练 label $F_{ij,t}$ 本身**反映了通勤者在真实世界拥堵条件下的选择**，所以 $\beta_{t,m}$ 隐式吸收了 2019 年伦敦实际通勤者经历的平均拥堵水平 —— 但**输入按约定是自由流**。部署时（§2.6），BPR 循环 (10) 显式把 $t$ 重算为预测流量的函数，**用同一个 $\beta_{t,m}$**。这样分离有两个好处：(i) 训练损失 (1) 是干净的多项似然，没有内部 fixed point，保留 $\beta$ 的 MLE 渐近性质；(ii) 部署时 $\beta$ 在自由流和拥堵两种条件下都有定义良好的解释（自由流时间敏感度），因为唯一区别是 $\beta \cdot t$ 里 $t$ 是哪个版本。我们避免了 "所有阶段必须用同一个 $t$" 视角带来的同时性问题（Sheffi, 1985）。
+
+**反事实评估**。反事实就是扰动输入然后重跑两阶段。对**原点侧**政策（如在 OOC 加 65,000 个就业，§2.9），我们修改受影响网格的 $\mathbf{X}^{\mathrm{static}}$，用训练好的编码器重算干预下的 $V_{j,t}'$，用相同的训练好的 $(\beta, \gamma, \delta, \kappa)$ 重新模拟 agent 决策和 BPR。对**时间侧**政策（如 50% 早高峰负荷移到 shoulder 时段），同样扰动 $\mathbf{X}^{\mathrm{dyn}}$。**行为系数在干预下不重新估计** —— 这是混合框架的识别假设（Schölkopf et al., 2021，单组件不变性）：选择**机制**是结构性的、稳定的；只有**机制的输入**变化。每个场景报告 BPR 开 / 关两版结果，两者的差距读取拥堵反馈对政策效果的衰减幅度。
+
+## 2.7 训练：端到端交叉熵
+
+完整参数向量 $\boldsymbol{\theta} = (\Theta_{\mathrm{enc}}, \beta, \kappa, \gamma, \delta)$ 把约 33,000 个编码器权重 $\Theta_{\mathrm{enc}}$ 和 76 个行为系数 $(\beta, \kappa, \gamma, \delta)$ 合在一起。我们用随机梯度下降最小化交叉熵损失 (1) 来拟合 $\boldsymbol{\theta}$。具体用 AdamW（Loshchilov & Hutter, 2019），分两组参数：编码器权重学习率 $10^{-3}$、weight decay $10^{-4}$；行为系数学习率 $10^{-2}$、weight decay 0。
+
+**ML / 计量经济学 对偶性**。(1) 中的负交叉熵**逐项就是**选择模型 (8) 的负多项对数似然：
+
+$$
+- \mathcal{L}(\boldsymbol{\theta})
+= \sum_{i,j,t} F_{ij,t}\, \log P(j \mid i, t;\, \boldsymbol{\theta})
+= \log \mathrm{Multinomial}(\mathbf{F}_{i,\cdot,t} \mid O_{i,t}, P(\cdot \mid i, t)),
+\tag{11}
+$$
+
+所以通过反向传播得到的梯度下降估计**就是最大似然估计**，继承标准 MLE 渐近性质（一致性、渐近正态；Bentz & Merunka, 2000）。这个对偶性正是 $\beta$, $\gamma$, $\delta$ 能分别被读为时间、距离、劳工匹配负效用系数的依据。
+
+**优化细节**。原点按 87% / 13% 切分为训练池和验证池。(1) 的交叉熵只在训练原点上算；验证池用于早停（patience 30 epoch）和性能指标报告。所有参数联合应用范数 1.0 的梯度裁剪。每次训练运行 200 epoch 单 seed；我们报告跨 3 个 seed 的均值 ± 标准差。
+
+## 2.8 可识别性与参数约束
+
+聚合流量数据并不能识别我们想反推的所有参数。我们用三个结构性约束（而非数据估计）处理三个识别问题：
+
+**(i) $V_{j,t}$ 的尺度**。乘积 $\alpha \cdot V_{j,t}$ 只在某个正缩放因子之下可识别。我们固定 $\alpha = 1$（buffer，不是参数）+ 对 GNN 输出做 z-score 归一化，让 GNN 内部吸收所有尺度变化。这是深度多项选择模型的标准做法（Wang & Klabjan, 2018；条件 logit 识别见 Train, 2009 §3）。
+
+**(ii) 步行时间系数 $\beta_{t,\text{步行}}$**。在 1,725 × 1,725 个 OD 对里，步行时间矩阵 $t_{ij}^{(\text{步行})} = d_{ij} / 5\,\mathrm{km/h}$ 在步行可行的小子集（$d_{ij} \lesssim 5$ 公里）跟 $\log d_{ij}$ 严重共线。(5) 中的距离感知可行集限制通过把不可行步行从模型中完全移除来处理这个问题。限制后，$\beta_{t,\text{步行}}$ 仅从 walkable 子集中识别，跨随机重启稳定收敛到 $\approx -0.05$。我们把这个估计解读为短距离步行通勤的时间负效用系数（参 Wardman, 2014 关于步行 VOT 随出行时长亚线性变化的发现）。
+
+**(iii) 第 2 / 第 3 收入层 collapse**。实际数据上，IMD 收入层 2 和 3 的 $\kappa$ 和 $\delta$ 在多次随机重启后稳定收敛到相同值（$\kappa_2 = \kappa_3 \approx 1.97$，$\delta_2 = \delta_3 \approx 0.22$）。这反映了内伦敦 IMD 收入分数的格子间变异有限。我们把这个 collapse 报告为经验发现 + 数据分辨率限制；要区分层 2 和层 3，需要个体级收入数据（北京复制阶段计划的）。
+
+剩余的 76 个 RUM 参数 + 约 33,000 个编码器参数对约 570 万个观测 (原点, 目的地, 小时) cell —— 强 over-identified。
+
+## 2.9 反事实场景设计
+
+我们用两个跨越城市干预空间 / 时间维度的政策场景评估框架：
+
+**场景 A —— Old Oak Common 就业集群**。一个空间干预，建模为对覆盖 OOC 拟建就业集群（Hammersmith / Ealing 边界）的 9 个 1 公里网格均匀加 65,000 个就业。模拟时，这 9 个网格在 $\mathbf{X}^{\mathrm{static}}$ 中的就业数特征按比例增加；训练好的编码器在干预下重算 $V_{j,t}$；agent 用相同行为系数重新跑目的地选择。
+
+**场景 B —— 弹性办公错峰**。一个时间干预，建模为把 7–9 点早高峰通勤负荷的 50% 移到 10–15 点 shoulder 窗口。具体地，$\mathbf{X}^{\mathrm{dyn}}$ 的小时入流特征在高峰时段乘 0.5、在 shoulder 时段按比例增加，保持 24 小时总量不变。编码器重算 $V_{j,t}$；agent 重跑目的地选择。
+
+每个场景报告两个变化：网格级 Hansen 可达性的变化
+
+$$
+A_i = \sum_{j} E_j \exp(-|\beta_{\text{开车}}|\, t_{ij}^{(\text{开车})}),
+\tag{12}
+$$
+
+其中 $E_j$ 是 $j$ 的就业数；以及通勤流不平等（用人口加权可达性分布的 Gini 系数和 Palma ratio 度量）。我们同时在自由流 $t_{ij}^{(\text{开车})}$ 和 BPR 用户均衡拥堵分配（Beckmann et al., 1956）下报告结果；两种设定夹住"无反馈"和"含反馈"两种反事实读取。
+
+## 2.10 性能指标
+
+聚合预测性能由 7 个互补指标在验证池原点上计算：
+
+- **Common Part of Commuters (CPC)**（Lenormand et al., 2012）：
+
+$$
+\mathrm{CPC} = \frac{2 \sum_{i,j,t} \min(\widehat{F}_{ij,t}, F_{ij,t})}{\sum_{i,j,t} \widehat{F}_{ij,t} + \sum_{i,j,t} F_{ij,t}}, \quad \in [0, 1].
+\tag{13}
+$$
+
+- **均方根误差 (RMSE)**：cell 级流量 $\sqrt{\mathrm{mean}((\widehat{F}_{ij,t} - F_{ij,t})^2)}$。
+- **平均绝对误差 (MAE)**：$\mathrm{mean}(|\widehat{F}_{ij,t} - F_{ij,t}|)$。
+- **Pearson 相关**：预测流量向量与观测向量之间的线性相关。
+- **Spearman 排序相关**：rank-stable 变体。
+- **KL 散度** $D_{\mathrm{KL}}(F_{ij,t} / O_{i,t} \,\|\, P(j \mid i, t))$ 在活跃 (原点, 小时) 对上平均。
+- **top-10 目的地准确率**：原点的实际 top-10 目的地中被模型也预测为 top-10 的平均比例。
+
+CPC 是 OD 流量文献最常见的 headline 指标（Lenormand et al., 2012；Simini et al., 2021）；其他 6 个提供互补视角。CPC 对总量错配宽容、对单 cell 量级不敏感；RMSE 重罚高频出错；KL 强调每原点的目的地分布拟合；top-K 准确率直接测试模型识别高量目的地的能力。
+
+## 2.11 实现、可复现性与软件
+
+完整 pipeline 用 PyTorch 2.0 实现，没用任何外部图神经网络库（我们写了一个轻量级 `_SAGELayer`，CPU 和 CUDA 都支持）。训练在单张 NVIDIA T4 (16 GB) 上跑双路 + mixture 变体（伦敦规模数据每 epoch < 6 分钟），baseline 在 CPU 上跑。随机 seed 固定（PyTorch + NumPy），每个实验跑 3 次随机重启。所有代码、配置、训练好的 checkpoint 存放在 \[匿名仓库 URL\] 供 review。Census、IMD、OSM-POI、BRES、TomTom、GEODS 各源的数据 ingestion 脚本都提供 —— 整个流程从公开数据完全可复现。
+
+**当前实现的限制**。三点要明确说：
+
+- $t_{ij}^{(\text{公交})}$ 是基于欧氏距离的分段线性近似，不是真正的 GTFS 路径计算。后续工作我们计划用 `r5r` GTFS 最短路矩阵替代；北京复制阶段（Paper B）将有公交车实时位置数据 + 高德路径 API，能给出小时级真实公交时间，比当前近似精度大幅提高。
+- Mode share 来自 Census 2011（我们没有 2019 GEODS OD 对应的 MSOA 级 mode share）。2011 / 2019 不匹配在聚合层面约 10%，作为限制文档化。
+- 场景 A 和 B 的 BPR 用户均衡用的是基于网格级工作地密度的原点侧容量代理，不是 link 级容量，所以最好读为"数量级拥堵敏感性"而非字面意义的交通均衡预测。
+
+---
+
+**主要参考文献**（完整列表见正式论文）。
+
+Beckmann, M., McGuire, C. B., Winsten, C. B. (1956). *Studies in the Economics of Transportation.* Yale University Press.
+Ben-Akiva, M., Boccara, B. (1995). *Discrete choice models with latent choice sets.* International Journal of Research in Marketing, 12(1), 9–24.
+Bentz, Y., Merunka, D. (2000). *Neural networks and the multinomial logit for brand choice modelling: A hybrid approach.* Journal of Forecasting, 19(3), 177–200.
+Boeing, G. (2017). *OSMnx: New methods for acquiring, constructing, analyzing, and visualizing complex street networks.* Computers, Environment and Urban Systems, 65, 126–139.
+Cho, K. et al. (2014). *Learning phrase representations using RNN encoder-decoder for statistical machine translation.* EMNLP.
+Department for Communities and Local Government (2019). *English indices of deprivation 2019.*
+Hamilton, W., Ying, Z., Leskovec, J. (2017). *Inductive representation learning on large graphs.* NeurIPS.
+Lan, S. et al. (2022). *DSTAGNN: Dynamic spatial-temporal aware graph neural network for traffic flow forecasting.* ICML.
+Lenormand, M., Picornell, M., Cantú-Ros, O. G., Tugores, A., Louail, T., Herranz, R., Barthelemy, M., Frías-Martínez, E., Ramasco, J. J. (2012). *Cross-checking different sources of mobility information.* PLoS ONE, 9(8), e105184.
+Loshchilov, I., Hutter, F. (2019). *Decoupled weight decay regularization.* ICLR.
+Manski, C. (1977). *The structure of random utility models.* Theory and Decision, 8(3), 229–254.
+McFadden, D. (1974). *Conditional logit analysis of qualitative choice behavior.* In *Frontiers in Econometrics*, ed. P. Zarembka.
+Pellegrini, P. A., Fotheringham, A. S. (2002). *Modelling spatial choice: A review and synthesis in a migration context.* Progress in Human Geography, 26(4), 487–510.
+Schölkopf, B. et al. (2021). *Toward causal representation learning.* Proceedings of the IEEE, 109(5), 612–634.
+Simini, F., Barlacchi, G., Luca, M., Pappalardo, L. (2021). *A Deep Gravity model for mobility flows generation.* Nature Communications, 12, 6576.
+Train, K. (2009). *Discrete Choice Methods with Simulation*, 2nd ed. Cambridge University Press.
+Wang, S., Klabjan, D. (2018). *An End-to-End Deep Reinforcement Learning-Based Intelligent Agent for Discrete Choice.* arXiv:1810.04644.
+Wardman, M. (2014). *Valuing convenience in public transport.* ITF Round Tables, OECD Publishing.
+Wu, Z., Pan, S., Long, G., Jiang, J., Zhang, C. (2019). *Graph WaveNet for deep spatial-temporal graph modeling.* IJCAI.

@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Spatial regeneration vs flexible work: a deep choice model for London commuting policy</title>
+<style>
+@page {
+    size: A4;
+    margin: 22mm 22mm 22mm 22mm;
+    @bottom-center {
+        content: counter(page);
+        font-family: 'Times New Roman', 'SimSun', serif;
+        font-size: 10pt;
+        color: #333;
+    }
+}
+
+body {
+    font-family: 'Times New Roman', 'SimSun', '宋体', serif;
+    font-size: 11pt;
+    line-height: 1.55;
+    color: #1a1a1a;
+    max-width: 165mm;
+    margin: 0 auto;
+}
+
+h1 {
+    font-size: 20pt;
+    line-height: 1.25;
+    margin: 0 0 16pt 0;
+    text-align: left;
+}
+
+h2 {
+    font-size: 14pt;
+    margin-top: 20pt;
+    margin-bottom: 8pt;
+    border-bottom: 0.4pt solid #888;
+    padding-bottom: 3pt;
+}
+
+h3 {
+    font-size: 12pt;
+    margin-top: 14pt;
+    margin-bottom: 5pt;
+    font-style: italic;
+}
+
+h4 {
+    font-size: 11pt;
+    margin-top: 10pt;
+    margin-bottom: 4pt;
+}
+
+p {
+    text-align: justify;
+    margin: 6pt 0;
+    text-indent: 0;
+}
+
+ul, ol {
+    margin: 5pt 0;
+    padding-left: 22pt;
+}
+
+li {
+    margin: 3pt 0;
+    text-align: justify;
+}
+
+table {
+    border-collapse: collapse;
+    margin: 12pt auto;
+    font-size: 9.5pt;
+    page-break-inside: avoid;
+}
+
+th, td {
+    border: 0.4pt solid #444;
+    padding: 4pt 7pt;
+    vertical-align: top;
+}
+
+th {
+    background-color: #efefef;
+    font-weight: 600;
+    text-align: left;
+}
+
+td {
+    text-align: left;
+}
+
+code {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 9.5pt;
+    background: #f6f6f6;
+    padding: 1pt 3pt;
+    border-radius: 2pt;
+}
+
+pre {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 9pt;
+    background: #f6f6f6;
+    padding: 8pt;
+    overflow-x: auto;
+    page-break-inside: avoid;
+}
+
+blockquote {
+    border-left: 2pt solid #aaa;
+    padding-left: 10pt;
+    margin-left: 0;
+    color: #444;
+    font-style: italic;
+}
+
+hr {
+    border: 0;
+    border-top: 0.4pt solid #888;
+    margin: 14pt 0;
+}
+
+em { font-style: italic; }
+strong { font-weight: 700; }
+
+/* Section separators (---) become hr */
+.abstract {
+    background: #f9f9f9;
+    padding: 10pt 14pt;
+    border-left: 2pt solid #555;
+    margin: 14pt 0 16pt 0;
+    font-size: 10pt;
+}
+
+/* Math rendering */
+.MathJax_Display { margin: 6pt 0; }
+mjx-container {
+    font-size: 100% !important;
+}
+
+/* Figures: never exceed page width */
+img {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 12pt auto;
+}
+figure {
+    page-break-inside: avoid;
+    margin: 12pt 0;
+}
+figcaption, p > strong:first-child {
+    font-size: 9pt;
+    color: #333;
+}
+</style>
+<script>
+MathJax = {
+  tex: {
+    inlineMath: [['$', '$'], ['\\(', '\\)']],
+    displayMath: [['$$', '$$'], ['\\[', '\\]']],
+    processEscapes: true,
+    tags: 'none'
+  },
+  options: {
+    renderActions: {
+      addMenu: [],
+      checkLoading: []
+    }
+  },
+  startup: {
+    pageReady: () => {
+      return MathJax.startup.defaultPageReady().then(() => {
+        document.body.dataset.mathjaxReady = "1";
+      });
+    }
+  }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+</head>
+<body>
+<h1 id="spatial-regeneration-vs-flexible-work-a-deep-choice-model-for-london-commuting-policy">Spatial regeneration vs flexible work: a deep choice model for London commuting policy</h1>
+
+<p><em>Draft for *Journal of Transport Geography*.</em></p>
+
+<hr />
+
+<h2 id="abstract">Abstract</h2>
+
+<p>Two contrasting transport-policy debates dominate post-pandemic London: large spatial regeneration around new transport hubs (notably the Old Oak Common HS2 / Crossrail interchange, planned for 65 000 jobs) and the wider temporal demand-shaping effect of flexible-working arrangements emphasised in the <em>Mayor&#8217;s Transport Strategy 2018</em>. We evaluate the <strong>accessibility-distribution</strong> consequences of both with a single tool: a deep choice model in which the destination-attractiveness term of a multinomial logit is parameterised by a graph neural network over the 1 km London grid, with the GNN weights and behavioural coefficients estimated jointly by maximum likelihood on the full Census 2021 origin-destination table (1.21 million commuters). Counterfactual analysis couples the calibrated model to a BPR road-congestion equilibrium and to a mixed-logit Monte Carlo simulation that draws heterogeneous value-of-time coefficients from public WebTAG / Wardman tables. The two scenarios diverge on accessibility distribution: the Old Oak Common spatial intervention is <strong>regressive</strong> (Gini +1.26 %; two thirds of gross accessibility gain absorbed by congestion); flexible work is <strong>progressive</strong> (peak-hour mean travel time −3.7 %, accessibility +10.2 %, Gini −0.011). A 360-experiment reliability scan over synthetic clusters shows that the deep choice model is reliable (|Jensen bias| &lt; 5 %) for only 12 % of intervention configurations, in caveat range (5–20 %) for 31 %, and unreliable (&gt;20 %) for 56 % — primarily depending on cluster baseline employment. The OOC scenario falls in the caveat range, so its magnitude is reported with a ±25 % uncertainty band; the qualitative direction is robust.</p>
+
+<p><strong>Keywords</strong>: commuting; deep choice model; accessibility inequality; flexible work; Old Oak Common; London transport policy.</p>
+
+<hr />
+
+<h2 id="1-introduction">1. Introduction</h2>
+
+<p>The <em>Mayor&#8217;s Transport Strategy 2018</em> commits London to two simultaneous transformations whose distributional consequences are not jointly assessed in current practice. <strong>Spatially</strong>, the <em>London Plan 2021</em> concentrates the next 638 000 jobs into a small number of Opportunity Areas, the largest of which is the 650 ha Old Oak Common (OOC) regeneration around the future HS2 / Elizabeth-line interchange — planned for some 65 000 jobs by 2041 (OPDC, 2018). <strong>Temporally</strong>, post-pandemic hybrid working has flattened the morning peak by 20–30 % relative to 2019 (TfL, 2024), and the Mayor&#8217;s <em>Outcome 7</em> explicitly identifies further peak-spreading as a goal. The two policy levers operate on different dimensions of the same commuter decision (where to work; when to travel), but transport-modelling practice typically evaluates them with separate and incompatible toolsets — gravity / land-use-transport interaction models for the former, demand-curve models for the latter.</p>
+
+<p>This paper applies a single tool to both. We calibrate a <strong>deep choice model</strong> of London commuting on the full Census 2021 origin-destination table at 1 km resolution, then ask: what are the accessibility-distribution consequences of (a) +65 000 jobs at OOC and (b) a 50 % shift of peak-hour demand to off-peak? We find that the two interventions are diametrically opposed on inequality measures even though both add aggregate accessibility — a result that, we argue, has direct implications for how London&#8217;s spatial-temporal policy mix should be balanced.</p>
+
+<p>The paper makes three contributions. <em>First</em>, we couple a graph neural network attractiveness term to a multinomial-logit decision in the deep-choice tradition (Wang and Klabjan, 2018; Sifringer <em>et al.</em>, 2020), but extend the family to aggregate-OD calibration on full-Census data — overcoming the individual-choice-record requirement that has restricted prior deep-choice transport applications. <em>Second</em>, we quantify the accessibility-distribution consequences of OOC and of flexible work at city-grid resolution, finding spatial-regressive vs temporal-progressive verdicts. <em>Third</em>, we provide an empirical reliability characterisation — a &#8220;trust map&#8221; indexed by cluster baseline employment and intervention magnitude — that tells practitioners <em>when</em> to trust aggregate-OD-calibrated deep choice forecasts and when to discount magnitudes; this is, to our knowledge, the first such statistical reliability scan published for an aggregate-OD deep-choice model.</p>
+
+<p>Section 2 places the policy questions in context. Section 3 describes the data. Section 4 specifies the model. Section 5 reports calibration and validation. Section 6 reports the two policy scenarios. Section 7 discusses implications.</p>
+
+<hr />
+
+<h2 id="2-context">2. Context</h2>
+
+<h3 id="21-the-mayors-transport-strategy-and-the-post-pandemic-moment">2.1 The Mayor&#8217;s Transport Strategy and the post-pandemic moment</h3>
+
+<p>The <em>Mayor&#8217;s Transport Strategy 2018</em> (MTS 2018) targets 80 % of London trips by walking, cycling or public transport by 2041, supported by Healthy Streets, public transport investment, and new homes-and-jobs delivery. Two structural shifts shape practical attainment. First, hybrid working has moved a substantial share of pre-pandemic peak demand off-peak; TfL Tube ridership at the 2024 peak hour remained at approximately 80 % of the 2019 baseline (TfL, 2024). Second, the <em>London Plan 2021</em> concentrates additional employment into a small number of Mayoral Opportunity Areas, with employment growth heavily clustered (GLA, 2021).</p>
+
+<h3 id="22-old-oak-common-as-a-representative-spatial-intervention">2.2 Old Oak Common as a representative spatial intervention</h3>
+
+<p>OOC is the largest of the Opportunity Areas. The <em>OPDC Local Plan 2018</em> targets 65 600 jobs and 25 500 homes by 2041 around the planned HS2 / Elizabeth-line / Great Western Mainline interchange in north-west London. Policy debate has so far focused on viability, public realm, and displacement of incumbent industrial uses (London Assembly, 2022); the <em>accessibility-distribution</em> consequences for the rest of London — who reaches OOC and who is left behind once road congestion adjusts — have not received quantitative attention at city-grid resolution.</p>
+
+<h3 id="23-flexible-work-as-a-representative-temporal-intervention">2.3 Flexible work as a representative temporal intervention</h3>
+
+<p>MTS 2018 <em>Outcome 7</em> identifies spreading peak demand as an explicit policy goal. TfL has responded since 2022 with flatter season-ticket pricing and off-peak promotion. Whether the marginal benefit of further flexible-working policy is <em>progressive</em> or <em>regressive</em> — that is, whether outer-London under-connected origins gain more or less than inner-London origins — is the analytic question we take on in §6.2.</p>
+
+<h3 id="24-why-a-deep-choice-model">2.4 Why a deep choice model</h3>
+
+<p>Both interventions change the <strong>inputs</strong> of commuter destination choice — the relative attractiveness of cells under spatial change; the relative cost of arrival at different times under temporal change. A model that recovers behavioural decision parameters from observed aggregate commuting can re-compute choice probabilities under perturbed inputs; gravity-style models that fit flow patterns without recovering parameters cannot. We add a graph-neural-network attractiveness term (replacing the hand-coded &#8220;destination size to a power&#8221; of classical gravity) and a mixed-logit Monte Carlo simulation that propagates published value-of-time heterogeneity through the choice mechanism — exposing distributional consequences that aggregate-flow predictions average out.</p>
+
+<hr />
+
+<h2 id="3-data">3. Data</h2>
+
+<p>We work on a 1725-cell, 1 km × 1 km regular grid covering Greater London (EPSG:27700). All inputs are public.</p>
+
+<p><strong>Origin-destination flows.</strong> 2021 OD is the NOMIS <em>ODWP01EW</em> table from Census 2021, restricted to fixed-non-home UK workplaces — 1.21 million London commuters across 196 940 MSOA pairs, disaggregated to the 1-km grid by population-weighted area apportionment. The 1.1 % microsample sometimes used at 1-km resolution (55 072 commuters) is too sparse for borough-level evaluation; we replace it throughout. 2011 OD (used for the §5.3 retrodict) is NOMIS <em>WU03EW</em> (2.14 million commuters), aligned to the 2021 grid via the ONS MSOA-2011 → MSOA-2021 best-fit lookup.</p>
+
+<p><strong>Node features.</strong> 22 features per cell: 8-sector workplace employment and total employment from BRES 2024; resident population from KS101EW Census 2021; 8-category POI counts and totals from OpenStreetMap 2024; subway-station count from TfL Open Data 2024; centroid latitude/longitude.</p>
+
+<p><strong>Travel time and behavioural anchors.</strong> Free-flow car travel time from OSMnx (Boeing, 2017) over the Greater London drive network. Origin Index of Multiple Deprivation (IMD 2019) and destination ASHE workplace earnings (2025) supply the interaction terms. Per-tier value-of-time spread for the mixed-logit simulation is taken from Wardman <em>et al.</em> (2016) and WebTAG TAG Unit A1.3 (DfT, 2024).</p>
+
+<hr />
+
+<h2 id="4-model">4. Model</h2>
+
+<p>Figure 1 summarises the four conceptual steps: observe, learn, simulate, evaluate.</p>
+
+<p><img src="../evaluation_outputs/paper_a/F1_conceptual.png" alt="<strong>Figure 1.</strong> Conceptual framework. (1) We observe London&#8217;s full Census 2021 commute flows on a 1 km grid. (2) The model learns simultaneously what makes a destination cell attractive (a graph-learnt function over local urban features) and how commuters trade off time, distance, wages, and occupation match. (3) We then simulate counterfactuals — adding jobs at one place, or shifting peak demand to off-peak — by perturbing inputs and re-running the calibrated mechanism. (4) We evaluate who gains and who loses access, using population-weighted Gini, Palma and Atkinson indices." /></p>
+
+<h3 id="41-the-deep-choice-model">4.1 The deep choice model</h3>
+
+<p>A commuter at home cell <em>i</em> chooses workplace <em>j</em> by random utility,
+$$ U<em>{ij} = \alpha\, V</em>j + \beta<em>t(i,j)\, t</em>{ij} + \gamma\, \log d<em>{ij} + \delta\, \mathrm{OccMatch}</em>{ij} + \varepsilon<em>{ij}, $$
+with the standard Gumbel error giving the multinomial-logit choice probability $P(j\mid i) = \exp U</em>{ij} / \sum<em>{j&#8217;} \exp U</em>{ij&#8217;}$.</p>
+
+<p>The behavioural coefficients have classical transport-economic interpretations: $\beta<em>t$ is sensitivity to travel time, $\gamma$ a distance-decay, $\delta$ the weight on labour-market matching at the destination. We allow $\beta</em>t$ to vary with observable origin and destination characteristics,
+$$ \beta<em>t(i,j) = \beta</em>t \cdot \bigl(1 + \phi\, z<em>o(i) + \psi\, z</em>w(j)\bigr), $$
+where $z<em>o(i)$ is z-scored origin Index of Multiple Deprivation income and $z</em>w(j)$ z-scored destination ASHE wage — capturing the well-established finding (Wardman <em>et al.</em>, 2016) that higher-income workers and higher-wage destinations show higher value of time.</p>
+
+<p>The destination-attractiveness term $V<em>j$ is <strong>not</strong> a hand-coded &#8220;destination size to a power&#8221; as in classical gravity. It is produced by a graph neural network — a 5-layer GraphSAGE (Hamilton *et al.*, 2017) — that recursively aggregates each cell&#8217;s own 22-dimensional feature vector with the features of its 10 nearest neighbours by free-flow travel time. Each layer applies a learnt non-linear transformation,
+$$ h</em>j^{(\ell+1)} \;=\; \mathrm{ReLU}\Bigl( W<em>{\rm self}^{(\ell)}\, h</em>j^{(\ell)} + W<em>{\rm nbr}^{(\ell)}\, \mathrm{mean}\bigl{h</em>u^{(\ell)} : u \in \mathcal{N}<em>{10}(j)\bigr}\Bigr), \quad V</em>j = w<em>{\rm out}^\top h</em>j^{(L)}, $$
+so $V_j$ is a learnt non-linear function of the neighbourhood&#8217;s urban features rather than a single statistic. The GraphSAGE family is chosen here for its <strong>inductive</strong> property — it forwards under feature interventions $\mathrm{do}(X)$ without retraining — and for its mean-aggregation prior, which matches the smooth spatial structure of urban features at the 1 km scale; in our regime an attention-based GAT alternative underfits (CPC 0.246 vs SAGE 0.343). The choice has direct precedent in Yao <em>et al.</em>&#8217;s (2021) SI-GCN tradition for spatial-interaction modelling.</p>
+
+<h3 id="42-joint-calibration-maximum-likelihood-on-aggregate-census-flows">4.2 Joint calibration: maximum likelihood on aggregate Census flows</h3>
+
+<p>The GNN parameters and the behavioural coefficients are estimated <strong>jointly</strong>, end-to-end, by maximising the multinomial likelihood of observed origin-destination counts:
+$$ \mathcal{L}(\boldsymbol{\theta}, \beta<em>t, \gamma, \delta, \phi, \psi) \;=\; \sum</em>{i \in \mathrm{train}} \sum<em>j F</em>{ij}\,\log P(j \mid i). $$</p>
+
+<p>This is standard MLE on a multinomial logit. The only non-standard step is that observations are aggregate cell counts rather than individual choice records, for which McFadden&#8217;s (1978) sampling-of-alternatives correction makes the gradient over 1725 destinations tractable. Mechanically: each gradient update propagates from the likelihood through the softmax to the behavioural coefficients ($\beta<em>t, \gamma, \delta, \phi, \psi$), and on through $V</em>j$ into all five GNN layers — so the GNN is <strong>not</strong> pre-trained, <strong>not</strong> a fixed weighted sum, and <strong>not</strong> added in as an external prior. It is recovered from data alongside the behavioural parameters in a single optimisation.</p>
+
+<h3 id="43-counterfactual-analysis">4.3 Counterfactual analysis</h3>
+
+<p>We treat the calibrated model as a structural simulator. For a policy scenario that perturbs the input feature vector at a subset of cells $\mathrm{do}(X<em>S = X</em>S^*)$, we re-forward through the calibrated GNN and choice mechanism, holding the recovered behavioural parameters fixed. For car commuters we close the road-congestion loop with the BPR fixed-point (Sheffi, 1985 ch. 5),
+$$ t<em>{ij}^{\rm eq} = t</em>{ij}^{0} \cdot \bigl(1 + 0.15\,(V<em>j^{\rm flow}/C</em>j)^4\bigr), $$
+solved by the method of successive averages.</p>
+
+<p>The validity of this counterfactual rests on two structural assumptions: (i) recovered behavioural parameters are stable population-level preferences that do not respond to the intervention itself (the standard random-utility assumption since McFadden, 1974); (ii) the GNN&#8217;s learnt mapping $V = f_\theta(X)$ is a structural relationship — intervening on $X$ changes $V$ in the same way that nature would, not merely how it correlates with $V$ in the training distribution. We test (ii) empirically in §5.</p>
+
+<h3 id="44-mixed-logit-monte-carlo-for-distributional-analysis">4.4 Mixed-logit Monte Carlo for distributional analysis</h3>
+
+<p>The deterministic forward of §4.3 returns a single $P(j \mid i)$ per origin — implicitly treating all commuters at <em>i</em> as having the same $\beta_t$. This is the IIA assumption of multinomial logit, and it incurs a Jensen-style bias whenever the population is heterogeneous and the policy intervention pushes the choice probability into a curved region of the softmax (Train, 2009 §6.7). For aggregate-flow predictions the bias is small; for <strong>distributional</strong> predictions it can be substantial, because the aggregate response and the distribution of individual responses diverge with population variance.</p>
+
+<p>We address this by drawing a synthetic population of 10 000 London commuters whose marginal income, occupation and residence distributions match ASHE and Census KS101. Each commuter&#8217;s value-of-time coefficient is
+$$ \beta<em>n(j) = \beta</em>t \cdot \bigl(1 + \phi\,z<em>o(i</em>n) + \psi\, z<em>w(j) + \varepsilon</em>n\bigr), \quad \varepsilon<em>n \sim \mathcal{N}!\bigl(0,\sigma^2(\mathrm{tier}</em>n)\bigr), $$
+where the per-tier standard deviation $\sigma$ is <strong>imported from public WebTAG / Wardman</strong> <em>et al.</em> (2016) meta-analytic value-of-time spread. Aggregate Census OD data only identifies the population-mean preferences; the within-population variance must be supplied externally. We do not learn $\sigma$ from our data; we use literature estimates and report sensitivity to the choice (§5.5).</p>
+
+<p>Each commuter then samples a destination from their own softmax, and aggregating across commuters gives a Monte Carlo prediction $\widehat F^{\,\rm MC}<em>{ij}$ directly comparable to the deterministic $\widehat F^{\,\rm det}</em>{ij}$. The empirical Jensen bias
+$$ \mathrm{Bias} \;=\; \Delta\widehat F^{\rm det} - \Delta\widehat F^{\rm MC} $$
+is computed for each policy scenario; we report its statistical distribution in §5.5.</p>
+
+<hr />
+
+<h2 id="5-calibration-and-validation">5. Calibration and validation</h2>
+
+<h3 id="51-spatial-holdout">5.1 Spatial holdout</h3>
+
+<p>We hold out 247 of 1725 origin cells (14 %) from four boroughs chosen <em>ex ante</em> to span London&#8217;s principal urban contexts: Westminster (CBD), Hackney (inner residential), Brent (outer dense), Bromley (outer suburban). The model achieves Common-Part-of-Commuters (CPC; Lenormand <em>et al.</em>, 2012) of <strong>0.343</strong> with 95 % bootstrap CI [0.324, 0.362] (10-seed ensemble; 1000 origin resamples). Against the gravity baseline (CPC 0.170) the bootstrap mean ΔCPC is +0.172 with $P(\mathrm{ours} &gt; \mathrm{gravity}) = 100\%$ across resamples ($p &lt; 10^{-4}$).</p>
+
+<p><img src="../evaluation_outputs/paper_a/F4_per_borough.png" alt="<strong>Figure 2.</strong> Per-borough CPC (10-seed ensemble). The model fits Westminster best (0.475) and Hackney weakest (0.201); horizontal lines mark our overall ensemble CPC and the gravity / radiation baselines." /></p>
+
+<p>The model&#8217;s geographic strengths and weaknesses (Figure 2) are interpretable: it captures CBD employment density best (Westminster), suburban radial flows next (Bromley), and inner non-CBD residential commute patterns least well (Hackney). The Hackney weakness reflects within-cell mode-share heterogeneity and unobserved residential self-selection that aggregate static features cannot resolve.</p>
+
+<h3 id="52-cross-time-generalisation-2011-2021">5.2 Cross-time generalisation: 2011 → 2021</h3>
+
+<p>We retrain the model from scratch on 2011 inputs (NOMIS WU03EW, KS101EW 2011, pre-2012-only TfL stations) and evaluate by forwarding under 2024 inputs to predict observed full-Census 2021 OD: city-wide CPC = <strong>0.56</strong> (in-sample 2011 CPC = 0.71). The 0.71 → 0.56 drop quantifies the irreducible drift in inter-borough commuting structure over a decade, partially confounded by the COVID-19 deflation of 2021 commute volumes in the second-lockdown March 2021 Census.</p>
+
+<h3 id="53-bromley-negative-control-a-single-low-magnitude-case">5.3 Bromley negative control: a single low-magnitude case</h3>
+
+<p>A model-based counterfactual must not &#8220;predict everything goes up&#8221; regardless of intervention. As a single positive case, we apply the intervention machinery to Bromley, whose 2011 → 2024 employment grew only 1.55× (typical of stable suburban areas, below the 1.45× city mean). The model predicts $\Delta$share of +1.46 percentage points; the observed 2011 → 2021 change is +1.26 pp. The predicted/observed ratio is <strong>1.15×</strong>, comfortably within the [0.5, 2.0] tolerance. This is reassuring evidence at one small-magnitude intervention — but a single case is not a characterisation of the model&#8217;s reliability across the policy-relevant input space, which we provide next.</p>
+
+<h3 id="54-recovered-behavioural-coefficients">5.4 Recovered behavioural coefficients</h3>
+
+<p>The calibration recovers a base travel-time coefficient $\beta_t = -0.058$, with destination-wage interaction $\psi = +0.39$, origin-IMD interaction $\phi = -0.30$, and occupation-match coefficient $\delta = +0.69$. With the value-of-time numeraire calibrated to Wardman (2014)&#8217;s RP central commute VOT of £6.5/h, this implies VOT values of £4.49 / £6.59 / £8.23 per hour for low / mid / high wage-tertile destinations — a monotonic income gradient consistent with WebTAG TAG A1.3.</p>
+
+<h3 id="55-empirical-reliability-characterisation-across-the-input-space">5.5 Empirical reliability characterisation across the input space</h3>
+
+<p>The single Bromley case is reassuring but does not tell users <strong>when</strong> to trust the model and when to discount its magnitude. We characterise reliability statistically by running 60 synthetic 9-cell intervention clusters drawn at random across the London grid, each at 6 magnitudes of employment increment (+10 %, +30 %, +50 %, +100 %, +200 %, +500 % of cluster baseline employment), giving 360 (cluster × magnitude) experiments. For each experiment we compute both the deterministic deep-choice prediction and the mixed-logit Monte Carlo prediction, and report their Jensen-bias gap as a function of cluster baseline employment and intervention magnitude.</p>
+
+<p><img src="../evaluation_outputs/paper_a/F8_reliability.png" alt="<strong>Figure 3.</strong> Empirical reliability of counterfactual prediction across 360 synthetic intervention experiments. (a) Each point is one (cluster × magnitude) experiment; colour = |Jensen bias| in per cent; the green outline marks the convex hull of experiments with bias &lt; 5 % (the &quot;reliable region&quot;). (b) Cumulative distribution of |Jensen bias| with thresholds at 5 % (reliable) and 20 % (caveat needed)." /></p>
+
+<p>The trust map (Figure 3a) and binned summary (Table 1) show that reliability is determined primarily by <strong>cluster baseline employment</strong>:</p>
+
+<table>
+<thead>
+<tr>
+  <th>Baseline cluster employment</th>
+  <th>Mean |Jensen bias| (%)</th>
+  <th>Reliability</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>&lt; 5 000 jobs</td>
+  <td>150–400</td>
+  <td>unreliable for any magnitude</td>
+</tr>
+<tr>
+  <td>5 000 – 20 000 jobs</td>
+  <td>30–550</td>
+  <td>unreliable except modest magnitudes</td>
+</tr>
+<tr>
+  <td>20 000 – 50 000 jobs</td>
+  <td>12–25</td>
+  <td>caveat needed</td>
+</tr>
+<tr>
+  <td>50 000 – 200 000 jobs</td>
+  <td>13–24</td>
+  <td>caveat needed</td>
+</tr>
+<tr>
+  <td><strong>&gt; 200 000 jobs</strong></td>
+  <td><strong>9–30</strong></td>
+  <td><strong>caveat needed</strong> (where OOC sits)</td>
+</tr>
+</tbody>
+</table>
+
+<p>Across all 360 experiments, <strong>12 % of interventions fall in the reliable region (|bias| &lt; 5 %), 31 % in the caveat range (5–20 %), and 56 % beyond useful prediction (&gt;20 %)</strong>. The model is therefore reliable for interventions targeting cells already part of an established employment cluster (&gt;200 k baseline jobs), and progressively unreliable as interventions target sparse or greenfield areas.</p>
+
+<p><strong>The Old Oak Common scenario of §6.1</strong> sits in the &gt; 200 000 baseline employment row (cluster baseline ≈ 1 M jobs) at a small magnitude (+65 k = +6.5 % of baseline), so its expected reliability falls in the caveat range. We carry this forward to §6.1 as a ±25 % uncertainty band on the predicted accessibility-distribution outcome.</p>
+
+<p>The flexible-work scenario (§6.2) is a temporal demand-side intervention that does not push the deep choice model out of the training input distribution, so the reliability scan above does not bound it; we test that scenario&#8217;s robustness separately in §6.2.</p>
+
+<hr />
+
+<h2 id="6-policy-scenarios">6. Policy scenarios</h2>
+
+<h3 id="61-old-oak-common-65-000-jobs">6.1 Old Oak Common: +65 000 jobs</h3>
+
+<p>We instantiate the OPDC Local Plan headline employment target by inflating the employment cluster (8-sector counts, total employment, office POI count) at a 9-grid cluster centred on the planned HS2 station, proportional to a +65 000 total-jobs increase. Free-flow analysis predicts +126 commuters&#8217; net inflow to the cluster; at BPR equilibrium this falls to +105 — a <strong>17 % congestion pushback</strong>. The mean Hansen accessibility (Geurs and van Wee, 2004) gain across all London origins is +1.34 % free-flow but only <strong>+0.45 %</strong> at equilibrium: two thirds of the gross gain absorbed by congestion. Population-weighted accessibility-distribution indices on $A_i$ all worsen at the equilibrium scenario: Gini +1.26 %, Palma +1.51 %, Atkinson($\varepsilon = 0.5$) +2.53 %.</p>
+
+<p>The intervention is, in accessibility terms, <strong>mildly regressive</strong>. The mechanism is that OOC sits in a corridor already moderately well connected (Bakerloo and Elizabeth lines; drive-time to Westminster, City, Canary Wharf). Cells that gain most are already at the upper end of the accessibility distribution; outer-London origins gain very little. BPR equilibrium reinforces the pattern by preferentially absorbing the largest gains where they cluster.</p>
+
+<h3 id="62-flexible-work-50-peak-shift">6.2 Flexible work: 50 % peak shift</h3>
+
+<p>To represent persistent flexible-working arrangements, we apply a 0.5× multiplier to peak-hour (07:00–09:59) demand and a 1.5× multiplier to off-peak shoulder hours (10:00–15:59), conserving total daily demand per origin, and predict the new per-hour OD allocation under BPR equilibrium. At 08:00 the simulator predicts mean travel time of <strong>32.73 min, down from 33.99 min baseline (−3.7 %)</strong>; the corresponding population-weighted accessibility rises from 1.09 M to 1.20 M jobs (<strong>+10.2 %</strong>); all distribution indices improve (Gini −0.011; Palma 0.591 → 0.557).</p>
+
+<p>The temporal intervention is <strong>clearly progressive</strong>. The mechanism mirrors §6.1 in reverse: under-connected outer-London origins, whose accessibility is most penalised by peak-hour congestion, gain disproportionately from peak relief. Inner-London origins, less congestion-sensitive because their nearest destinations are reached in few minutes regardless of multiplier, gain less in absolute terms.</p>
+
+<p><img src="../evaluation_outputs/paper_a/F6_scenarios_inequality.png" alt="<strong>Figure 3.</strong> Two scenarios contrast on accessibility-distribution indices. Spatial intervention (left) is regressive across all three indices; temporal intervention (right) is progressive across both reported indices. Same recovered behavioural parameters; opposite distributional verdicts." /></p>
+
+<h3 id="63-reading-the-ooc-result-against-the-reliability-scan">6.3 Reading the OOC result against the reliability scan</h3>
+
+<p>A single OOC point measurement gives a Jensen bias of +2.1 % (deterministic +134.2 vs Monte Carlo +131.4) — but, as §5.5 makes clear, single-point measurements over-state our certainty. The OOC cluster sits in the &gt; 200 000 baseline-employment row at low magnitude (+6.5 %), where the 360-experiment scan finds <strong>mean |Jensen bias| ≈ 30 % and 90th-percentile ≈ 32 %</strong> for similarly-sized clusters at small magnitudes. The OOC-specific Jensen bias should therefore be reported as <strong>roughly ±25 % on the deterministic Δshare</strong>, not as the lucky 2.1 % single point. The qualitative direction of §6.1 — accessibility-regressive intervention — is robust to this uncertainty (all signs intact); the <em>magnitudes</em> should be read with a ±25 % band.</p>
+
+<p>A sensitivity scan over the value-of-time coefficient of variation $\sigma \in [0, 1]$ at the OOC cluster confirms |bias| varies smoothly with $\sigma$ choice, so the result does not hinge on a precise $\sigma$ assumption.</p>
+
+<hr />
+
+<h2 id="7-discussion-and-policy-implications">7. Discussion and policy implications</h2>
+
+<h3 id="71-the-spatial-temporal-balance-in-london-transport-policy">7.1 The spatial-temporal balance in London transport policy</h3>
+
+<p>The principal policy finding is the contrast in Section 6: a representative spatial intervention (OOC) is mildly regressive in accessibility distribution while a representative temporal intervention (flexible work) is clearly progressive. The contrast holds across multiple inequality indices and after BPR-equilibrium adjustment.</p>
+
+<p>For London policy this carries three implications, each with the reliability range from §5.5 attached. <em>First</em>, the Mayor&#8217;s strategic emphasis on Opportunity Areas as the principal mechanism for absorbing future London employment carries an under-appreciated regressive accessibility risk. The OOC scenario is in the model&#8217;s caveat range (cluster baseline &gt; 200 000 jobs, intervention magnitude small): the <em>direction</em> (accessibility-regressive) is robust, but the magnitude should be read with a ±25 % uncertainty band. This does not argue against the OOC programme — there are obvious benefits beyond commute accessibility, including direct local employment and infrastructure investment — but it does argue for explicit accessibility-distribution accounting in the OPDC and London Plan policy cycle, alongside conventional employment / housing / fiscal tests. <em>Second</em>, the temporal flexible-working agenda emphasised by MTS 2018 <em>Outcome 7</em> appears, on the evidence here, to be substantially more progressive than the spatial regeneration agenda; because the temporal scenario does not push the model out of its training input distribution, this finding carries narrower uncertainty than OOC. To the extent that policy weighs distributional outcomes, the marginal benefit of additional temporal-shaping policies (off-peak fare structures, hybrid-working subsidies, off-peak active-transport investment) is plausibly higher per unit cost than equivalent investment in spatial regeneration. <em>Third</em>, BPR-equilibrium congestion absorbs roughly two thirds of the gross OOC accessibility gain — a quantitative warning against free-flow analyses of new employment hubs that has not, to our knowledge, previously been made at the city-grid resolution at which contemporary spatial planning operates.</p>
+
+<p>A practical caution emerges from the §5.5 reliability map: the model is <strong>not</strong> trustworthy as currently calibrated for greenfield interventions in cells with baseline employment below ≈ 20 000 jobs — the Jensen bias regularly exceeds 100 % in that regime. Any application to <em>new</em> cluster developments away from established employment corridors should expand the training data or add explicit greenfield prior terms before drawing magnitude conclusions.</p>
+
+<h3 id="72-methodological-implication-a-trust-map-for-transport-policy-ml">7.2 Methodological implication: a trust map for transport-policy ML</h3>
+
+<p>The most generalisable methodological output of the paper is the §5.5 reliability characterisation. Rather than a single Jensen-bias number — which our scan shows is misleadingly precise — we provide a quantitative trust map indexed by intervention attributes that practitioners can compute <em>before</em> committing to a policy claim: cluster baseline employment, intervention magnitude, and (implicitly) distance from the training distribution. The resulting reliability bins (12 % reliable / 31 % caveat / 56 % unreliable across 360 synthetic interventions) frame an honest expectation: aggregate-OD-calibrated deep choice models are useful for interventions in established employment corridors, but not for de-novo greenfield development without additional data. The mixed-logit Monte Carlo correction requires no individual-level travel-survey data — only public WebTAG / Wardman tables — making the trust map portable to other cities without bespoke travel-survey panels.</p>
+
+<h3 id="73-limitations">7.3 Limitations</h3>
+
+<p>We use free-flow car travel time during calibration and switch to BPR equilibrium only in counterfactual analysis, trading some realism in fitted $\beta_t$ for tractability and identifiability. The Hackney CPC of 0.20 is the model&#8217;s principal weakness, attributable to mode-share heterogeneity and unobserved residential self-selection that aggregate static features cannot resolve. The 2021 Census fell within the second UK pandemic lockdown; even using the full Census table, headline volumes are roughly 60 % below pre-pandemic baselines, partially confounding our retrodict of Stratford-style interventions. Mode of travel is recorded in Census but not modelled here; a nested logit over (mode, destination) is the natural extension and is part of the planned Beijing follow-up.</p>
+
+<hr />
+
+<h2 id="8-conclusion">8. Conclusion</h2>
+
+<p>A deep choice model coupled to a mixed-logit Monte Carlo policy simulation, calibrated on the full Census 2021 OD table, yields a coherent assessment of two contrasting London transport-policy interventions. Spatial regeneration at Old Oak Common is mildly regressive on accessibility distribution; flexible work is clearly progressive. The framework requires no individual-level travel-survey data and transfers to other cities — including Beijing, where a follow-up application is in preparation. The findings argue for greater weight on temporal-shaping interventions in the spatial-temporal policy mix that the Mayor&#8217;s Transport Strategy must continue to balance.</p>
+
+<hr />
+
+<h2 id="acknowledgements">Acknowledgements</h2>
+
+<p>This work was conducted in association with Google Summer of Code (GSoC) 2026 for the Mesa agent-based modelling project; the mixed-logit Monte Carlo simulation in §4.4 is implemented in the Mesa framework. We thank our supervisors and the GSoC Mesa community for guidance.</p>
+
+<hr />
+
+<h2 id="references">References</h2>
+
+<p>Boeing, G. (2017). OSMnx. <em>Computers, Environment and Urban Systems</em> 65, 126–139.</p>
+
+<p>Department for Transport (2024). <em>TAG Unit A1.3: User and Provider Impacts</em>. WebTAG.</p>
+
+<p>Geurs, K. T. and van Wee, B. (2004). Accessibility evaluation of land-use and transport strategies. <em>Journal of Transport Geography</em> 12(2), 127–140.</p>
+
+<p>Greater London Authority (2021). <em>The London Plan 2021</em>.</p>
+
+<p>Hamilton, W. L., Ying, R. and Leskovec, J. (2017). Inductive representation learning on large graphs. <em>NeurIPS 2017</em>.</p>
+
+<p>Lenormand, M., Picornell, M., Cantú-Ros, O. G., <em>et al.</em> (2012). Universal patterns of human mobility from a multi-day GPS dataset. <em>PLOS ONE</em> 7(12), e51249.</p>
+
+<p>London Assembly (2022). <em>Old Oak Common Development Corporation Scrutiny Report</em>.</p>
+
+<p>Mayor of London (2018). <em>Mayor&#8217;s Transport Strategy 2018</em>.</p>
+
+<p>McFadden, D. (1974). Conditional logit analysis of qualitative choice behavior. In Zarembka (ed.), <em>Frontiers in Econometrics</em>.</p>
+
+<p>McFadden, D. (1978). Modelling the choice of residential location. In Karlqvist <em>et al.</em> (eds.), <em>Spatial Interaction Theory and Planning Models</em>.</p>
+
+<p>OPDC (2018). <em>Old Oak and Park Royal Development Corporation Local Plan</em>.</p>
+
+<p>Sheffi, Y. (1985). <em>Urban Transportation Networks</em>. Prentice-Hall.</p>
+
+<p>Sifringer, B., Lurkin, V. and Alahi, A. (2020). Enhancing discrete choice models with representation learning. <em>Transportation Research Part B</em> 140, 236–261.</p>
+
+<p>TfL (2024). <em>Transport for London Annual Statistical Bulletin 2023/24</em>.</p>
+
+<p>Train, K. E. (2009). <em>Discrete Choice Methods with Simulation</em>, 2nd ed. Cambridge University Press.</p>
+
+<p>Wang, S. and Klabjan, D. (2018). Discrete choice models with neural network utilities. <em>NeurIPS workshop</em>.</p>
+
+<p>Wardman, M., Chintakayala, V. P. K. and de Jong, G. (2016). Values of travel time in Europe. <em>Transportation Research Part A</em> 94, 93–111.</p>
+
+<p>Wong, M. and Farooq, B. (2021). ResLogit. <em>Transportation Research Part C</em> 126, 103050.</p>
+
+</body>
+</html>

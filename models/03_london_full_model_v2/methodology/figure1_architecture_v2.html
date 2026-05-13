@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Figure 1 — Model Architecture (horizontal v2)</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: #eef2f6;
+    color: #0f172a;
+    font-family: -apple-system, "Helvetica Neue", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .figure-shell {
+    width: 1700px;
+    margin: 24px auto;
+    background: white;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    box-shadow: 0 1px 3px rgba(15,23,42,0.05);
+    padding: 0;
+    overflow: visible;
+  }
+
+  /* ─── header banner ──────────────────────────────────────────────── */
+  .header {
+    background: linear-gradient(90deg, #0f172a, #1e293b);
+    color: white;
+    padding: 12px 22px;
+    border-radius: 6px 6px 0 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .header .title { font-size: 15px; font-weight: 600; letter-spacing: 0.02em; }
+  .header .name-pending {
+    background: #facc15;
+    color: #422006;
+    padding: 1px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-left: 8px;
+  }
+  .header .sub { font-size: 11px; color: #cbd5e1; font-style: italic; max-width: 800px; text-align: right; }
+
+  /* ─── main grid (5 columns) ──────────────────────────────────────── */
+  .pipeline {
+    display: grid;
+    grid-template-columns: 175px 470px 305px 460px 220px;
+    gap: 12px;
+    padding: 18px 14px 8px;
+    position: relative;
+  }
+
+  /* column wrapper */
+  .col {
+    display: flex;
+    flex-direction: column;
+    background: white;
+    border: 1.4px solid;
+    border-radius: 6px;
+    overflow: visible;
+    min-height: 580px;
+  }
+  .col-banner {
+    color: white;
+    padding: 7px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    border-radius: 4px 4px 0 0;
+  }
+  .col-body { padding: 10px; flex: 1; display: flex; flex-direction: column; gap: 10px; }
+
+  /* skin: per stage */
+  .col-input    { border-color: #94a3b8; }
+  .col-input    .col-banner { background: #475569; }
+  .col-encoder  { border-color: #15803d; }
+  .col-encoder  .col-banner { background: #15803d; }
+  .col-behav    { border-color: #6d28d9; }
+  .col-behav    .col-banner { background: #6d28d9; }
+  .col-deploy   { border-color: #c2410c; }
+  .col-deploy   .col-banner { background: #c2410c; }
+  .col-output   { border-color: #075985; }
+  .col-output   .col-banner { background: #075985; }
+
+  /* ─── inner module box ──────────────────────────────────────────── */
+  .module {
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    padding: 7px 9px 8px;
+    background: #f8fafc;
+    position: relative;
+  }
+  .module .num {
+    display: inline-block;
+    width: 17px; height: 17px;
+    background: #1e293b;
+    color: white;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 17px;
+    font-size: 10px;
+    font-weight: 700;
+    margin-right: 5px;
+    vertical-align: middle;
+  }
+  .module .mod-title {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    color: #0f172a;
+    vertical-align: middle;
+    line-height: 1.25;
+  }
+  .module .mod-body { font-size: 10.5px; color: #334155; margin-top: 4px; }
+  .module .formula {
+    font-family: "Cambria Math", "STIX Two Math", "Times New Roman", serif;
+    font-size: 10.5px;
+    background: white;
+    border: 1px solid #cbd5e1;
+    border-radius: 3px;
+    padding: 4px 7px;
+    margin-top: 5px;
+    color: #0f172a;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .module .miniviz { margin-top: 6px; text-align: center; }
+  .module .miniviz img { max-width: 100%; height: auto; }
+  .module .out-tag {
+    display: inline-block;
+    margin-top: 5px;
+    padding: 1px 6px;
+    background: #1e40af;
+    color: white;
+    font-size: 9.5px;
+    border-radius: 3px;
+    font-family: "Cambria Math", serif;
+  }
+  .module .note {
+    font-size: 9.5px;
+    color: #64748b;
+    font-style: italic;
+    margin-top: 3px;
+    line-height: 1.3;
+  }
+
+  /* per-stage module accent */
+  .module.m-encoder { border-left: 3px solid #15803d; }
+  .module.m-fusion  { border-left: 3px solid #0d9488; background: #ecfdf5; }
+  .module.m-behav   { border-left: 3px solid #6d28d9; background: #faf5ff; }
+  .module.m-loss    { border-left: 3px solid #b91c1c; background: #fef2f2; }
+  .module.m-deploy  { border-left: 3px solid #c2410c; background: #fff7ed; }
+  .module.m-bpr     { border-left: 3px solid #92400e; background: #fefce8; }
+  .module.m-output  { border-left: 3px solid #075985; background: #f0f9ff; }
+
+  /* Θ parameter badges */
+  .theta-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 9px;
+    font-family: "Cambria Math", serif;
+    font-size: 9.5px;
+    font-weight: 600;
+    line-height: 1.2;
+    vertical-align: middle;
+  }
+  .theta-ml      { background: #dcfce7; color: #14532d; border: 1px solid #15803d; }
+  .theta-behav   { background: #ede9fe; color: #4c1d95; border: 1px solid #6d28d9; }
+  .theta-frozen  {
+    background: #f1f5f9;
+    color: #475569;
+    border: 1px dashed #94a3b8;
+    font-style: italic;
+  }
+  .theta-loss    { background: #fef2f2; color: #7f1d1d; border: 1px solid #b91c1c; font-style: italic; }
+
+  /* Trained Parameter Ledger bar */
+  .params-ledger {
+    margin: 8px 14px 4px;
+    border: 1.4px solid #475569;
+    border-radius: 6px;
+    background: linear-gradient(90deg, #f8fafc, #fff);
+    overflow: hidden;
+  }
+  .params-ledger .pl-head {
+    background: #1e293b;
+    color: white;
+    padding: 6px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .params-ledger .pl-head .pl-tot {
+    background: #facc15;
+    color: #422006;
+    padding: 1px 8px;
+    border-radius: 3px;
+    font-size: 10.5px;
+  }
+  .pl-body {
+    display: grid;
+    grid-template-columns: 2fr 1.6fr 1fr;
+    gap: 0;
+  }
+  .pl-section {
+    padding: 9px 14px;
+    border-right: 1px dashed #cbd5e1;
+  }
+  .pl-section:last-child { border-right: none; }
+  .pl-section .pl-stitle {
+    font-size: 10.5px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .pl-section .pl-sub {
+    font-size: 9.5px;
+    color: #64748b;
+    font-style: italic;
+    margin-bottom: 6px;
+    line-height: 1.3;
+  }
+  .pl-encoder .pl-stitle { color: #15803d; }
+  .pl-behav   .pl-stitle { color: #6d28d9; }
+  .pl-frozen  .pl-stitle { color: #475569; }
+  .pl-list {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 12px;
+    row-gap: 2px;
+    font-family: "Cambria Math", serif;
+    font-size: 10px;
+  }
+  .pl-list span.lab { color: #334155; }
+  .pl-list span.cnt { text-align: right; color: #0f172a; font-weight: 600; }
+  .pl-subtotal {
+    margin-top: 5px;
+    padding-top: 4px;
+    border-top: 1px solid #cbd5e1;
+    font-size: 10.5px;
+    font-weight: 700;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  /* row of two modules side-by-side inside encoder */
+  .encoder-grid {
+    display: grid;
+    grid-template-columns: 1fr 1.2fr;
+    gap: 8px;
+  }
+
+  /* input list compact */
+  .input-list { display: flex; flex-direction: column; gap: 6px; }
+  .input-item {
+    background: #f1f5f9;
+    border: 1px solid #cbd5e1;
+    border-radius: 3px;
+    padding: 5px 8px;
+    font-size: 10.5px;
+  }
+  .input-item .iname {
+    font-family: "Cambria Math", serif;
+    font-size: 11px;
+    font-weight: 600;
+    color: #0f172a;
+  }
+  .input-item .idim {
+    color: #64748b;
+    font-size: 9.5px;
+    font-family: "Cambria Math", serif;
+  }
+  .input-item .idesc { font-size: 9.5px; color: #475569; margin-top: 2px; line-height: 1.3; }
+
+  /* output stack */
+  .output-list { display: flex; flex-direction: column; gap: 7px; }
+  .output-item {
+    background: #f0f9ff;
+    border: 1px solid #7dd3fc;
+    border-radius: 3px;
+    padding: 6px 8px;
+  }
+  .output-item .oname {
+    font-family: "Cambria Math", serif;
+    font-size: 12px;
+    color: #075985;
+    font-weight: 600;
+  }
+  .output-item .odesc { font-size: 10px; color: #334155; margin-top: 2px; line-height: 1.3; }
+
+  /* ─── arrows between columns (SVG overlay layer) ─────────────────── */
+  .arrows-layer {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+  }
+
+  /* ─── invariants + legend bottom ─────────────────────────────────── */
+  .footer {
+    margin: 0 14px 14px;
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 12px;
+  }
+  .invariant-box {
+    border: 1.4px dashed #475569;
+    background: #f8fafc;
+    border-radius: 5px;
+    padding: 9px 12px;
+  }
+  .invariant-box .ihead {
+    font-size: 10.5px;
+    font-weight: 700;
+    color: #0f172a;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 3px;
+  }
+  .invariant-box .ibody { font-size: 10.5px; color: #334155; line-height: 1.45; }
+  .invariant-box .ibody b { color: #0f172a; }
+  .invariant-box .ibody .key { background: #fef9c3; padding: 0 3px; border-radius: 2px; }
+
+  .legend-box {
+    border: 1px solid #e2e8f0;
+    background: #f8fafc;
+    border-radius: 5px;
+    padding: 8px 10px;
+  }
+  .legend-box .lhead {
+    font-size: 10.5px;
+    font-weight: 700;
+    color: #0f172a;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 5px;
+  }
+  .legend-row {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 10.5px;
+    color: #334155;
+    margin-bottom: 3px;
+  }
+  .legend-row svg { width: 36px; height: 8px; flex-shrink: 0; }
+
+  /* edge label badge */
+  .edge-label {
+    background: white;
+    border: 1px solid #93c5fd;
+    color: #1e40af;
+    font-family: "Cambria Math", serif;
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    white-space: nowrap;
+    box-shadow: 0 1px 2px rgba(15,23,42,0.04);
+  }
+
+  /* print-ready */
+  @media print {
+    html, body { background: white; }
+    .figure-shell { box-shadow: none; border: none; margin: 0; width: 100%; }
+  }
+</style>
+</head>
+<body>
+
+<div class="figure-shell">
+
+  <!-- ─── header ─────────────────────────────────────────────────── -->
+  <div class="header">
+    <div>
+      <span class="title">Figure 1 — Model Architecture</span>
+      <span class="name-pending">name TBD</span>
+    </div>
+    <div class="sub">
+      End-to-end inverse recovery of behavioural primitives from aggregate hourly OD,
+      with destination-side BPR closure for counterfactual deployment.
+    </div>
+  </div>
+
+  <!-- ─── pipeline grid + arrows overlay ─────────────────────────── -->
+  <div class="pipeline">
+
+    <!-- ─── COL 1: INPUTS ─────────────────────────────────────── -->
+    <div class="col col-input">
+      <div class="col-banner">Inputs</div>
+      <div class="col-body">
+        <div class="input-list">
+          <div class="input-item">
+            <div class="iname">X<sup>static</sup></div>
+            <div class="idim">∈ ℝ<sup>N×22</sup></div>
+            <div class="idesc">POI / employment ×8 / population / IMD / station distance</div>
+          </div>
+          <div class="input-item">
+            <div class="iname">X<sup>dyn</sup></div>
+            <div class="idim">∈ ℝ<sup>T×N×5</sup></div>
+            <div class="idesc">Hourly congestion z, dest-inflow z, sin/cos hour</div>
+          </div>
+          <div class="input-item">
+            <div class="iname">𝒢 = (V, E)</div>
+            <div class="idim">N=1725, 1km grid, 4-nb adj</div>
+          </div>
+          <div class="input-item">
+            <div class="iname">t<sub>ij</sub><sup>(m)</sup></div>
+            <div class="idim">m ∈ {car, transit, walk}</div>
+            <div class="idesc">Distance-aware: walk active only d &lt; 5 km</div>
+          </div>
+          <div class="input-item">
+            <div class="iname">log d<sub>ij</sub>, π<sub>m</sub>(i,j), π<sub>k</sub>(i)</div>
+            <div class="idim">+ OccMatch<sub>ij</sub></div>
+            <div class="idesc">Census 2011 mode share, IMD income tier</div>
+          </div>
+          <div class="input-item" style="background:#fef9c3; border-color:#facc15;">
+            <div class="iname" style="color:#854d0e;">F<sub>ij,t</sub></div>
+            <div class="idim" style="color:#854d0e;">label: observed hourly OD</div>
+            <div class="idesc">GEODS Huq 2019, train target</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── COL 2: ENCODER ────────────────────────────────────── -->
+    <div class="col col-encoder">
+      <div class="col-banner">Encoder · dual-branch + gated fusion</div>
+      <div class="col-body">
+        <div class="encoder-grid">
+          <!-- ① Static branch -->
+          <div class="module m-encoder">
+            <span class="num">1</span><span class="mod-title">Static branch</span>
+            <span class="theta-badge theta-ml">Θ⁽¹⁾<sub>SAGE_s</sub>: 3,520</span>
+            <div class="mod-body">GraphSAGE × 2 over time-invariant features. Computed once.</div>
+            <div class="miniviz"><img src="figures/arch/sage_v2.png" alt="SAGE neighbour aggregation"></div>
+            <div><span class="out-tag">h<sub>s</sub> ∈ ℝ<sup>N×32</sup></span></div>
+          </div>
+          <!-- ② Dynamic branch -->
+          <div class="module m-encoder">
+            <span class="num">2</span><span class="mod-title">Dynamic branch · GRU + multi-scale TCN</span>
+            <span class="theta-badge theta-ml">Θ⁽²⁾<sub>SAGE_d+GRU+TCN+fuse</sub>: 29,408</span>
+            <div class="mod-body">Per-hour SAGE → GRU (sequential memory) + parallel TCN (kernels 3, 5, 7, circular padding).</div>
+            <div class="miniviz"><img src="figures/arch/dyn_branch_v2.png" alt="GRU + TCN"></div>
+            <div><span class="out-tag">h<sub>d</sub> ∈ ℝ<sup>T×N×32</sup></span></div>
+          </div>
+        </div>
+        <!-- ③ Gated fusion -->
+        <div class="module m-fusion">
+          <span class="num">3</span><span class="mod-title">Gated fusion → V<sub>j,t</sub></span>
+          <span class="theta-badge theta-ml">Θ⁽³⁾<sub>gate+head</sub>: 98</span>
+          <div class="formula">
+            gate(t,j) = σ(W<sub>g</sub>[h<sub>s</sub>⊕h<sub>d</sub>])
+            &nbsp;|&nbsp;
+            h<sub>fused</sub> = gate · h<sub>s</sub> + (1−gate) · h<sub>d</sub>
+            &nbsp;|&nbsp;
+            V<sub>j,t</sub> = W<sub>v</sub> h<sub>fused</sub>, then z-norm
+          </div>
+          <div style="display:flex; gap:10px; align-items:center; margin-top:6px;">
+            <img src="figures/arch/fusion_v2.png" alt="σ gate" style="height:90px; width:auto;">
+            <div style="flex:1;">
+              <div class="note">α (= 1, fixed) does not need to absorb V's scale → β cleanly identifiable. Per-(t,j) gate decides static vs dynamic dominance.</div>
+              <div style="margin-top:5px;"><span class="out-tag">V<sub>j,t</sub> ∈ ℝ<sup>T×N</sup></span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── COL 3: BEHAVIOURAL CHOICE ─────────────────────────── -->
+    <div class="col col-behav">
+      <div class="col-banner">Behavioural choice + Loss</div>
+      <div class="col-body">
+        <!-- ④ Mixture RUM -->
+        <div class="module m-behav">
+          <span class="num">4</span><span class="mod-title">Mode × Tier mixture RUM</span>
+          <span class="theta-badge theta-behav">β<sub>t,m</sub>(72) · γ(1) · δ<sub>k</sub>(2) · κ<sub>k</sub>(2) = 77</span>
+          <div class="formula">
+            U<sub>ij,t</sub><sup>(m,k)</sup> = α V<sub>j,t</sub> + β<sub>t,m</sub>·κ<sub>k</sub>·t<sub>ij</sub><sup>(m)</sup> + γ log d<sub>ij</sub> + δ<sub>k</sub> OccMatch
+          </div>
+          <div class="formula">
+            P(j|i,t) = ∑<sub>m</sub> π<sub>m</sub>(i,j) ∑<sub>k</sub> π<sub>k</sub>(i) · softmax<sub>j</sub> U<sup>(m,k)</sup>
+          </div>
+          <div class="miniviz"><img src="figures/arch/mode_tier_v2.png" alt="β heatmap"></div>
+          <div class="note">Recovered: β<sub>car</sub>=−0.187, β<sub>transit</sub>=−0.105, β<sub>walk</sub>=−0.049, γ=−0.325, κ=[1,1.98,1.98], δ<sub>k</sub>=[0,0.20,0.20]</div>
+        </div>
+        <!-- ⑤ Cross-entropy loss -->
+        <div class="module m-loss">
+          <span class="num">5</span><span class="mod-title">Cross-entropy loss · Stage 1 training</span>
+          <span class="theta-badge theta-loss">no params (operation only)</span>
+          <div class="formula">ℒ = −∑<sub>i,t</sub> ∑<sub>j</sub> F<sub>ij,t</sub> log P(j|i,t)</div>
+          <div class="miniviz"><img src="figures/arch/train_curve_v2.png" alt="training curve"></div>
+          <div class="note">Adam (enc lr 1e−3, RUM lr 1e−2). Backprop ∇<sub>Θ</sub>ℒ updates encoder + behavioural params jointly. CPC = 0.488 (London 2019, 1 seed × 200 ep).</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── COL 4: DEPLOYMENT ─────────────────────────────────── -->
+    <div class="col col-deploy">
+      <div class="col-banner">Deployment · agents + BPR closure</div>
+      <div class="col-body">
+        <!-- ⑥ Synthetic agents + ⑦ Choice -->
+        <div class="module m-deploy">
+          <span style="display:flex; align-items:center; gap:6px;"><span class="num">6</span><span class="mod-title">Synthetic agents</span> &nbsp; <span class="num" style="background:#c2410c;">7</span><span class="mod-title">Gumbel-max choice</span>
+          <span class="theta-badge theta-frozen" style="margin-left:auto;">Θ frozen</span></span>
+          <div class="mod-body">Sample N agents from (π<sub>m</sub>(i), π<sub>k</sub>(i)) with assigned (i<sub>n</sub>, t<sub>n</sub>); each draws ε~Gumbel(0,1) → j<sub>n</sub><sup>*</sup> = argmax<sub>j</sub>(U + ε).</div>
+          <div class="miniviz"><img src="figures/arch/agent_choice_v2.png" alt="agents + softmax"></div>
+          <div><span class="out-tag">F̂<sub>ij,t</sub> = aggregated</span></div>
+        </div>
+        <!-- ⑧ BPR -->
+        <div class="module m-bpr">
+          <span class="num">8</span><span class="mod-title">BPR feedback (car-only) · MSA fixed point</span>
+          <span class="theta-badge theta-frozen" style="margin-left:auto;">Θ frozen · α=0.15, b=4 fixed</span>
+          <div class="formula">
+            Inflow<sub>j,t</sub> = ∑<sub>i</sub> F̂<sub>ij,t</sub>
+            &nbsp;|&nbsp;
+            t<sub>ij,t</sub><sup>(car), cong</sup> = t<sub>ij</sub><sup>(car), free</sup> · (1 + 0.15·(Inflow/C<sub>j</sub>)<sup>4</sup>)
+          </div>
+          <div style="display:flex; gap:10px; align-items:center; margin-top:5px;">
+            <img src="figures/arch/bpr_v2.png" alt="BPR curve" style="height:95px; width:auto;">
+            <div style="flex:1;">
+              <div class="note">MSA: F<sup>(k+1)</sup> = (1−1/k) F<sup>(k)</sup> + (1/k)·choice(t<sup>(k)</sup>); iterate until rel-gap &lt; 0.5%.</div>
+              <div class="note" style="margin-top:4px;">Transit / walk t unchanged. Loop back ↺ to ⑦ until convergence.</div>
+              <div style="margin-top:5px;"><span class="out-tag" style="background:#c2410c;">F̂<sup>*</sup>, t<sub>eq</sub><sup>(car)</sup></span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── COL 5: OUTPUT ─────────────────────────────────────── -->
+    <div class="col col-output">
+      <div class="col-banner">Outputs</div>
+      <div class="col-body">
+        <div class="output-list">
+          <div class="output-item">
+            <div class="oname">F̂<sub>ij,t</sub><sup>*</sup></div>
+            <div class="odesc">BPR-equilibrium hourly OD flow</div>
+          </div>
+          <div class="output-item">
+            <div class="oname">t<sub>ij,t</sub><sup>(car), eq</sup></div>
+            <div class="odesc">Equilibrium congested travel time</div>
+          </div>
+          <div class="output-item">
+            <div class="oname">A<sub>i</sub></div>
+            <div class="odesc">Hansen accessibility, A<sub>i</sub> = ∑<sub>j</sub> E<sub>j</sub> exp(β<sub>car</sub> t<sub>ij</sub>)</div>
+          </div>
+          <div class="output-item">
+            <div class="oname">Gini, Palma, Atkinson</div>
+            <div class="odesc">Population-weighted inequality on A<sub>i</sub></div>
+          </div>
+          <div class="output-item" style="background:#fef9c3; border-color:#facc15;">
+            <div class="oname" style="color:#854d0e;">do(X<sup>static</sup>), do(X<sup>dyn</sup>)</div>
+            <div class="odesc">Counterfactual: Stage 2 forward only — same Θ, perturbed inputs</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── arrow overlay layer ─────────────────────────────── -->
+    <svg class="arrows-layer" viewBox="0 0 1700 600" preserveAspectRatio="none" style="position:absolute; top:18px; left:14px; width:1672px; height:600px;">
+      <defs>
+        <marker id="ah-fwd" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L0,9 L8,4.5 z" fill="#1e40af"/>
+        </marker>
+        <marker id="ah-back" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L0,9 L8,4.5 z" fill="#b91c1c"/>
+        </marker>
+        <marker id="ah-bpr" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L0,9 L8,4.5 z" fill="#ea580c"/>
+        </marker>
+      </defs>
+      <!-- forward arrows between columns; coordinates calibrated for 1672x600 svg viewport -->
+      <!-- Col 1 → Col 2 (X→encoder) -->
+      <line x1="180" y1="270" x2="195" y2="270" stroke="#1e40af" stroke-width="2.0" marker-end="url(#ah-fwd)"/>
+      <!-- Col 2 → Col 3 (V_jt→behav) -->
+      <line x1="668" y1="270" x2="683" y2="270" stroke="#1e40af" stroke-width="2.0" marker-end="url(#ah-fwd)"/>
+      <!-- Col 3 → Col 4 (P(j|i,t)→deploy)  -->
+      <line x1="990" y1="270" x2="1005" y2="270" stroke="#1e40af" stroke-width="2.0" marker-end="url(#ah-fwd)"/>
+      <!-- Col 4 → Col 5 (F̂*→output) -->
+      <line x1="1467" y1="270" x2="1482" y2="270" stroke="#1e40af" stroke-width="2.0" marker-end="url(#ah-fwd)"/>
+
+      <!-- backprop ∇L: from Col 3 (CE box) straight down to the ledger -->
+      <line x1="850" y1="572" x2="850" y2="600" stroke="#b91c1c" stroke-width="2.0" stroke-dasharray="6 4"
+            marker-end="url(#ah-back)"/>
+      <text x="858" y="595" font-size="11" fill="#b91c1c" font-style="italic" font-weight="600">∇<tspan baseline-shift="sub" font-size="9">Θ</tspan> ℒ → updates Θ ledger ↓</text>
+    </svg>
+  </div>
+
+  <!-- ─── Trained Parameter Ledger ──────────────────────────────── -->
+  <div class="params-ledger">
+    <div class="pl-head">
+      <div>Trained parameters Θ &nbsp;·&nbsp; jointly updated by backprop on ℒ &nbsp; <span style="color:#fca5a5; font-style:italic; font-weight:400; font-size:10.5px;">← red dashed arrow from ⑤</span></div>
+      <div class="pl-tot">total = 33,103 params · 77 interpretable (0.23%)</div>
+    </div>
+    <div class="pl-body">
+      <!-- Encoder section -->
+      <div class="pl-section pl-encoder">
+        <div class="pl-stitle">Encoder Θ — deep ML weights (opaque, learned representation)</div>
+        <div class="pl-sub">Modules ① ② ③. Backprop updates these so V<sub>j,t</sub> represents destination attractiveness; no individual weight has a behavioural meaning.</div>
+        <div class="pl-list">
+          <span class="lab">① SAGE static (×2 layers)</span><span class="cnt">3,520</span>
+          <span class="lab">② SAGE dynamic per-hour</span><span class="cnt">2,432</span>
+          <span class="lab">② GRU (sequential memory)</span><span class="cnt">6,336</span>
+          <span class="lab">② TCN multi-scale (3,5,7)</span><span class="cnt">18,560</span>
+          <span class="lab">② fuse linear (GRU+TCN)</span><span class="cnt">2,080</span>
+          <span class="lab">③ gated fusion + V-head</span><span class="cnt">98</span>
+        </div>
+        <div class="pl-subtotal" style="color:#15803d;"><span>Θ_encoder subtotal</span><span>33,026</span></div>
+      </div>
+      <!-- Behavioural section -->
+      <div class="pl-section pl-behav">
+        <div class="pl-stitle">Behavioural primitives — interpretable RUM coefficients</div>
+        <div class="pl-sub">Module ④. Each parameter has a literature-anchored behavioural meaning (VOT, distance decay, occupational match, income tier).</div>
+        <div class="pl-list">
+          <span class="lab">④ β<sub>t,m</sub> (24 hour × 3 mode)</span><span class="cnt">72</span>
+          <span class="lab">④ γ (distance decay)</span><span class="cnt">1</span>
+          <span class="lab">④ δ<sub>k</sub> (OccMatch / tier)</span><span class="cnt">2</span>
+          <span class="lab">④ κ<sub>k</sub> (tier scaling, κ<sub>0</sub>=1)</span><span class="cnt">2</span>
+          <span class="lab">  α (numeraire, fixed = 1)</span><span class="cnt" style="color:#94a3b8;">(0)</span>
+          <span class="lab">&nbsp;</span><span class="cnt">&nbsp;</span>
+        </div>
+        <div class="pl-subtotal" style="color:#6d28d9;"><span>Θ_RUM subtotal</span><span>77</span></div>
+      </div>
+      <!-- Frozen / Stage 2 section -->
+      <div class="pl-section pl-frozen">
+        <div class="pl-stitle">Stage 2 deployment — Θ frozen</div>
+        <div class="pl-sub">Modules ⑥ ⑦ ⑧. No new parameters. BPR (α=0.15, b=4) hyper-fixed (Sheffi 1985).</div>
+        <div style="margin-top:6px; font-size:10.5px; color:#475569; line-height:1.5;">
+          Counterfactual evaluation perturbs <em>inputs</em> (do(X<sup>static</sup>) or do(X<sup>dyn</sup>))
+          and re-runs ① → ⑧ with the same Θ. <b>No re-fit.</b>
+        </div>
+        <div class="pl-subtotal" style="color:#475569;"><span>new params at deploy</span><span>0</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── footer: invariant + legend ─────────────────────────────── -->
+  <div class="footer">
+    <div class="invariant-box">
+      <div class="ihead">Identification invariant — what makes counterfactual deployment honest</div>
+      <div class="ibody">
+        <b>Training</b> uses the <span class="key">free-flow t<sub>ij</sub><sup>(m)</sup></span> throughout the inverse loop, so β<sub>t,m</sub>
+        is identified as the sensitivity of utility to <em>free-flow</em> time — no flow ↔ time simultaneity in MLE.
+        <b>Deployment</b> substitutes <span class="key">BPR-equilibrium t<sub>ij,t</sub><sup>(car), eq</sup></span> into the same trained β<sub>t,m</sub>.
+        Substitution is consistent under <em>single-component invariance</em> (Schölkopf et al., 2021): the choice mechanism
+        (β, γ, δ, κ) is structural and stable; only its <em>inputs</em> change at deployment.
+        <br><br>
+        <b>Why 33,026 ML weights vs 77 behavioural primitives?</b> The encoder Θ<sup>(1,2,3)</sup> learns a flexible
+        non-parametric V<sub>j,t</sub> from data, soaking up everything the simple gravity model gets wrong about
+        spatial attractiveness. The 77 RUM coefficients in ④ are then identified <em>conditional on V</em>, free to
+        carry behavioural meaning instead of fitting V's noise. The paper's contribution is recovering those
+        77 — the 33k are the supporting representation, not the contribution.
+      </div>
+    </div>
+    <div class="legend-box">
+      <div class="lhead">Arrow legend</div>
+      <div class="legend-row">
+        <svg><line x1="0" y1="50%" x2="100%" y2="50%" stroke="#1e40af" stroke-width="2.2"/></svg>
+        forward (Stage 1 train + Stage 2 deploy)
+      </div>
+      <div class="legend-row">
+        <svg><line x1="0" y1="50%" x2="100%" y2="50%" stroke="#b91c1c" stroke-width="1.8" stroke-dasharray="5 3"/></svg>
+        backprop ∇<sub>Θ</sub>ℒ (Stage 1 only)
+      </div>
+      <div class="legend-row">
+        <svg><line x1="0" y1="50%" x2="100%" y2="50%" stroke="#ea580c" stroke-width="1.8" stroke-dasharray="5 3"/></svg>
+        BPR feedback ↺ (Stage 2 only, internal to ⑦↔⑧)
+      </div>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

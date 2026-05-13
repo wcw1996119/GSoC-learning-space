@@ -1,0 +1,335 @@
+% Figure 1 v5 — Wang et al. KBS-style with deeper sub-module granularity.
+% ML-canonical naming: Encoder / Decoder + Loss / Inference.
+% Each stage now has 4-6 sub-modules with embedded mini-icons (matching
+% the granularity of Wang et al. Fig. 1).
+%
+% Compile:  pdflatex figure1_architecture_v5.tex
+
+\documentclass[border=10pt]{standalone}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath, amssymb}
+\usepackage{tikz}
+\usepackage{xcolor}
+\usepackage{graphicx}
+
+\usetikzlibrary{
+  positioning, arrows.meta, shapes.geometric, calc, fit, backgrounds,
+}
+
+% ─── Wang-inspired pastel palette ───────────────────────────────────────────
+\definecolor{stageABg}    {HTML}{E0EBF5}
+\definecolor{stageABanner}{HTML}{3B6FB6}
+\definecolor{stageBBg}    {HTML}{FAE5DD}
+\definecolor{stageBBanner}{HTML}{C44E52}
+\definecolor{stageCBg}    {HTML}{FCF1D6}
+\definecolor{stageCBanner}{HTML}{B8732E}
+\definecolor{cFlow}       {HTML}{E07A5F}
+\definecolor{cBack}       {HTML}{8B5CF6}
+\definecolor{cBPR}        {HTML}{F59E0B}
+\definecolor{cText}       {HTML}{1F2937}
+\definecolor{cMuted}      {HTML}{6B7280}
+\definecolor{cBorder}     {HTML}{CBD5E1}
+
+\begin{document}
+
+\begin{tikzpicture}[
+  font=\sffamily\small,
+  thick,
+  >={Stealth[length=5pt, width=5pt]},
+  every node/.style={align=center, text=cText},
+  %
+  stageframe/.style={
+    draw=none, fill=#1, rounded corners=6pt,
+    inner xsep=10pt, inner ysep=12pt,
+  },
+  stagebanner/.style={
+    fill=#1, text=white, font=\sffamily\bfseries\small,
+    rounded corners=4pt, inner sep=6pt,
+  },
+  modA/.style={
+    draw=stageABanner, fill=white, line width=0.7pt,
+    rounded corners=3pt, inner sep=4pt,
+    font=\sffamily\footnotesize,
+  },
+  modB/.style={
+    draw=stageBBanner, fill=white, line width=0.7pt,
+    rounded corners=3pt, inner sep=4pt,
+    font=\sffamily\footnotesize,
+  },
+  modC/.style={
+    draw=stageCBanner, fill=white, line width=0.7pt,
+    rounded corners=3pt, inner sep=4pt,
+    font=\sffamily\footnotesize,
+  },
+  arrFwd/.style={->, line width=1.6pt, draw=cFlow},
+  arrInner/.style={->, line width=0.8pt, draw=cText!70},
+  arrBack/.style={->, line width=1.0pt, draw=cBack, dashed},
+  arrBPR/.style={->, line width=1.0pt, draw=cBPR, dashed},
+  arrlbl/.style={font=\sffamily\scriptsize\itshape, text=cMuted, fill=white,
+                 inner sep=1pt, midway},
+  numcircle/.style={
+    circle, draw=#1, fill=#1, text=white, font=\sffamily\bfseries\scriptsize,
+    inner sep=0pt, minimum size=11pt,
+  },
+]
+
+% ════════════════════════════════════════════════════════════════════════
+%  STAGE A — ENCODER (Spatio-temporal representation learning)
+% ════════════════════════════════════════════════════════════════════════
+
+\begin{scope}[local bounding box=stageA]
+
+  % Inputs (full-height left column)
+  \node[modA, minimum width=36mm, minimum height=80mm,
+         anchor=north west] (inputs) at (0, 0)
+    {\begin{minipage}{32mm}\centering
+      \textcolor{stageABanner}{\textbf{Inputs}}\\[2pt]
+      \scriptsize $X^{\text{static}}\!\in\!\mathbb{R}^{N\times 22}$\\
+      \scriptsize POI · jobs · IMD\\[3pt]
+      \scriptsize $X^{\text{dyn}}\!\in\!\mathbb{R}^{T\times N\times 5}$\\
+      \scriptsize hourly congestion · inflow\\[3pt]
+      \scriptsize $\mathcal{G}=(V,E)$,\;1\,km grid\\
+      \scriptsize $t_{ij}^{(m)},\;\log d_{ij}$\\[5pt]
+      \includegraphics[width=30mm]{../figures/arch/grid_vjt_heatmap.png}\\[1pt]
+      \scriptsize\textit{baseline $V_{j,t}$}
+    \end{minipage}};
+
+  % Sub-module 1: static branch
+  \node[modA, minimum width=44mm,
+         right=10mm of inputs.north east, anchor=north west] (m1)
+    {\begin{minipage}{40mm}\centering
+      \textcolor{stageABanner}{\textbf{\textcircled{\scriptsize 1} Static branch}}\\
+      \scriptsize GraphSAGE $\times 2$ layers\\[2pt]
+      \includegraphics[width=32mm]{../figures/arch/sage_v2.png}\\
+      \scriptsize $h_s\in\mathbb{R}^{N\times 32}$
+    \end{minipage}};
+
+  % Sub-module 2: dynamic branch (below static)
+  \node[modA, minimum width=44mm,
+         below=4mm of m1.south, anchor=north] (m2)
+    {\begin{minipage}{40mm}\centering
+      \textcolor{stageABanner}{\textbf{\textcircled{\scriptsize 2} Dynamic branch}}\\
+      \scriptsize per-hour SAGE $+$ GRU $+$ TCN\\[2pt]
+      \includegraphics[width=38mm]{../figures/arch/dyn_branch_v2.png}\\
+      \scriptsize $h_d\in\mathbb{R}^{T\times N\times 32}$
+    \end{minipage}};
+
+  % Sub-module 3: gated fusion (right of branches)
+  \node[modA, minimum width=38mm,
+         right=8mm of m1.north east, anchor=north west] (m3)
+    {\begin{minipage}{34mm}\centering
+      \textcolor{stageABanner}{\textbf{\textcircled{\scriptsize 3} Gated fusion}}\\
+      \scriptsize $\sigma$-gate per $(t,j)$\\[2pt]
+      \includegraphics[width=30mm]{../figures/arch/fusion_v2.png}
+    \end{minipage}};
+
+  % Sub-module 4: V_jt output (below fusion)
+  \node[modA, minimum width=38mm,
+         below=4mm of m3.south, anchor=north] (m4)
+    {\begin{minipage}{34mm}\centering
+      \textcolor{stageABanner}{\textbf{\textcircled{\scriptsize 4} Destination utility $V_{j,t}$}}\\
+      \scriptsize $V_{j,t}=W_v(\,\mathrm{gate}\,h_s+(1{-}\mathrm{gate})\,h_d)$\\
+      \scriptsize $V \!\leftarrow\! (V{-}\mu_V)/\sigma_V$\\[2pt]
+      \scriptsize $V_{j,t}\in\mathbb{R}^{T\times N}$
+    \end{minipage}};
+
+  % inner arrows
+  \draw[arrInner] (inputs.east |- m1.west) -- (m1.west);
+  \draw[arrInner] (inputs.east |- m2.west) -- (m2.west);
+  \draw[arrInner] (m1.east) -- node[arrlbl, above] {$h_s$} (m3.west);
+  \draw[arrInner] (m2.east) -| ($(m3.south west)+(2mm,0)$);
+  \draw[arrInner] (m3.south) -- (m4.north);
+
+\end{scope}
+
+\begin{pgfonlayer}{background}
+  \node[stageframe=stageABg, fit=(stageA)] (frameA) {};
+\end{pgfonlayer}
+\node[stagebanner=stageABanner, anchor=north west]
+  at ($(frameA.north west)+(8pt, 0pt)$)
+  {\textsc{Stage A · Encoder}\;\,\textmd{\itshape — Spatio-temporal representation learning · 33{,}026 weights}};
+
+% ════════════════════════════════════════════════════════════════════════
+%  STAGE B — DECODER + LOSS (Mixture RUM choice + cross-entropy training)
+% ════════════════════════════════════════════════════════════════════════
+
+\begin{scope}[local bounding box=stageB, shift={(150mm, 0)}]
+
+  % Sub-module 5: per-mode time utility
+  \node[modB, minimum width=42mm,
+         anchor=north west] (m5) at (0, 0)
+    {\begin{minipage}{38mm}\centering
+      \textcolor{stageBBanner}{\textbf{\textcircled{\scriptsize 5} Per-mode time utility}}\\
+      \scriptsize $\beta_{t,m}\!\cdot\! t_{ij}^{(m)}$ for $m\in\{\mathrm{car,tr,wk}\}$\\
+      \scriptsize distance-aware: walk only $d{<}5$\,km\\[2pt]
+      \includegraphics[width=36mm]{../figures/arch/mode_tier_v2.png}
+    \end{minipage}};
+
+  % Sub-module 6: tier scaling κ + δ OccMatch (right of m5)
+  \node[modB, minimum width=42mm,
+         right=6mm of m5.north east, anchor=north west] (m6)
+    {\begin{minipage}{38mm}\centering
+      \textcolor{stageBBanner}{\textbf{\textcircled{\scriptsize 6} Income tier heterogeneity}}\\
+      \scriptsize $\kappa_k$ scales $\beta$, $\delta_k$ scales OccMatch\\[2pt]
+      \includegraphics[width=36mm]{../figures/arch/mode_tier_pies.png}\\
+      \scriptsize $\kappa=[1,1.97,1.97]$, $\delta=[0,.20,.20]$
+    \end{minipage}};
+
+  % Sub-module 7: mixture aggregation
+  \node[modB, minimum width=42mm,
+         below=3mm of m5.south, anchor=north west] (m7)
+    {\begin{minipage}{38mm}\centering
+      \textcolor{stageBBanner}{\textbf{\textcircled{\scriptsize 7} Mixture aggregation}}\\[2pt]
+      \scriptsize $P(j|i,t)=\!\!\!\sum\limits_{m,k}\!\!\!\pi_m(i,j)\pi_k(i)\,\mathrm{sm}_j U^{(m,k)}$\\[2pt]
+      \scriptsize $U^{(m,k)}_{ij,t}\!=\!\alpha V_{j,t}{+}\beta_{t,m}\kappa_k t^{(m)}{+}\gamma\log d{+}\delta_k\mathrm{OccM}$
+    \end{minipage}};
+
+  % Sub-module 8: cross-entropy loss (below m7)
+  \node[modB, minimum width=42mm,
+         right=6mm of m7.north east, anchor=north west] (m8)
+    {\begin{minipage}{38mm}\centering
+      \textcolor{stageBBanner}{\textbf{\textcircled{\scriptsize 8} Cross-entropy loss}}\\
+      \scriptsize $\mathcal{L}\!=\!-\sum_{i,j,t}\!F_{ij,t}\log P(j|i,t)$\\[2pt]
+      \includegraphics[width=36mm]{../figures/arch/train_curve_v2.png}\\
+      \scriptsize \textit{val CPC} = 0.488 (1 seed, 200 ep)
+    \end{minipage}};
+
+  % Sub-module 9: backprop indicator (small, between m8 and m5)
+  \node[modB, minimum width=42mm, fill=stageBBanner!10,
+         below=3mm of m7.south, anchor=north west] (m9)
+    {\begin{minipage}{38mm}\centering
+      \textcolor{stageBBanner}{\textbf{\textcircled{\scriptsize 9} Joint backprop $\nabla_\Theta \mathcal{L}$}}\\
+      \scriptsize Adam: enc lr 1e-3, RUM lr 1e-2\\
+      \scriptsize updates $\Theta_{\text{enc}}$ (33{,}026) $+$ $\beta,\gamma,\delta,\kappa$ (77)\\
+      \scriptsize jointly, end-to-end
+    \end{minipage}};
+
+  % inner arrows
+  \draw[arrInner] (m5.east) -- (m6.west);
+  \draw[arrInner] (m5.south) |- ($(m7.west)+(0,3mm)$);
+  \draw[arrInner] (m6.south) |- ($(m7.east)+(0,-3mm)$);
+  \draw[arrInner] (m7.east) -- node[arrlbl, above] {$P(j|i,t)$} (m8.west);
+  \draw[arrInner] (m8.south) |- (m9.east);
+  \draw[arrBack]  (m9.west) .. controls ($(m9.west)+(-8mm,0)$) and ($(m5.west)+(-8mm,0)$) .. (m5.west);
+
+\end{scope}
+
+\begin{pgfonlayer}{background}
+  \node[stageframe=stageBBg, fit=(stageB)] (frameB) {};
+\end{pgfonlayer}
+\node[stagebanner=stageBBanner, anchor=north west]
+  at ($(frameB.north west)+(8pt, 0pt)$)
+  {\textsc{Stage B · Decoder + Loss}\;\,\textmd{\itshape — Mixture RUM choice probability $+$ cross-entropy training · 77 interp.\ params}};
+
+% ════════════════════════════════════════════════════════════════════════
+%  STAGE C — INFERENCE (Counterfactual deployment + BPR closure)
+% ════════════════════════════════════════════════════════════════════════
+
+\begin{scope}[local bounding box=stageC, shift={(310mm, 0)}]
+
+  % Sub-module 10: frozen Θ + do(X) intervention
+  \node[modC, minimum width=42mm,
+         anchor=north west] (m10) at (0, 0)
+    {\begin{minipage}{38mm}\centering
+      \textcolor{stageCBanner}{\textbf{\textcircled{\scriptsize 10} Counterfactual intervention}}\\
+      \scriptsize $\Theta$ frozen $\bigstar$\\[2pt]
+      \scriptsize $\mathrm{do}(X^{\text{static}})$: spatial $\Delta E_j$\\
+      \scriptsize $\mathrm{do}(X^{\text{dyn}})$: temporal $\Delta\mathit{cong}$\\[3pt]
+      \fbox{\scriptsize\textbf{Sc.~A}: OOC $+65$k jobs}\\
+      \fbox{\scriptsize\textbf{Sc.~B}: peak ${\times}0.5$, shoulder ${\times}1.5$}
+    \end{minipage}};
+
+  % Sub-module 11: agents + Gumbel-max
+  \node[modC, minimum width=42mm,
+         right=6mm of m10.north east, anchor=north west] (m11)
+    {\begin{minipage}{38mm}\centering
+      \textcolor{stageCBanner}{\textbf{\textcircled{\scriptsize 11} Agents \& Gumbel choice}}\\
+      \scriptsize $j_n^*\!=\!\arg\max_j(U_{ij,t}^{(m,k)}{+}\varepsilon_n)$\\
+      \scriptsize $\varepsilon\!\sim\!\mathrm{Gumbel}(0,1)$\\[2pt]
+      \includegraphics[width=36mm]{../figures/arch/agent_choice_v2.png}
+    \end{minipage}};
+
+  % Sub-module 12: BPR multiplier + MSA
+  \node[modC, minimum width=42mm,
+         below=3mm of m10.south, anchor=north west] (m12)
+    {\begin{minipage}{38mm}\centering
+      \textcolor{stageCBanner}{\textbf{\textcircled{\scriptsize 12} BPR feedback $\circlearrowleft$ MSA}}\\
+      \scriptsize $t^{\mathrm{cong}}\!=\!t_0(1{+}0.15(\mathit{V/C})^4)$\\
+      \scriptsize MSA: $F^{(k{+}1)}\!=\!(1{-}\tfrac{1}{k})F^{(k)}{+}\tfrac{1}{k}\mathrm{ch}(t^{(k)})$\\[2pt]
+      \includegraphics[width=34mm]{../figures/arch/bpr_v2.png}
+    \end{minipage}};
+
+  % Sub-module 13: equilibrium outputs (right of BPR)
+  \node[modC, minimum width=42mm,
+         right=6mm of m12.north east, anchor=north west] (m13)
+    {\begin{minipage}{38mm}\centering
+      \textcolor{stageCBanner}{\textbf{\textcircled{\scriptsize 13} Equilibrium $\widehat{F}^*, t_{\mathrm{eq}}$}}\\[1pt]
+      \scriptsize Sc.~A: $\Delta\mathrm{inflow}{=}{+}414{\to}{+}261$ (37\% damping)\\
+      \scriptsize Sc.~B: $t_{\text{car}}^{h08}{:}\,34.2{\to}32.7$\,min ($-4.4\%$)
+    \end{minipage}};
+
+  % Sub-module 14: Hansen accessibility A_i
+  \node[modC, minimum width=42mm,
+         below=3mm of m12.south, anchor=north west] (m14)
+    {\begin{minipage}{38mm}\centering
+      \textcolor{stageCBanner}{\textbf{\textcircled{\scriptsize 14} Hansen accessibility}}\\
+      \scriptsize $A_i\!=\!\sum_j E_j\,e^{\beta_{\text{car}}t_{ij,t}^{(\text{car}),\text{eq}}}$\\[2pt]
+      \includegraphics[width=36mm]{../figures/arch/grid_accessibility_small.png}
+    \end{minipage}};
+
+  % Sub-module 15: welfare deltas
+  \node[modC, minimum width=42mm,
+         right=6mm of m14.north east, anchor=north west] (m15)
+    {\begin{minipage}{38mm}\centering
+      \textcolor{stageCBanner}{\textbf{\textcircled{\scriptsize 15} Welfare $\Delta$ Gini · Palma}}\\[2pt]
+      \includegraphics[width=36mm]{../figures/arch/inequality_bars.png}\\
+      \scriptsize Sc.\,A regressive · Sc.\,B progressive
+    \end{minipage}};
+
+  % inner arrows
+  \draw[arrInner] (m10.east) -- (m11.west);
+  \draw[arrInner] (m11.south) |- (m12.east);
+  \draw[arrInner] (m12.east) -- node[arrlbl, above] {converge} (m13.west);
+  \draw[arrBPR]   (m12.north) .. controls ($(m12.north)+(0,8mm)$) and
+                                    ($(m11.south)+(0,-8mm)$) .. (m11.south);
+  \draw[arrInner] (m13.south) |- (m14.east);
+  \draw[arrInner] (m14.east) -- (m15.west);
+
+\end{scope}
+
+\begin{pgfonlayer}{background}
+  \node[stageframe=stageCBg, fit=(stageC)] (frameC) {};
+\end{pgfonlayer}
+\node[stagebanner=stageCBanner, anchor=north west]
+  at ($(frameC.north west)+(8pt, 0pt)$)
+  {\textsc{Stage C · Inference}\;\,\textmd{\itshape — Counterfactual deployment $+$ BPR closure · $\Theta$ frozen, no re-fit}};
+
+% ════════════════════════════════════════════════════════════════════════
+%  MAIN FLOW ARROWS BETWEEN STAGES
+% ════════════════════════════════════════════════════════════════════════
+
+\draw[arrFwd] (frameA.east) -- node[arrlbl, above, font=\sffamily\small\bfseries]
+              {$V_{j,t}$} (frameB.west);
+
+\draw[arrFwd, draw=cMuted, dashed] (frameB.east) --
+        node[arrlbl, fill=white, draw=cMuted, rounded corners=2pt, inner sep=3pt,
+              font=\sffamily\scriptsize\itshape]
+              {$\bigstar$\;frozen $\Theta$} (frameC.west);
+
+% ════════════════════════════════════════════════════════════════════════
+%  Footer notes
+% ════════════════════════════════════════════════════════════════════════
+
+\node[font=\sffamily\scriptsize\itshape, text=cMuted, anchor=north west,
+       text width=480mm]
+  at ($(frameA.south west)+(0, -8pt)$)
+  {Stage~A learns deep ML weights via $\nabla_\Theta\mathcal{L}$ on aggregate hourly OD.\quad
+  Stage~B identifies 77 interpretable behavioural primitives ($\beta_{t,m},\gamma,\delta_k,\kappa_k$) conditional on $V$.\quad
+  Stage~C deploys frozen $\Theta$ with destination-side BPR closure for spatial / temporal counterfactuals.\quad
+  Trainable parameters: see Table~1.\quad Equations: see \S\,2.4--\S\,2.6.};
+
+\end{tikzpicture}
+
+\end{document}

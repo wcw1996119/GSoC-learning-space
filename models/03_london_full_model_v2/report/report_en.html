@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Reshaping job accessibility — a fine-grained simulation tool for assessing the socio-spatial inequality impact of urban policy interventions</title>
+<style>
+@page {
+    size: A4;
+    margin: 22mm 22mm 22mm 22mm;
+    @bottom-center {
+        content: counter(page);
+        font-family: 'Times New Roman', 'SimSun', serif;
+        font-size: 10pt;
+        color: #333;
+    }
+}
+
+body {
+    font-family: 'Times New Roman', 'SimSun', '宋体', serif;
+    font-size: 11pt;
+    line-height: 1.55;
+    color: #1a1a1a;
+    max-width: 165mm;
+    margin: 0 auto;
+}
+
+h1 {
+    font-size: 20pt;
+    line-height: 1.25;
+    margin: 0 0 16pt 0;
+    text-align: left;
+}
+
+h2 {
+    font-size: 14pt;
+    margin-top: 20pt;
+    margin-bottom: 8pt;
+    border-bottom: 0.4pt solid #888;
+    padding-bottom: 3pt;
+}
+
+h3 {
+    font-size: 12pt;
+    margin-top: 14pt;
+    margin-bottom: 5pt;
+    font-style: italic;
+}
+
+h4 {
+    font-size: 11pt;
+    margin-top: 10pt;
+    margin-bottom: 4pt;
+}
+
+p {
+    text-align: justify;
+    margin: 6pt 0;
+    text-indent: 0;
+}
+
+ul, ol {
+    margin: 5pt 0;
+    padding-left: 22pt;
+}
+
+li {
+    margin: 3pt 0;
+    text-align: justify;
+}
+
+table {
+    border-collapse: collapse;
+    margin: 12pt auto;
+    font-size: 9.5pt;
+    page-break-inside: avoid;
+}
+
+th, td {
+    border: 0.4pt solid #444;
+    padding: 4pt 7pt;
+    vertical-align: top;
+}
+
+th {
+    background-color: #efefef;
+    font-weight: 600;
+    text-align: left;
+}
+
+td {
+    text-align: left;
+}
+
+code {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 9.5pt;
+    background: #f6f6f6;
+    padding: 1pt 3pt;
+    border-radius: 2pt;
+}
+
+pre {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 9pt;
+    background: #f6f6f6;
+    padding: 8pt;
+    overflow-x: auto;
+    page-break-inside: avoid;
+}
+
+blockquote {
+    border-left: 2pt solid #aaa;
+    padding-left: 10pt;
+    margin-left: 0;
+    color: #444;
+    font-style: italic;
+}
+
+hr {
+    border: 0;
+    border-top: 0.4pt solid #888;
+    margin: 14pt 0;
+}
+
+em { font-style: italic; }
+strong { font-weight: 700; }
+
+/* Section separators (---) become hr */
+.abstract {
+    background: #f9f9f9;
+    padding: 10pt 14pt;
+    border-left: 2pt solid #555;
+    margin: 14pt 0 16pt 0;
+    font-size: 10pt;
+}
+
+/* Math rendering */
+.MathJax_Display { margin: 6pt 0; }
+mjx-container {
+    font-size: 100% !important;
+}
+
+/* Figures: never exceed page width */
+img {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 12pt auto;
+}
+figure {
+    page-break-inside: avoid;
+    margin: 12pt 0;
+}
+figcaption, p > strong:first-child {
+    font-size: 9pt;
+    color: #333;
+}
+</style>
+<script>
+MathJax = {
+  tex: {
+    inlineMath: [['$', '$'], ['\\(', '\\)']],
+    displayMath: [['$$', '$$'], ['\\[', '\\]']],
+    processEscapes: true,
+    tags: 'none'
+  },
+  options: {
+    renderActions: {
+      addMenu: [],
+      checkLoading: []
+    }
+  },
+  startup: {
+    pageReady: () => {
+      return MathJax.startup.defaultPageReady().then(() => {
+        document.body.dataset.mathjaxReady = "1";
+      });
+    }
+  }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+</head>
+<body>
+<h1 id="reshaping-job-accessibility-a-fine-grained-simulation-tool-for-assessing-the-socio-spatial-inequality-impact-of-urban-policy-interventions">Reshaping job accessibility — a fine-grained simulation tool for assessing the socio-spatial inequality impact of urban policy interventions</h1>
+
+<h3 id="a-working-report-applied-to-london-old-oak-common-spatial-regeneration-flexible-working-hours">A working report applied to London (Old Oak Common spatial regeneration &amp; flexible working hours)</h3>
+
+<p><strong>Author:</strong> Chengwei Wang <br />
+<strong>Working report — May 2026</strong></p>
+
+<hr />
+
+<h2 id="in-three-sentences">In three sentences</h2>
+
+<p><strong>Aim.</strong> A fine-grained urban-commute simulation tool, built to evaluate how different <strong>policy interventions</strong> reshape the socio-spatial dimension of commute and job-accessibility inequality — by <strong>recovering behavioural decision parameters directly from publicly aggregated OD data</strong>.</p>
+
+<p><strong>Method.</strong> The design binds together the <strong>behavioural interpretability of random-utility models (RUM)</strong> and the <strong>flexible function-approximation power of deep learning</strong> — its core is the <strong>inversion of individual choice parameters from aggregate OD flows</strong>: a standard multinomial-logit choice $P(j|i) = e^{V<em>{ij}}/\sum</em>k e^{V<em>{ik}}$ is written down, the destination-as-workplace attractiveness $A</em>j$ is <strong>learned</strong> by a GraphSAGE graph neural network from spatial features, and the travel-time sensitivity $\beta$, the attractiveness weight $\alpha$, and the GNN&#8217;s internal weights are jointly <strong>back-solved</strong> from observed OD distributions; RUM keeps the learned $A_j$ a behaviourally meaningful scalar, deep learning supplies the spatial-spillover expressivity that hand-coded RUM cannot reach.</p>
+
+<p><strong>Result.</strong> The tool reveals two <strong>qualitatively different distributional signatures</strong> under the two London interventions — Old Oak Common spatial regeneration is <strong>mildly regressive</strong> (population-weighted Palma 0.552 → 0.561, with two-thirds of the free-flow gain absorbed by road congestion); flexible working is <strong>progressive</strong> (peak-hour commute load redistributed −46% / +63%, with the most-exposed outer-borough cells gaining most) — and a mixed-logit diagnostic surfaces a <strong>systematic 17% under-estimation by aggregate-only prediction on greenfield interventions</strong>, an inequality-sensitive bias that conventional aggregate flow analysis cannot see.</p>
+
+<hr />
+
+<h2 id="1-the-question-and-why-it-matters">1. The question, and why it matters</h2>
+
+<p><strong>Job accessibility</strong> — <em>how many jobs you can practically reach from where you live</em> — is one of the cleanest summary measures of urban opportunity. Two Londoners on the same wage but living 5 km apart can be looking at very different sets of jobs they could realistically commute to. This gap then interacts with income, with car ownership, and with the shape of the public-transport network. Almost every transport-related urban policy lever — from spatial regeneration to flexible-hours schemes to new transit lines — moves this gap in some direction, but rarely uniformly across the city: a policy that lifts the average can simultaneously <em>widen</em> the gap between the well-served and the poorly-served. The methodological task this report addresses is to build a tool that lets us see the redistribution, not just the average.</p>
+
+<p>We apply this tool to two live London policy levers:</p>
+
+<ol>
+<li><p><strong>Old Oak Common (OOC) spatial regeneration.</strong> Britain&#8217;s largest planned interchange, scheduled to anchor a regeneration cluster of approximately 65,000 new jobs across the Hammersmith / Ealing border. Classic question: does adding jobs in a designated sub-centre genuinely de-concentrate access from central London, or does it just produce another small dot on the existing accessibility map?</p></li>
+<li><p><strong>Flexible working / off-peak shift.</strong> A staggered-hours intervention modelled as moving 50% of the 7–9am peak commute load into the 10am–3pm shoulder window. Classic question: who benefits — the rush-hour office worker who sees less congestion, or the off-peak service worker who finally gets reasonable transit headways?</p></li>
+</ol>
+
+<p>Both policy families are also under active discussion in Beijing (副中心 sub-centre programme, 弹性办公 flexible-hours policy). London is a development sandbox for the methodology; it is not the research target. Every methodological choice in this report has been picked so that the same pipeline can be re-fitted to Beijing once data clearance lands.</p>
+
+<h2 id="2-methodology-combining-rum-and-deep-learning">2. Methodology — combining RUM and deep learning</h2>
+
+<p>Three families of method dominate the existing literature on simulating commuting under policy change, and each is missing one capability that policy-impact assessment requires:</p>
+
+<table>
+<thead>
+<tr>
+  <th>Family</th>
+  <th>What it does well</th>
+  <th>What it cannot do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>Gravity / radiation models</td>
+  <td>Predicts aggregate flows on calibration data</td>
+  <td>Recovers no behavioural parameters → cannot do counterfactuals coherently</td>
+</tr>
+<tr>
+  <td>Pure deep learning (e.g. Deep Gravity)</td>
+  <td>Fits observed flows with high accuracy</td>
+  <td>Parameters lack interpretable behavioural meaning → cannot say <em>why</em> a result moves</td>
+</tr>
+<tr>
+  <td>Pure agent-based simulation</td>
+  <td>Behaviourally rich, individual-level</td>
+  <td>Agent rules typically hand-coded → drifts away from observed data</td>
+</tr>
+</tbody>
+</table>
+
+<p>The design of this tool is to combine <strong>the behavioural interpretability of random-utility models (RUM)</strong> with <strong>the flexible function-approximation power of a graph neural network</strong>. Each piece carries one capability the other cannot provide.</p>
+
+<h3 id="21-the-accessibility-metric">2.1 The accessibility metric</h3>
+
+<p>For each 1×1 km grid cell <em>i</em> we compute a Hansen-style accessibility:</p>
+
+<p>$$
+A<em>i \;=\; \sum</em>j E<em>j \cdot e^{-\beta\, t</em>{ij}}, \qquad \beta = 0.058 \text{ per minute}.
+$$</p>
+
+<p>The decay parameter $\beta$ here is the <em>same</em> $\beta$ that the choice model recovers in §2.2 — so the accessibility numbers are interpretable as <em>effective workplace reach as Londoners actually trade off time against pull</em>, not as an arbitrary analyst weighting. A 30-minute destination is weighted at 18% of a 0-minute one; a 60-minute destination at 3%. $A<em>i$ has units of &#8220;jobs-equivalent": if $A</em>i = 100{,}000$, the cell has the same effective access as if 100,000 jobs sat on its doorstep at zero travel time.</p>
+
+<h3 id="22-the-choice-model-random-utility-with-a-learned-attractiveness">2.2 The choice model — random utility with a learned attractiveness</h3>
+
+<p>A worker resident in cell $i$ faces all $N = 1{,}725$ possible destination cells and trades two things off:</p>
+
+<ul>
+<li><strong>pull</strong>: how attractive cell $j$ is as a workplace — its industry mix, employment density, transport-hub effect, amenity neighbourhood;</li>
+<li><strong>friction</strong>: how long the commute to $j$ takes.</li>
+</ul>
+
+<p>We write this as a multinomial logit:</p>
+
+<p>$$
+P(j \mid i;\,\theta) \;=\; \frac{\exp(V<em>{ij})}{\sum</em>{k=1}^{N} \exp(V<em>{ik})},
+\qquad V</em>{ij} \;=\; \alpha\, A<em>j(\mathbf{X};\,\phi) \;-\; \beta\, t</em>{ij}.
+$$</p>
+
+<p>The hard part is $A_j(\mathbf{X};\phi)$ — the destination&#8217;s <strong>attractiveness as a workplace</strong>. Hand-coding it as &#8220;jobs × wage × index of amenity&#8221; is known to fit observed flows poorly because workplace attractiveness depends on <em>neighbourhood spillovers</em> (a Soho job is more attractive partly because Soho&#8217;s neighbours are also rich in amenity), on <em>transport-hub network position</em>, and on <em>industry-cluster interactions</em> that no analyst can specify by hand.</p>
+
+<p>We let a <strong>graph neural network (GraphSAGE)</strong> read each cell&#8217;s own 22 features and its neighbours&#8217; features through a 1-hop spatial graph over the 1km grid, and output the attractiveness scalar $A_j$ that best fits observed flows:</p>
+
+<p>$$
+A<em>j(\mathbf{X};\,\phi) \;=\; \mathrm{GraphSAGE}</em>\phi!\left(\mathbf{X}<em>j,\; {\mathbf{X}</em>k : k \in \mathcal{N}(j)}\right).
+$$</p>
+
+<p>Crucially the GNN does <em>not</em> predict OD on its own. It supplies one structured input — the destination attractiveness vector $A$ — into the discrete-choice model that does the actual prediction. This contrasts with the Deep-Gravity-style approach (Simini et al., 2021), which feeds origin and destination features into one large neural network with no explicit choice structure — losing the interpretability that lets us reason about counterfactual policy.</p>
+
+<h3 id="23-the-statistical-principle-of-recovering-behavioural-parameters-from-aggregate-od">2.3 The statistical principle of &#8220;recovering behavioural parameters from aggregate OD&#8221;</h3>
+
+<blockquote>
+  <p>Whenever a paper claims to recover individual behavioural parameters from aggregate data, the natural question is: by what statistical mechanism, and with what guarantees? We owe the reader a clean answer.</p>
+</blockquote>
+
+<p>The mechanism is <strong>Maximum Likelihood Estimation</strong> of a discrete-choice model in the McFadden (1974) tradition, computed numerically via gradient descent. The two named procedures are equivalent.</p>
+
+<p><strong>Step 1.</strong> Under the random-utility assumption with i.i.d. extreme-value-1 errors, the observed origin-$i$ flow vector is multinomially distributed:</p>
+
+<p>$$
+F<em>{i,\cdot} \;\sim\; \mathrm{Multinomial}!\left(O</em>i,\; P(\cdot \mid i;\,\theta)\right),
+\qquad
+\theta = (\alpha,\, \beta,\, \phi).
+$$</p>
+
+<p><strong>Step 2.</strong> The log-likelihood of the parameter vector $\theta$ given all observed flows is therefore (up to an $\theta$-independent constant)</p>
+
+<p>$$
+\mathcal{L}(\theta) \;=\; \sum<em>{i=1}^{N}\sum</em>{j=1}^{N} F_{ij} \log P(j \mid i;\,\theta).
+$$</p>
+
+<p><strong>Step 3.</strong> The negative of $\mathcal{L}(\theta)$ is, term-for-term, the <em>categorical cross-entropy loss</em> used universally in deep-learning classification, with target distribution $F<em>{ij}/O</em>i$ and predicted distribution $P(j|i;\theta)$:</p>
+
+<p>$$
+-\mathcal{L}(\theta) \;=\; -\sum<em>{i,j} F</em>{ij} \log\frac{e^{V<em>{ij}}}{\sum</em>k e^{V<em>{ik}}} \;=\; \mathrm{CrossEntropy}!\left(F</em>{ij}/O_i,\; P(\cdot|i;\theta)\right).
+$$</p>
+
+<p><strong>Therefore.</strong> Minimising the deep-learning cross-entropy loss with backpropagation is <em>numerically identical</em> to performing MLE on the multinomial discrete-choice model. The deep-learning community and the discrete-choice-econometrics community are doing the same operation under different names — the equivalence has been pointed out at least since Bentz &amp; Merunka (2000) and is what licences us to claim the resulting $(\hat{\alpha}, \hat{\beta}, \hat{\phi})$ are MLE estimates with the standard statistical properties.</p>
+
+<p><strong>Identification.</strong> Each parameter is identified from a specific axis of variation in the data:
+- $\hat\beta$ — from the cross-OD-pair variation in $t<em>{ij}$ and the way destination-share decays with travel time;
+- the *shape* of $A</em>j$ — from cross-destination variation in $(E<em>j, \mathbf{X}</em>j, \mathbf{X}<em>{\mathcal{N}(j)})$;
+- $\hat\alpha$ — from the relative scale of $A</em>j$ versus $\beta\, t_{ij}$ (softmax fixes one degree of freedom).</p>
+
+<p>The London training set provides $1{,}725 \times 1{,}725 \times 24 = $ ~71 million OD–hour cells against ~40,000 GNN parameters and 2 behavioural coefficients — strongly over-identified.</p>
+
+<p><strong>Caveats we acknowledge.</strong></p>
+
+<table>
+<thead>
+<tr>
+  <th>Caveat</th>
+  <th>What we do about it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>Neural network makes the loss surface non-convex → no guarantee of global optimum</td>
+  <td>Multi-seed restart (5 seeds in Phase B+); loss spread &lt; 2% across seeds</td>
+</tr>
+<tr>
+  <td>Aggregate-data SE is wider than individual-data SE</td>
+  <td>We do not report point-estimate SE; the §7 reliability scan reports an <em>empirical</em> ±25% confidence band</td>
+</tr>
+<tr>
+  <td>EV1 error assumption may not hold strictly</td>
+  <td>A mixed-logit Monte Carlo with random coefficients is run as a sensitivity check — it produces the §3 <em>Jensen-bias</em> diagnostic</td>
+</tr>
+</tbody>
+</table>
+
+<h3 id="24-data">2.4 Data</h3>
+
+<p>The aggregated OD flow table is the <strong>anonymised mobile-phone location data</strong> released by the UCL CASA group (<a href="https://www.nature.com/articles/s41597-025-06323-8">Zhong &amp; Zhou, 2025, <em>Scientific Data</em></a>; dataset DOI 10.5281/zenodo.13327082): GPS records from approximately 200 smartphone applications, collected across England in <strong>November 2021</strong>, with home and workplace inferred from night-time and day-time stay-point detection respectively, aggregated to MSOA-level travel-to-work flows. We re-grid this to a 1×1 km Cartesian grid (1,725 inhabited cells covering Greater London) using land-area-weighted reallocation. Total commute flows in our training set: ~1.21 million unique OD relationships.</p>
+
+<p>The November 2021 collection date sits in the inter-lockdown window between England&#8217;s autumn re-opening and the December 2021 Omicron Plan B — closer to a &#8220;normal&#8221; baseline than e.g. Census 2021 (March 2021, full lockdown), but still partially affected by hybrid working. A pre-COVID re-fit on the Geographic Data Service 2019 mobile data is on the work plan (see §8).</p>
+
+<p>Other inputs: 1km grid employment by sector (BRES 2024), POI counts (OpenStreetMap), travel-time matrix $t_{ij}$ (TfL public-transport routing), road network for the BPR equilibrium.</p>
+
+<h3 id="25-why-this-transfers-to-beijing">2.5 Why this transfers to Beijing</h3>
+
+<p>Every input — POIs, sectoral employment, travel times, anonymised mobile OD — has a Beijing equivalent (Amap POI, NBS statistical yearbook, Amap routing, university-licensed mobile OD). The inverse — fitting a London-specific RUM with hand-coded UK census variables (ASHE income, JTS journey-time statistics, TS063 SOC9 occupation tables) — would <em>not</em> transfer. This constraint has shaped the methodology choice throughout.</p>
+
+<h2 id="3-what-london-looks-like-today">3. What London looks like today</h2>
+
+<h3 id="31-where-the-jobs-are-and-where-the-people-are">3.1 Where the jobs are, and where the people are</h3>
+
+<p><img src="figures/M1_employment.png" alt="M1" /></p>
+
+<p><strong>Figure M1.</strong> Employment per 1×1 km cell (log scale). The City / Canary Wharf cluster dominates by an order of magnitude; secondary clusters at Stratford, King&#8217;s Cross, Hammersmith, Croydon. The Old Oak Common cluster (starred) currently holds modest employment — that is the gap the regeneration is intended to fill.</p>
+
+<p><img src="figures/M2_population.png" alt="M2" /></p>
+
+<p><strong>Figure M2.</strong> Residential population per 1×1 km cell (log scale). The mismatch between M1 and M2 is the source of all commuting: jobs in central London, residents distributed across the inner ring and a sparser outer ring.</p>
+
+<h3 id="32-the-accessibility-surface">3.2 The accessibility surface</h3>
+
+<p><img src="figures/M3_accessibility.png" alt="M3" /></p>
+
+<p><strong>Figure M3.</strong> Baseline Hansen accessibility $A_i$, AM peak. Central London delivers $A &gt; 600{,}000$ jobs-equivalent; outer south-east cells (Bromley, Bexley, Havering) sit below 30,000 — a roughly <strong>20× ratio</strong>. The cell-level Gini coefficient is <strong>0.46</strong> — high.</p>
+
+<table>
+<thead>
+<tr>
+  <th>Borough (top)</th>
+  <th style="text-align:right;">Pop-weighted $A_i$</th>
+  <th>Borough (bottom)</th>
+  <th style="text-align:right;">Pop-weighted $A_i$</th>
+  <th style="text-align:right;">Ratio</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>City of London</td>
+  <td style="text-align:right;">1,017,845</td>
+  <td>Havering</td>
+  <td style="text-align:right;">47,314</td>
+  <td style="text-align:right;">21.5×</td>
+</tr>
+<tr>
+  <td>Westminster</td>
+  <td style="text-align:right;">571,752</td>
+  <td>Bromley</td>
+  <td style="text-align:right;">52,604</td>
+  <td style="text-align:right;">10.9×</td>
+</tr>
+<tr>
+  <td>Islington</td>
+  <td style="text-align:right;">496,160</td>
+  <td>Bexley</td>
+  <td style="text-align:right;">53,956</td>
+  <td style="text-align:right;">9.2×</td>
+</tr>
+</tbody>
+</table>
+
+<h3 id="33-the-lorenz-decile-picture">3.3 The Lorenz / decile picture</h3>
+
+<p><img src="figures/M7_inequality_summary.png" alt="M7" /></p>
+
+<p><strong>Figure M7.</strong> <em>Left:</em> Lorenz curve of cell-level accessibility — the area between the curve and the diagonal is the Gini = 0.46. <em>Right:</em> mean and median accessibility for the home cells of agents in each income tier. <strong>Tier 3 / Tier 1 ratio = 1.17×</strong>.</p>
+
+<p>Two readings stand out. (i) The cell-level Gini (0.46) is much higher than the income-tier gradient (1.17×), because lower-income workers in London are not uniformly peripheral — many live in highly-accessible inner-borough cells with a strong social-housing legacy (Tower Hamlets, Lambeth, Southwark). (ii) Even with that dampening, Tier-3 residents still average <strong>17% more access</strong> than Tier-1.</p>
+
+<h2 id="4-the-inequality-lens-who-reaches-what">4. The inequality lens — who reaches what</h2>
+
+<p><img src="figures/M4_access_by_income.png" alt="M4" /></p>
+
+<p><strong>Figure M4 (3 panels).</strong> The same accessibility surface seen from the home cells of each income tier — panels fade the cells where few residents of that tier live. Panel (a) is what Tier-1 (lower-income) residents actually see; panel (c) is what Tier-3 sees.</p>
+
+<p>The reading: Tier-1 residents are visible in inner-east and inner-south London (Tower Hamlets, Hackney, Lambeth, Southwark) — these cells are reasonably well-connected, but not at the absolute peak. Tier-3 residents are concentrated in central west and inner north (Westminster, Camden, Islington, Kensington &amp; Chelsea) — bullseye on the highest-$A$ cells. Tier-2 is between.</p>
+
+<p>The 17% gap is real but smaller than headline rhetoric on &#8220;London inequality&#8221; might suggest. The London-specific reason is that the central-east boroughs combine high accessibility with a strong social-housing legacy — a feature that is <em>not generic</em> to all megacities, and which we should not assume holds for Beijing.</p>
+
+<h2 id="5-scenario-a-old-oak-common-65000-jobs">5. Scenario A — Old Oak Common (+65,000 jobs)</h2>
+
+<p>We add a coherent +65,000-job intervention across the 9-cell OOC cluster (Hammersmith / Ealing border). We then re-run the full pipeline under three settings:</p>
+
+<table>
+<thead>
+<tr>
+  <th>Setting</th>
+  <th style="text-align:right;">Mean $A_i$</th>
+  <th style="text-align:right;">Pop-weighted Gini</th>
+  <th style="text-align:right;">Pop-weighted Palma</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>Baseline (today)</td>
+  <td style="text-align:right;">1,222,444</td>
+  <td style="text-align:right;">0.167</td>
+  <td style="text-align:right;">0.552</td>
+</tr>
+<tr>
+  <td>OOC, free-flow $t_{ij}$</td>
+  <td style="text-align:right;">1,237,783</td>
+  <td style="text-align:right;">0.169</td>
+  <td style="text-align:right;">0.557</td>
+</tr>
+<tr>
+  <td>OOC, congestion-equilibrium (BPR)</td>
+  <td style="text-align:right;">1,225,612</td>
+  <td style="text-align:right;">0.169</td>
+  <td style="text-align:right;">0.561</td>
+</tr>
+</tbody>
+</table>
+
+<p>(From <code>evaluation_outputs/paper_a/scenario_A_accessibility.json</code>. Gini and Palma here are computed across the agent population — the people-weighted view.)</p>
+
+<p><img src="figures/M5_scenarioA_delta.png" alt="M5" /></p>
+
+<p><strong>Figure M5.</strong> $\Delta A_i$ per cell from the OOC intervention, under the free-flow opportunity-field assumption. The gain field decays radially from OOC with the recovered $\beta = 0.058$/min. Cells within ~30 minutes of OOC absorb the bulk of the new opportunity; outer south-east London gets almost none.</p>
+
+<p><strong>Reading.</strong> The headline +1.3% mean $A$ under free-flow falls to +0.3% once congestion absorbs most of the gain. Inequality <strong>rises slightly</strong>: population-weighted Palma 0.552 → 0.561, because the gains land disproportionately on already-well-connected NW grids. The plain summary: <strong>OOC creates real new accessibility, but it spreads upward through the income distribution faster than downward.</strong> To redistribute the benefit, the intervention probably needs to be paired with transit improvements connecting OOC to outer south London, or with affordable-housing supply at the new cluster. We are not in a position to recommend any of these from this report alone — we <em>are</em> in a position to say that <em>"build it and the access will redistribute"</em> is not what the model predicts.</p>
+
+<h2 id="6-scenario-b-flexible-work-off-peak-shift">6. Scenario B — Flexible work / off-peak shift</h2>
+
+<p>We model a 50% reduction in 7–9am peak congestion, redistributed across the 10am–3pm shoulder window. The temporally-resolved version of the model re-allocates each home cell&#8217;s commute trips across the day under the new congestion vector.</p>
+
+<p><img src="figures/M6_scenarioB_share.png" alt="M6" /></p>
+
+<p><strong>Figure M6.</strong> Share of each home cell&#8217;s commute trips that depart in the 7–9am AM peak. Outer-borough cells with peak share <strong>above 50%</strong> are the ones whose residents are most exposed to the rush-hour cost — and so are the ones who gain most from a flexible-work intervention that genuinely shifts demand off-peak.</p>
+
+<table>
+<thead>
+<tr>
+  <th>Hour band</th>
+  <th style="text-align:right;">Δ flow (% of baseline)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>7–9am peak</td>
+  <td style="text-align:right;"><strong>−45.7%</strong></td>
+</tr>
+<tr>
+  <td>10am–3pm shoulder</td>
+  <td style="text-align:right;"><strong>+63.0%</strong></td>
+</tr>
+<tr>
+  <td>Off-peak (other hours)</td>
+  <td style="text-align:right;">+8.7%</td>
+</tr>
+</tbody>
+</table>
+
+<p>(<code>evaluation_outputs/paper_a/T7_scenario_B_per_hour.csv</code>.)</p>
+
+<p><strong>Reading.</strong> Peak-hour office workers see a one-shot ~46% drop in their congestion exposure, but the bigger story is the shoulder — service-sector and shift workers whose schedules already span the 10–15h window get markedly better transit headways, which raises their effective accessibility. Mapping this onto figure M6, the cells likely to gain the most are: outer SE London (Bromley, Bexley) where peak-share is high, and parts of the outer NE where transit headways currently degrade fast outside peak.</p>
+
+<p>A clean caveat: this report does not yet quantify the headway / waiting-time effect on Tier-1 service workers; doing it properly requires merging the choice model with a queueing model of the bus network.</p>
+
+<h2 id="7-when-can-we-trust-these-projections">7. When can we trust these projections?</h2>
+
+<p>A model that fits historical OD well can still extrapolate badly. Before quoting policy numbers we ran a <strong>reliability scan</strong>: 60 randomly-located synthetic 9-cell clusters × 6 magnitudes of employment perturbation (10%, 30%, 50%, 100%, 200%, 500%), 360 experiments in total. For each we compared the aggregate-style choice prediction against a Monte-Carlo per-agent prediction (mixed-logit, draws from the agent income distribution). The gap between them is the <strong>Jensen bias</strong> that any aggregate destination-choice model carries when it makes counterfactual claims.</p>
+
+<p><img src="../evaluation_outputs/paper_a/F8_reliability.png" alt="F8" /></p>
+
+<p><strong>Figure F8.</strong> <em>Left:</em> per-experiment $|\text{Jensen bias}|$ as a function of intervention magnitude × baseline cluster employment. The green outline is the empirical &#8220;reliable&#8221; region ($|\text{bias}| &lt; 5\%$). <em>Right:</em> CDF of $|\text{Jensen bias}|$ across all 360 experiments — 12% land below 5% (reliable), a further 31% below 20% (caveat), and 56% above 20% (unreliable).</p>
+
+<p>The OOC intervention sits at <strong>~150,000 baseline cluster employment × +43% magnitude</strong> — the scan places it in the <strong>caveat zone</strong>. We therefore quote the §5 headline as carrying roughly a <strong>±25% confidence band</strong>: the central +1.3% free-flow / +0.3% equilibrium gain is in the right direction and order of magnitude, but the third significant figure should not be treated as meaningful.</p>
+
+<p>This scan is itself a methodological contribution. Most accessibility-modelling papers report a single-scenario delta number; we report the <em>region of policy space</em> in which the model produces trustworthy deltas, and the regions where it does not.</p>
+
+<h2 id="8-limits-and-whats-next">8. Limits and what&#8217;s next</h2>
+
+<ol>
+<li><strong>Time period.</strong> November 2021 is post-second-lockdown but pre-Omicron. Hybrid working is partially baked into the baseline. A pre-COVID re-fit on the Geographic Data Service 2019 mobile data would tighten interpretation, particularly of the flexible-work scenario.</li>
+<li><strong>Income granularity.</strong> Three tiers is the privacy-aggregation limit imposed by the mobile data. Finer breakdowns (income decile × occupation) would require linkage to an income microdataset.</li>
+<li><strong>Counterfactuals are structural projections, not forecasts.</strong> The model assumes preference and friction parameters stay fixed as the spatial layout changes. The §7 reliability scan partially guards against this; it is not a full guard.</li>
+<li><strong>London is a sandbox.</strong> Beijing replication requires re-fitting on Amap routing, NBS POI, and Beijing OD. The pipeline is designed for this swap; the numbers in this report are not portable.</li>
+</ol>
+
+<p><strong>Planned next steps.</strong> (i) Pre-COVID re-fit on GDS 2019. (ii) OOC × transit coupling (Crossrail-2 / GLA bus-route layer in $t_{ij}$). (iii) Flexible-work × headway: couple the destination-choice model to a simple bus-headway model so that the Tier-1 service-worker benefit becomes quantifiable. (iv) Beijing parallel build once data clearance lands (target end-2026).</p>
+
+<hr />
+
+<h2 id="references">References</h2>
+
+<ul>
+<li>Bentz, Y., &amp; Merunka, D. (2000). <em>Neural networks and the multinomial logit for brand choice modelling: A hybrid approach</em>. Journal of Forecasting, 19(3), 177–200.</li>
+<li>Hansen, W. G. (1959). <em>How accessibility shapes land use</em>. JAIP, 25(2), 73–76.</li>
+<li>Hamilton, W., Ying, Z., &amp; Leskovec, J. (2017). <em>Inductive representation learning on large graphs (GraphSAGE)</em>. NeurIPS.</li>
+<li>McFadden, D. (1974). <em>Conditional logit analysis of qualitative choice behavior</em>. In Frontiers in Econometrics, ed. P. Zarembka.</li>
+<li>Simini, F., Barlacchi, G., Luca, M., &amp; Pappalardo, L. (2021). <em>A Deep Gravity model for mobility flows generation</em>. Nature Communications, 12, 6576.</li>
+<li>Train, K. (2009). <em>Discrete Choice Methods with Simulation</em>, 2nd ed. Cambridge UP. (Chs 3, 5.)</li>
+<li>Yao, X., Cheng, T., et al. (2021). <em>Spatial OD flow imputation using graph convolutional networks</em>. IEEE T-ITS.</li>
+<li>Zhong, C., &amp; Zhou, Z. (2025). <em>Anonymised human location data in England for urban mobility research</em>. Scientific Data, 12. (Dataset DOI 10.5281/zenodo.13327082.)</li>
+</ul>
+
+<hr />
+
+<p><em>Reproducibility: <code>report/build_accessibility_maps.py</code> regenerates all figures. Numerical headlines come from <code>report/data/accessibility_per_grid.csv</code> and <code>evaluation_outputs/paper_a/*.json</code>.</em></p>
+
+</body>
+</html>

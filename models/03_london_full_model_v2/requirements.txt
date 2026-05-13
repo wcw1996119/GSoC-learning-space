@@ -1,0 +1,24 @@
+# Core ABM
+mesa>=2.4
+
+# Deep learning + GNN
+torch>=2.0
+torch-geometric>=2.4
+
+# Data + geo
+pandas
+numpy
+geopandas
+pyogrio
+shapely
+pyproj
+
+# Evaluation + ML
+scikit-learn  # for plausibility k-NN distance
+
+# Visualization
+matplotlib
+solara  # for interactive viz (optional, may move to v2.X)
+
+# Utilities
+networkx  # graph construction helper

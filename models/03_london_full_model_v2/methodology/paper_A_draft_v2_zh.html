@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>基于聚合 OD 反向训练的深度选择模型：行为参数恢复与城市政策情景模拟</title>
+<style>
+@page {
+    size: A4;
+    margin: 22mm 22mm 22mm 22mm;
+    @bottom-center {
+        content: counter(page);
+        font-family: 'Times New Roman', 'SimSun', serif;
+        font-size: 10pt;
+        color: #333;
+    }
+}
+
+body {
+    font-family: 'Times New Roman', 'SimSun', '宋体', serif;
+    font-size: 11pt;
+    line-height: 1.55;
+    color: #1a1a1a;
+    max-width: 165mm;
+    margin: 0 auto;
+}
+
+h1 {
+    font-size: 20pt;
+    line-height: 1.25;
+    margin: 0 0 16pt 0;
+    text-align: left;
+}
+
+h2 {
+    font-size: 14pt;
+    margin-top: 20pt;
+    margin-bottom: 8pt;
+    border-bottom: 0.4pt solid #888;
+    padding-bottom: 3pt;
+}
+
+h3 {
+    font-size: 12pt;
+    margin-top: 14pt;
+    margin-bottom: 5pt;
+    font-style: italic;
+}
+
+h4 {
+    font-size: 11pt;
+    margin-top: 10pt;
+    margin-bottom: 4pt;
+}
+
+p {
+    text-align: justify;
+    margin: 6pt 0;
+    text-indent: 0;
+}
+
+ul, ol {
+    margin: 5pt 0;
+    padding-left: 22pt;
+}
+
+li {
+    margin: 3pt 0;
+    text-align: justify;
+}
+
+table {
+    border-collapse: collapse;
+    margin: 12pt auto;
+    font-size: 9.5pt;
+    page-break-inside: avoid;
+}
+
+th, td {
+    border: 0.4pt solid #444;
+    padding: 4pt 7pt;
+    vertical-align: top;
+}
+
+th {
+    background-color: #efefef;
+    font-weight: 600;
+    text-align: left;
+}
+
+td {
+    text-align: left;
+}
+
+code {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 9.5pt;
+    background: #f6f6f6;
+    padding: 1pt 3pt;
+    border-radius: 2pt;
+}
+
+pre {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 9pt;
+    background: #f6f6f6;
+    padding: 8pt;
+    overflow-x: auto;
+    page-break-inside: avoid;
+}
+
+blockquote {
+    border-left: 2pt solid #aaa;
+    padding-left: 10pt;
+    margin-left: 0;
+    color: #444;
+    font-style: italic;
+}
+
+hr {
+    border: 0;
+    border-top: 0.4pt solid #888;
+    margin: 14pt 0;
+}
+
+em { font-style: italic; }
+strong { font-weight: 700; }
+
+/* Section separators (---) become hr */
+.abstract {
+    background: #f9f9f9;
+    padding: 10pt 14pt;
+    border-left: 2pt solid #555;
+    margin: 14pt 0 16pt 0;
+    font-size: 10pt;
+}
+
+/* Math rendering */
+.MathJax_Display { margin: 6pt 0; }
+mjx-container {
+    font-size: 100% !important;
+}
+</style>
+<script>
+MathJax = {
+  tex: {
+    inlineMath: [['$', '$'], ['\\(', '\\)']],
+    displayMath: [['$$', '$$'], ['\\[', '\\]']],
+    processEscapes: true,
+    tags: 'none'
+  },
+  options: {
+    renderActions: {
+      addMenu: [],
+      checkLoading: []
+    }
+  },
+  startup: {
+    pageReady: () => {
+      return MathJax.startup.defaultPageReady().then(() => {
+        document.body.dataset.mathjaxReady = "1";
+      });
+    }
+  }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+</head>
+<body>
+<h1 id="基于聚合-od-反向训练的深度选择模型行为参数恢复与城市政策情景模拟">基于聚合 OD 反向训练的深度选择模型：行为参数恢复与城市政策情景模拟</h1>
+
+<p><em>工作稿，2026-05-06</em></p>
+
+<hr />
+
+<h2 id="摘要">摘要</h2>
+
+<p>本文提出在聚合通勤起讫（OD）数据上对图结构深度选择模型进行反向训练的方法，旨在弥合预测型流量模型（gravity、radiation、Deep Gravity）与可用于反事实政策模拟的结构型模型之间的鸿沟。在伦敦 1725 个 1 公里网格、Census 2021 完整通勤表（121 万通勤者）上，本框架通过最大似然反向训练联合恢复出行时间、距离、职业匹配、目的地工资交互等行为系数。在留出 4 个行政区的空间外推（spatial holdout）评估上，模型获得 <strong>CPC = 0.343，95% bootstrap 置信区间 [0.324, 0.362]</strong>（10 种子集成），显著优于 gravity 基线（0.170；ΔCPC = +0.172，配对 bootstrap <em>p</em> &lt; 10⁻⁴）和我们实现的简化版 Deep Gravity。我们以 2011→2021 跨时段回测（CPC 0.56）和 Bromley 阴性对照（预测/观测 Δ 占比之比 1.15×）验证模型的时间外推能力。两类政策情景在可达性不平等上呈对照：空间情景（OOC 集群增加 6.5 万就业岗位）轻度回归（Gini +1.26%），且 BPR 拥堵均衡吸收了约 2/3 的总收益；时间情景（早高峰需求外溢 50% 至非高峰时段）使早高峰平均通勤时间下降 3.7%、人口加权可达性提升 10.2%、不平等下降（Gini −0.011）。基于公共 WebTAG / Wardman 出行时间价值（VOT）元分析校准的智能体级异质性层显示：成熟 CBD 干预下 Jensen 偏差仅 +2.1%，但在低就业基线的 greenfield 干预下偏差为 −16.7%——聚合模型系统性低估。所有实验从伦敦公开数据复现，无需个人级出行调查，方法可迁移至个人数据受限的城市（如北京）。</p>
+
+<hr />
+
+<h2 id="1-引言">1 · 引言</h2>
+
+<h3 id="11-研究动机">1.1 研究动机</h3>
+
+<p>城市规划机构常面临政策决策，其福利影响取决于通勤者如何在不同目的地与时段间重新分配。两个典型例子贯穿本工作。<strong>空间维度</strong>：英国政府的 42 亿英镑 Old Oak Common（OOC）再开发预计在伦敦中西部带来约 6.5 万个就业岗位；规划者需要回答：哪些人能借此获得新的就业机会？哪些人不能？拥堵代价多大？<strong>时间维度</strong>：后疫情灵活办公政策正在重塑早高峰需求曲线；交通管理部门需要在调整运能配置之前估计灵活办公对均衡通勤时间与可达性的影响。</p>
+
+<p>任一问题都需要一个<strong>结构型</strong>模型：模型参数在政策干预下保持其物理含义，而非仅是对当下流量的拟合映射。古典城市经济学提供了这类参数（出行时间价值、距离衰减、目的地吸引力弹性）和一个成熟的随机效用框架以将它们组合（McFadden, 1974; Train, 2009）。城市级实践中长期欠缺的，是一种从公共部门常规发布的聚合 OD 数据中<strong>恢复</strong>这些参数的可行方法，并能利用现代图神经网络对空间结构建模。</p>
+
+<h3 id="12-既有流量模型的局限">1.2 既有流量模型的局限</h3>
+
+<p>经典聚合流量模型——gravity 模型（Wilson, 1971）、radiation 模型（Simini <em>et al.</em>, 2012）以及最近的 Deep Gravity 神经网络扩展（Simini <em>et al.</em>, 2021）——能很好地拟合观测到的通勤矩阵，但按设计并不恢复关于出行时间、工资、职业的行为系数。它们在样本内具有预测性，但对选择机制保持结构上的不可知，这限制了其反事实推断能力。深度选择模型族（Wang &amp; Klabjan, 2018; Sifringer <em>et al.</em>, 2020; Wong &amp; Farooq, 2021）恢复了参数可解释性，但通常依赖<strong>个人</strong>级显示偏好数据——这对于多数城市来说不可获得：要么受限（如英国 NTS 通过 UKDS 申请），要么根本不存在（多数非 OECD 城市）。Yao <em>et al.</em>（2021）的 TSI-GCN 系列将 GNN 引入 OD 缺失值插补，但本质仍是回归任务而非结构反演。</p>
+
+<p>本文通过<strong>在聚合 OD 上反向训练深度选择模型</strong>填补这一空白：GNN 给出目的地侧吸引力 $V<em>j$，而对 $V</em>j$ 与行为成本向量的封闭式 softmax 让我们在不依赖个人级选择数据的情况下恢复行为系数。</p>
+
+<h3 id="13-主要贡献">1.3 主要贡献</h3>
+
+<p>本文有四项贡献。</p>
+
+<ol>
+<li><p><strong>方法学。</strong> 我们提出图结构深度选择模型在聚合 OD 上的反向训练框架（第 3 节）：GraphSAGE 编码器输出目的地吸引力 $V_j$；随机效用头加入出行时间项、距离项、职业匹配交互项、目的地工资交互项。我们同时报告<strong>符号约束</strong>与<strong>无约束</strong>两种变体，揭示一个聚合数据下的可识别性歧义——据我们所知，此设置下的此类歧义此前未见明确文献描述。</p></li>
+<li><p><strong>跨时段验证。</strong> 我们用 Census 2021 完整 OD 表（121 万通勤者，并非常用的 1.1% 微样本）和 NOMIS WU03EW 2011 表（通过 ONS MSOA-2011↔MSOA-2021 最佳拟合查找表对齐）做 2011→2021 回测。在 2011 上拟合的模型城市级泛化到 2021 的 CPC 为 0.56（样本内为 0.71）。Bromley 阴性对照（2011→2024 就业仅增长 1.55×）的预测 Δ 占比与观测值之比为 1.15×，落在预先注册的 [0.5, 2.0] 容差内。</p></li>
+<li><p><strong>两个政策情景。</strong> 我们以一个空间干预（在 9 网格 Old Oak Common 集群增加 6.5 万就业岗位）和一个时间干预（灵活办公将早高峰需求外移 50% 至非高峰时段）说明框架的政策应用。两情景在不平等维度对立：空间干预<strong>轻度回归</strong>（Gini +1.26%），且 BPR 均衡拥堵吸收了约 2/3 的总可达性收益；时间干预<strong>进步</strong>（Gini −0.011），早高峰平均通勤时间下降 3.7%、可达性上升 10.2%。方法学上我们另记录一个<strong>归一化陷阱</strong>：若不冻结 GNN 输出归一化的基线统计量，目的地侧干预会被对扰动后分布的再中心化抹掉。</p></li>
+<li><p><strong>桥接智能体建模。</strong> 智能体级异质性层为每个智能体分配一个个人 $\beta_n$，其方差校准至 WebTAG / Wardman 出行时间价值元分析。聚合 1 万智能体的预测，与聚合模型预测对比可量化 Jensen 偏差。在成熟 CBD 邻接的 OOC 集群上偏差为 +2.1%（小），但在 greenfield 外伦敦集群上<strong>符号反转并扩大至 −16.7%</strong>——此处聚合模型<strong>系统性低估</strong>响应。该框架不依赖任何个人级出行调查数据，因此可迁移至北京等数据受限城市。</p></li>
+</ol>
+
+<h3 id="14-路线图">1.4 路线图</h3>
+
+<p>第 2 节回顾相关工作。第 3 节给出模型规范。第 4 节描述数据来源。第 5 节报告主表现、基线对比与恢复参数。第 6 节给出回测验证。第 7 节给出两个政策情景与智能体级异质性分析。第 8 节讨论局限。第 9 节展望北京应用（姊妹论文计划）。</p>
+
+<hr />
+
+<h2 id="2-相关工作">2 · 相关工作</h2>
+
+<h3 id="21-聚合流量模型">2.1 聚合流量模型</h3>
+
+<p>gravity 模型（Wilson, 1971）将预测流量设为与起讫规模成正比、与距离或出行时间的某种幂或指数衰减成反比。我们采用基于产生约束的 Poisson MLE 变体（softmax 形式）。radiation 模型（Simini <em>et al.</em>, 2012）在距离上无参数：在某个机会半径内对目的地排序。两者作为结构上可解释的基线。Deep Gravity（Simini <em>et al.</em>, 2021）以多层感知机替代封闭式权重，完全放弃 gravity 的函数形式。我们报告一个简化版 Deep Gravity 实现；在我们 1 公里网格规模（1725 个节点）上其 CPC 反而低于 gravity，这与已有报告一致——他们论文中达到的 0.5–0.6 CPC 需要跨城市 county 级训练数据与原始的调参细节。</p>
+
+<h3 id="22-用于-od-的图神经网络">2.2 用于 OD 的图神经网络</h3>
+
+<p>Yao <em>et al.</em>（2021）的 TSI-GCN 在 30×30 北京网格上做 OD 矩阵插补，任务是样本内重建而非结构恢复。最近综述（STG4Traffic, 2023; Counterfactual Learning on Graphs, 2024）梳理了广泛的 ST-GNN 家族在交通预测中的应用。我们采用 GraphSAGE（Hamilton <em>et al.</em>, 2017）是有意为之：在低数据规模（我们 1478 个训练起点）下，简单平均聚合优于注意力。我们直接报告这一点：4 头 GAT（Veličković <em>et al.</em>, 2018）在我们设置下 CPC 仅 0.246，低于 GraphSAGE 的 0.344。</p>
+
+<h3 id="23-随机效用模型与深度选择">2.3 随机效用模型与深度选择</h3>
+
+<p>离散选择文献以 McFadden 多项 logit（1974）和 Wilson 双重约束（1971）为基础。Train（2009 第 6 章）综述混合 logit 与不可观测异质性变体。深度选择模型（Wang &amp; Klabjan, 2018; Sifringer <em>et al.</em>, 2020; Wong &amp; Farooq, 2021）以神经网络参数化效用，同时保留 axiomatic 的 softmax 选择形式。据我们所知，这些方法通常拟合个人级选择数据；我们将该家族扩展到<strong>聚合 OD 反向训练</strong>，由此引出 §3 与 §5.3 讨论的可识别性问题。</p>
+
+<h3 id="24-异质性出行时间价值与-jensen-偏差">2.4 异质性、出行时间价值与 Jensen 偏差</h3>
+
+<p>Wardman（2014）提供了英国全国出行时间价值的权威元分析（Wardman <em>et al.</em>, 2016 更新）；WebTAG TAG Unit A1.3（DfT, 2024）将其中心值落实为评估实务标准。我们用 WebTAG 收入分档 $\sigma$ 校准每个智能体的 $\beta_n$ 离散度。"聚合预测在偏好异质时相对于平均个人级预测有偏"这一结构论证由来已久（Train, 2009 §6.7），有时类比 Jensen 不等式而被称为 Jensen 偏差。我们对该偏差作经验测量，发现其大小依干预上下文而异：成熟干预下小，greenfield 干预下大且方向有签名。</p>
+
+<hr />
+
+<h2 id="3-方法">3 · 方法</h2>
+
+<h3 id="30-符号">3.0 符号</h3>
+
+<p>令 $i, j \in {1, \ldots, N}$ 为伦敦 1 公里格点（起点与终点）的索引，$t \in {0, \ldots, T-1}$ 为小时索引，$X \in \mathbb{R}^{N \times F}$ 为节点静态特征矩阵。$F<em>{ij}$ 表示从 $i$ 到 $j$ 的 Census 观测通勤计数（$F</em>{ij}^t$ 表示按小时拆分），$t<em>{ij}$ 表示自由流出行时间，$d</em>{ij}$ 为重心距离，$z<em>o(i)$ 为起点的 IMD 收入分项 z-score，$z</em>w(j)$ 为目的地的 ASHE 工资 z-score，$\mathrm{OccMatch}<em>{ij}$ 为起点居民职业分布与目的地工作场所职业分布的余弦相似度。粗体 $\boldsymbol{\theta}$ 表示 GNN 参数；其他希腊字母表示行为系数 $(\alpha, \beta</em>t, \gamma, \delta, \phi, \psi)$。</p>
+
+<h3 id="31-选择模型">3.1 选择模型</h3>
+
+<p>将 $i$ 作为起点、$j$ 作为终点，随机效用记为
+$$ U<em>{ij} = \alpha\,V</em>j + \beta<em>t(i,j)\,t</em>{ij} + \gamma\,\log d<em>{ij} + \delta\,\mathrm{OccMatch}</em>{ij} + \varepsilon<em>{ij}, $$
+其中 $\varepsilon</em>{ij}$ 为标准 Gumbel 误差，由此得到多项 logit
+$$ P(j\mid i) = \frac{\exp U<em>{ij}}{\sum</em>{j&#8217;} \exp U_{ij&#8217;}}. $$</p>
+
+<p>GNN 吸引力上的系数 $\alpha$ 固定为 1 以保识别性；成本系数 $\beta<em>c = -1$ 锚定效用计价单位；其余系数 $\beta</em>t, \gamma, \delta$ 与下文交互系数 $\phi, \psi$ 由反向训练恢复。</p>
+
+<p><strong>通过交互项实现的异质性。</strong> 我们允许时间系数对可观测起点与终点特征作线性依赖：
+$$ \beta<em>t(i,j) = \beta</em>t \cdot \bigl(1 + \phi\,z<em>o(i) + \psi\,z</em>w(j)\bigr), $$
+其中 $z<em>o(i)$ 为起点 IMD 收入分项的 z-score，$z</em>w(j)$ 为目的地 ASHE 工资 z-score。</p>
+
+<p><strong>符号约束变体。</strong> 通过 softplus 重参数化 $\phi = -\mathrm{softplus}(\tilde\phi)$、$\psi = +\mathrm{softplus}(\tilde\psi)$ 强制施加符号方向（高 VOT 工人不成比例地通勤至高工资目的地）。我们同时报告该符号约束变体与无约束最佳拟合变体。</p>
+
+<h3 id="32-gnn-结构效用">3.2 GNN 结构效用</h3>
+
+<p>目的地吸引力 $V<em>j = \mathrm{GNN}</em>\theta(X_j)$ 由 5 层 GraphSAGE（Hamilton <em>et al.</em>, 2017）在 kNN 图（$k = 10$，按自由流通勤时间）上产出，1725 个 1 公里格点，隐藏维度 128。节点特征包括 8 个产业部门就业（SIC 大类）、人口、8 类 POI 密度、地铁站数、重心坐标共 22 维。为防止 GNN 任意调整尺度，输出被规范化为零均值、单位方差。</p>
+
+<p><strong>反事实前向用基线归一化。</strong> 在反事实模式中（第 7 节），归一化统计量<strong>冻结于基线</strong>——若每次重算会被扰动分布再中心化，从而抹掉干预的影响。这是一个我们经实验验证的方法学陷阱。</p>
+
+<h3 id="33-反向训练">3.3 反向训练</h3>
+
+<p>给定观测聚合 OD 计数 $F<em>{ij}$，最大化多项似然
+$$ \mathcal{L}(\theta, \beta</em>t, \gamma, \delta, \phi, \psi) = \sum<em>{i \in \mathrm{train}} \sum</em>j F_{ij} \log P(j\mid i). $$
+为对 1725 个目的地保持计算可行性，使用 top-$K = 50$ 的备选采样（McFadden 1978 修正）。优化器为 AdamW，对 GNN 参数 $\theta$ 与选择头标量分别使用不同的学习率，训练 150 epoch，无早停（通过权重衰减与有界深度/宽度做正则化）。</p>
+
+<h3 id="34-反事实前向">3.4 反事实前向</h3>
+
+<p>对干预 $X<em>S \to X</em>S^{*}$ 的子集节点特征，将训练好的 GNN 在修改后输入下前向，再重算选择概率与产生约束下的预测流量。对车辆模式的反事实，再做 BPR（Sheffi, 1985）用户均衡闭合：
+$$ t<em>{ij}^{\rm eq} = t</em>{ij}^{0} \cdot \Bigl[1 + \alpha<em>{\rm BPR} (V</em>j / C<em>j)^{\beta</em>{\rm BPR}}\Bigr], \quad V<em>j = \sum</em>i F_{ij}^{\rm eq}. $$
+通过逐次平均法（MSA）求解（Sheffi, 1985 第 5 章），并将乘子上限为 2.5，避免在迭代中四次方项发散。</p>
+
+<h3 id="35-智能体级异质性层">3.5 智能体级异质性层</h3>
+
+<p>为将聚合反向模型桥接到 ABM 风格的模拟，我们为每个 $N = 10\,000$ 合成智能体分配个人系数
+$$ \beta<em>n(j) = \beta</em>t \cdot \bigl(1 + \phi\,z<em>o(i</em>n) + \psi\,z<em>w(j) + \varepsilon</em>n\bigr), \quad \varepsilon<em>n \sim \mathcal{N}(0, \sigma^2(\mathrm{tier}</em>n)). $$
+按收入档的变异系数 $\sigma$ 校准至 WebTAG TAG A1.3 收入分档出行时间价值离散度（取 Wardman 2014 的 $\mathrm{CoV} \approx 0.4$）。智能体按个人 softmax 抽取目的地，聚合后即得智能体级 OD 预测。Jensen 偏差经验值
+$$ \mathrm{Bias}<em>{\rm Jensen} = \mathrm{ΔF}</em>{\rm aggregate} - \mathrm{ΔF}_{\rm agent} $$
+在每个政策情景上分别计算。</p>
+
+<hr />
+
+<h2 id="4-数据">4 · 数据</h2>
+
+<p>模型在覆盖大伦敦区的 1725 × 1 公里规则网格上训练。网格对齐英国国家网格系统（EPSG:27700），并与伦敦行政界（33 个行政区 + 伦敦城）相交。每个网格携带 22 维静态节点特征及第 7.2 节小时变体所用的少量时变特征。所有数据来自公开来源，无需注册或额外许可（除标准开放政府许可外）。</p>
+
+<h3 id="41-od-通勤流量">4.1 OD 通勤流量</h3>
+
+<p>2021 数据使用 NOMIS <em>ODWP01EW</em> 表（Census 2021 起讫 × 工作场所类型），限于工作场所代码 3（在英国非家中固定工作地点），以匹配 2011 WU03EW 的范围。完整伦敦居民-伦敦工作子集为 196 940 个 MSOA 对、121 万通勤者，通过人口加权面积分摊降至 1 公里网格。早期 1 公里工作中常用的 1.1% 微样本（5.5 万通勤者）每格估计噪声较大，本文全程使用完整 Census 表。</p>
+
+<p>2011 数据使用 NOMIS <em>WU03EW</em>（"常住地与工作地按通勤方式划分"，MSOA 级），共 240 020 个 MSOA 对、214 万通勤者。映射到我们网格使用 ONS MSOA-2011 → MSOA-2021 最佳拟合查找表；826 个映射 MSOA-2021 中有 18 个为 2011 后新建（人口分裂导致，如 Stratford 区 E02006996 由父级 E02000726 分裂），通过查找表解决。</p>
+
+<h3 id="42-节点特征">4.2 节点特征</h3>
+
+<p>22 维静态特征向量包含：
+- <strong>8 个部门就业</strong> (sec1–sec8，按 NOMIS BRES SIC 18 类汇总：第一产业、制造、建造、零售、餐饮、信息金融、公共部门、其他)，源自 BRES 2024
+- <strong>总工作场所就业</strong>，同 BRES 2024
+- <strong>常住人口</strong>，源自 Census KS101EW（2021），按面积加权聚合 MSOA→网格；2011 回测使用 KS101EW（2011）
+- <strong>POI 计数</strong> 8 类 (商业、教育、餐饮、医疗、办公、公共、零售、交通) 加 POI 总数，源自 OpenStreetMap 2024
+- <strong>地铁站计数</strong>，源自 TfL Open Data 2024（2011 回测时滤除 2012 后开通的 Elizabeth 线与 Northern 线 Battersea 延伸段）
+- <strong>重心纬度、经度</strong>（EPSG:4326）</p>
+
+<p>除坐标外所有特征做 log1p 变换后 z-score，以压缩城市密度的右尾。2011 回测使用同一组（2024 计算）的均值与标准差进行 z-score 以保持模型输入尺度一致。</p>
+
+<p>时间变体（第 7.2 节情景 B）追加三个时变特征：每小时拥堵率（TomTom 等价的目的地-小时拥堵指数）、小时正弦、小时余弦。结果为 (24, 1725, 25) 张量，喂给增加 GRU 的小时模型。</p>
+
+<h3 id="43-出行时间与距离">4.3 出行时间与距离</h3>
+
+<p>自由流车辆出行时间由大伦敦区 OpenStreetMap 行车网络通过 OSMnx 预计算，边权 <em>长度 / 限速</em>，多源 Dijkstra 从每个网格重心算起。所得 1725 × 1725 矩阵中位数 32 分钟、95 分位 68 分钟，与 TfL JTS 2019 关于平日非高峰车辆出行的统计大体一致。自由流车辆时间既作为反向循环中的成本，也作为 GraphSAGE 邻接基础（按自由流时间取 $k = 10$ 最近邻）。引力项的直线距离使用重心间大圆距离。</p>
+
+<h3 id="44-rum-头辅助输入">4.4 RUM 头辅助输入</h3>
+
+<p>效用头交互项需要：
+- <strong>起点 IMD 分数</strong> ($z<em>o$)：Index of Multiple Deprivation 2019 收入子项，按人口加权聚合 LSOA→网格，再 z-score
+- <strong>目的地工资</strong> ($z</em>w$)：源自 ASHE 2025 工作场所居住地与工作地表，按就业加权聚合 MSOA→网格，再 z-score
+- <strong>职业匹配</strong> ($\mathrm{OccMatch}_{ij}$)：起点居民职业分布（Census 2021 NS-SEC）与目的地工作场所职业分布（BRES 2024 SIC × NS-SEC concordance）的余弦相似度</p>
+
+<p>智能体级异质性层（§3.5、§7.3）另用一个已有的 1 万智能体合成伦敦通勤人口在我们网格分辨率上，每个智能体携带收入分档（按 Wardman 2014 阈值的 low / mid / high）与家庭网格索引，联合抽样以匹配 ASHE 2021 居住收入与 Census KS101 行政区人口分布的边际分布。</p>
+
+<h3 id="45-训练-验证-测试切分">4.5 训练 / 验证 / 测试切分</h3>
+
+<p>主表现评估使用留出 4 个行政区的空间 holdout（Westminster、Hackney、Brent、Bromley），共 1725 个起点中留出 247 个（14%）。这 4 个行政区被先验地选取以覆盖伦敦主要地理类型（CBD 核心、内城非 CBD、外环密集、外环郊区），使评估能体现跨多种城市背景的泛化能力，而非同质子集。10 种子集成在所有种子上使用相同的 train/val 掩膜；§5.1 的 bootstrap 置信区间在留出行政区起点内重抽样。</p>
+
+<p>回测实验（第 6 节）采用跨时段 holdout：在 2011 完整 OD 表上训练，在 2021 完整 OD 表上评估。</p>
+
+<h3 id="46-可重现性">4.6 可重现性</h3>
+
+<p>所有处理后的 CSV / NPZ 文件位于 <code>data/processed/</code>，对应的确定性构建脚本位于 <code>data/scripts/</code>。整套构建流水线可从 NOMIS / OS / OSM 原始下载在大约 4 小时墙钟时间内复现于单台工作站。</p>
+
+<hr />
+
+<h2 id="5-结果">5 · 结果</h2>
+
+<h3 id="51-主要表现">5.1 主要表现</h3>
+
+<p>我们在留出 4 行政区的空间外推上报告表现（Westminster — CBD 核心；Hackney — 内城居住型；Brent — 外环密集；Bromley — 外环郊区），共 1725 个起点中留出 247 个（14%）。CPC（Common Part of Commuters，Lenormand <em>et al.</em>, 2012）为主指标，同时报告流量计数 MAE、Spearman 秩相关、原点行 KL 散度。</p>
+
+<p>我们的最佳配置是无约束 Variant 4 的 10 种子集成：空间外推 CPC = <strong>0.343</strong>，95% bootstrap 置信区间 <strong>[0.324, 0.362]</strong>（重抽验证起点 1000 次）。每种子标准差为 0.003，模型方差由行政区内变异主导，而非跨种子来源。符号约束的 Variant 6——强制 $\phi \le 0,\ \psi \ge 0$——以约 10% 的 CPC（集成 0.290）换取 VOT 收入梯度单调的行为可解释性。我们同时报告两者，因其暴露 §5.3 讨论的聚合数据可识别性歧义。</p>
+
+<p>配对 bootstrap 检验对每对样本同时重算我们模型与基线的 CPC。对 gravity（CPC 0.170），bootstrap 均值 $\mathrm{ΔCPC}$ = <strong>+0.172</strong>，95% CI <strong>[0.155, 0.191]</strong>；1000 次重抽中经验 $P(\mathrm{ours} &gt; \mathrm{gravity})$ = 100%，给出单边 $p &lt; 10^{-4}$。对 radiation 同样（CPC 0.174；ΔCPC +0.170 with 95% CI [0.148, 0.193]；$p &lt; 10^{-4}$）。</p>
+
+<p>按行政区分解的 CPC 揭示模型强弱分布：Westminster（CBD 核心）0.475、Bromley（外环郊区）0.352、Brent（外环密集）0.293、Hackney（内城非 CBD）0.201。Hackney 是模型主要弱项——内城非 CBD 居住型通勤模式相对静态特征更难预测，可能原因在 §8 讨论。</p>
+
+<p><img src="../evaluation_outputs/paper_a/F4_per_borough.png" alt="<strong>图 F4.</strong> 按行政区分解的 CPC（10 种子无约束集成，4-行政区空间外推）。Westminster（CBD）最强，Hackney（内城居住型）最弱。横线标示总集成 CPC（带 95% CI 阴影）以及 gravity / radiation 基线。" /></p>
+
+<h3 id="52-基线对比">5.2 基线对比</h3>
+
+<p>表 T1 总结排行榜（同一空间外推留出）：</p>
+
+<table>
+<thead>
+<tr>
+  <th>模型</th>
+  <th>CPC</th>
+  <th>95% CI</th>
+  <th>备注</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>Gravity (Wilson 1971)</td>
+  <td>0.170</td>
+  <td>—</td>
+  <td>产生约束 softmax MLE</td>
+</tr>
+<tr>
+  <td>Radiation (Simini 2012)</td>
+  <td>0.174</td>
+  <td>—</td>
+  <td>无参 intervening opportunities</td>
+</tr>
+<tr>
+  <td>Deep Gravity（我们简化版 MLP）</td>
+  <td>0.016 ± 0.004</td>
+  <td>—</td>
+  <td>5 层、128 隐、1000 epoch、GPU</td>
+</tr>
+<tr>
+  <td>GAT（4 头）</td>
+  <td>0.246 ± 0.005</td>
+  <td>—</td>
+  <td>同宽度、欠拟合</td>
+</tr>
+<tr>
+  <td><strong>Phase B v6 无约束集成（我们）</strong></td>
+  <td><strong>0.343</strong></td>
+  <td><strong>[0.324, 0.362]</strong></td>
+  <td>10 种子，符号无约束</td>
+</tr>
+<tr>
+  <td>Phase B v6 符号约束集成（我们）</td>
+  <td>0.290</td>
+  <td>[0.286, 0.295]</td>
+  <td>主流方向解释</td>
+</tr>
+</tbody>
+</table>
+
+<p>两点关于基线的说明。<strong>第一</strong>，我们简化版 Deep Gravity（5 层 × 128 MLP，cosine LR 调度，patience-40 早停）在 1 公里尺度上 CPC 远低于 gravity；Simini（2021）的发表数字是在 county 尺度上配合更深 15 层 × 256 隐网络与 gravity-warm-start 初始化得到的，我们未复现这些组件。因此该 Deep Gravity 应理解为<strong>纯 MLP 无图结构在我们尺度上的下界</strong>，而非对原文的忠实再现。<strong>第二</strong>，GAT 消融提供有用的负证据：与 GraphSAGE 同深度同宽度的 4 头注意力模型 CPC 0.246，低于 GraphSAGE 的 0.344。这与"低数据量下注意力机制因参数量过多而欠拟合"的常见经验一致。</p>
+
+<p><img src="../evaluation_outputs/paper_a/F1_leaderboard.png" alt="<strong>图 F1.</strong> 4-行政区空间外推上的模型排行榜。柱形为 CPC；误差棒为种子标准差或主集成 95% bootstrap 置信区间。红虚线标示 gravity 基线。我们模型超过 gravity 0.172 CPC（配对 bootstrap <em>p</em> &lt; 10⁻⁴）。" /></p>
+
+<h3 id="53-恢复参数与可识别性歧义">5.3 恢复参数与可识别性歧义</h3>
+
+<p>约束 Variant 6 恢复 $\beta<em>t = -0.058$、$\phi = -0.30$、$\psi = +0.39$、$\delta = +0.69$、$\gamma = -1.27$（5 种子均值；标准误均小于 5%）。按目的地工资分档的有效时间系数 $\beta</em>{\rm eff}(j) = \beta<em>t (1 + \psi z</em>w(j))$ 给出 VOT 值 £4.49 / £6.59 / £8.23 每小时（低/中/高工资三分位目的地），以 Wardman（2014）RP 通勤 VOT 中心值 £6.5/h 作为效用计价单位锚定。</p>
+
+<p>无约束 Variant 4 恢复 $\beta_t = -0.13$（绝对值更大，对时间更敏感）、$\phi = +0.045$（小）、$\psi = -0.15$（反方向）。$\psi &lt; 0$ 表面上与传统 RP/SP 文献"高 VOT 工人不成比例地通勤至高工资目的地"的经验相悖。我们将其归因为聚合数据下的可识别性微妙之处：从格点级 OD 估计的均值收入梯度反映了三件事的联合（高收入工人居住在哪里、高工资工作分布在哪里、哪类高收入工人去哪类高工资工作），只有第三项是约束变体所设计恢复的行为对象。我们因此报告两种变体并指出 Variant 4 多 5 个 CPC 百分点是行为可解释性的代价——对该模型类别这是据我们所知的首次量化。</p>
+
+<h3 id="54-多重宇宙稳健性">5.4 多重宇宙稳健性</h3>
+
+<p>为验证主结果未被精挑细选，我们在模型超参网格上做 100 次配置的"多重宇宙"扫描（multiverse, Steegen <em>et al.</em>, 2016）：隐藏宽度 $\in {64, 96, 128, 192}$、GNN 深度 $\in {3, 4, 5, 6}$、top-$K$ 选择集 $\in {30, 50, 100}$、RUM 头学习率 $\in {0.01, 0.03, 0.1}$、符号约束 vs 无约束、$\times$ 5 种子。从 720 维的网格中均匀抽取 100 个配置，报告 CPC 的跨配置分布。</p>
+
+<p><strong>100% 配置都超过 gravity 基线 0.170</strong>。两变体分布（图 F3）反映 §5.3 的权衡：</p>
+
+<table>
+<thead>
+<tr>
+  <th>变体</th>
+  <th>n</th>
+  <th>mean</th>
+  <th>std</th>
+  <th>P10</th>
+  <th>中位</th>
+  <th>P90</th>
+  <th>min</th>
+  <th>max</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>约束</td>
+  <td>51</td>
+  <td>0.286</td>
+  <td>0.041</td>
+  <td>0.221</td>
+  <td>0.300</td>
+  <td>0.329</td>
+  <td>0.205</td>
+  <td>0.333</td>
+</tr>
+<tr>
+  <td>无约束</td>
+  <td>49</td>
+  <td>0.315</td>
+  <td>0.024</td>
+  <td>0.280</td>
+  <td>0.318</td>
+  <td>0.344</td>
+  <td>0.262</td>
+  <td>0.351</td>
+</tr>
+</tbody>
+</table>
+
+<p>无约束变体既有更高均值，也有更紧分布（std 0.024 vs 0.041），说明符号约束损失是结构性而非调参 artefact——在所有超参组合下移除约束都将分布向右平移约 3 个 CPC 百分点并稳定化。即使最差配置（CPC 0.205，小宽度约束变体配低学习率）也比 gravity 高 21%。我们的主集成（CPC 0.343）位于无约束分布的 P95，即与多重宇宙整体一致而非孤立优值。</p>
+
+<p><img src="../evaluation_outputs/paper_a/F3_multiverse.png" alt="<strong>图 F3.</strong> 多重宇宙稳健性：100 个超参配置上的空间外推 CPC 分布（网格：hidden ∈ {64,96,128,192}、depth ∈ {3,4,5,6}、K ∈ {30,50,100}、lr_rum ∈ {0.01,0.03,0.1}、约束/无约束 × 5 种子）。每个配置都超过 gravity 0.170。无约束子集均值更高且分布更紧。" /></p>
+
+<hr />
+
+<h2 id="6-回测验证">6 · 回测验证</h2>
+
+<h3 id="61-城市级前向回测2011-2021">6.1 城市级前向回测（2011 → 2021）</h3>
+
+<p>我们在 2011 输入上从头训练同样的 Phase B v6 架构（NOMIS WU03EW 通过 ONS MSOA-2011↔MSOA-2021 最佳拟合查找表降至 1 公里网格；2011 KS101EW Census 人口；TfL 站点限于 2012 前；2011 BRES 部门就业由按 2011/2024 总就业之比缩放 2024 部门构成近似得到）。模型样本内 CPC 0.71。然后用 2024 特征通过同模型前向，比较观测的 Census 2021 完整 OD：CPC 0.56，所有 OD 对的 Spearman 0.52，按行政区 CPC 在 0.52–0.62 之间。0.71 → 0.56 的下降量化了 10 年跨时段泛化间隙；考虑 2021 Census（2021 年 3 月，英国第二次封锁）受新冠疫情的扭曲，这接近通勤结构跨行政区漂移的不可压缩部分。</p>
+
+<h3 id="62-bromley-阴性对照">6.2 Bromley 阴性对照</h3>
+
+<p>模型反事实推断的一个核心顾虑是模型可能对任何干预都"预测一切都涨"。为防范，我们将相同干预机制施加于 Bromley——一个外环郊区行政区，2011→2024 就业仅增长 1.55×（典型稳定郊区，且低于全市均值 1.45×）。模型预测 $\mathrm{Δshare} = +1.46$ 个百分点；观测 2011→2021 变化为 $+1.26$ 个百分点。预测/观测比为 <strong>1.15×</strong>，落在我们预先注册的 [0.5, 2.0] 容差内。框架在未受疫情扰动的郊区干预上校准良好。</p>
+
+<h3 id="63-stratford-干预案例">6.3 Stratford 干预案例</h3>
+
+<p>伦敦东部的 Stratford 在 2011–2024 间经历了非凡的再开发：2011 年 Westfield 商场开业、2012 年伦敦奥运会、随后奥林匹克公园再开发使该集群的日间工作场所就业量增长约 5 倍。我们以中心格 L035_029 为核心的 9 网格集群作为 Stratford 干预对象，将其 2011 特征替换为 2024 值，比较预测与观测的伦敦总通勤流入 Δ 占比。</p>
+
+<p>模型预测 Δ 占比 +1.33 pp；观测值（由 Census 完整 2011 与 2021 OD 表算出）为 +0.23 pp。模型因此<strong>高估约 5.7 倍</strong>。然而预测与观测 Δ 流入按目的地的 Pearson 相关为 0.99，说明再分配的<strong>形状</strong>正确捕捉，但<strong>量级</strong>被放大。两个因素可解释量级失真：(i) 多项 logit 的 IIA 性质——单点干预激进地从所有备选中吸取概率；现实中多个伦敦 CBD 在 2011–2024 间同时增长，Stratford 的相对吸引力增益被稀释；(ii) 2021 Census 落入英国第二次封锁，CBD 邻接区域的通勤流量相对于反事实的非疫情 2021 被压低。我们将这两点记录为局限而非模型缺陷。</p>
+
+<hr />
+
+<h2 id="7-政策情景">7 · 政策情景</h2>
+
+<h3 id="71-情景-a-空间干预在-old-oak-common-增加-65-万就业">7.1 情景 A — 空间干预：在 Old Oak Common 增加 6.5 万就业</h3>
+
+<p>我们在 9 网格 OOC 集群（计划中 HS2 站的西端 Eulerian 终点）上对就业类（部门 1–8、总就业、办公 POI 计数）按总增 6.5 万的比例膨胀。在修改后的特征下前向，聚合预测流量得：</p>
+
+<ul>
+<li>自由流 Δ 流入集群：+126 通勤者</li>
+<li>BPR 均衡 Δ 流入：+105 通勤者（拥堵反推 17%）</li>
+<li>自由流可达性增益（Hansen $A<em>i = \sum</em>j E<em>j \exp(\beta</em>t t_{ij})$）：+1.34%</li>
+<li>BPR 均衡可达性增益：+0.45%（拥堵吸收 2/3 总收益）</li>
+<li>$A_i$ 上人口加权 Gini：+1.26%（回归）</li>
+<li>Palma 比（top10 / bottom40）：+1.51%（回归）</li>
+<li>Atkinson($\varepsilon = 0.5$)：+2.53%（回归）</li>
+</ul>
+
+<p>干预因此在可达性维度<strong>轻度回归</strong>，BPR 均衡放大回归性——它将最大收益吸收于已与 OOC 邻域连通良好的格点（这些格点平均比全市富裕）。</p>
+
+<h3 id="72-情景-b-时间干预灵活办公">7.2 情景 B — 时间干预：灵活办公</h3>
+
+<p>为表征后疫情灵活办公将早高峰需求外移至非高峰时段，我们对早高峰小时（07:00–09:59）需求乘 0.5、对非高峰肩部小时（10:00–15:59）乘 1.5，每个起点保留每日总需求不变。小时模型（T = 24，从头训练 Phase B v6 架构）然后预测每小时 OD 分布。结合每小时 BPR 均衡与每小时可达性：</p>
+
+<ul>
+<li>早高峰 08:00 平均通勤时间：33.99 min → 32.73 min（<strong>−3.7%</strong>）</li>
+<li>早高峰 08:00 可达性（人口加权）：1.09 M → 1.20 M（<strong>+10.2%</strong>）</li>
+<li>早高峰 08:00 $A_i$ 上 Gini：0.180 → 0.169（<strong>−0.011，进步</strong>）</li>
+<li>早高峰 08:00 Palma：0.591 → 0.557（进步）</li>
+</ul>
+
+<p>时间干预在可达性维度<strong>进步</strong>——欠连通的起点（其通勤被拥堵罚得最多）从早高峰拥堵缓解中获益不成比例。与情景 A（回归）的对比是本文中心政策性发现：同一组恢复出的行为参数在两种不同干预模态下给出对立的分配判决，时间干预在福利维度优于空间干预。</p>
+
+<p><img src="../evaluation_outputs/paper_a/F7_scenarioB_hourly.png" alt="<strong>图 F7.</strong> 情景 B 按小时分析。上：每小时总流量基线 vs 灵活办公情景（早高峰 ×0.5、非高峰 ×1.5，每起点保持总需求不变）。下：BPR 均衡平均出行时间在采样小时上的对比；早高峰 h08 改善 −3.7%。" /></p>
+
+<p><img src="../evaluation_outputs/paper_a/F6_scenarios_inequality.png" alt="<strong>图 F6.</strong> 情景 A 与情景 B 对可达性不平等的影响对比。空间干预（左）在三个指标上均回归；时间干预（右）在两个指标上均进步。同一组恢复参数，对立的分配判决。" /></p>
+
+<h3 id="73-智能体级异质性与-jensen-偏差">7.3 智能体级异质性与 Jensen 偏差</h3>
+
+<p>将聚合模型预测与一个每智能体模拟比较，模拟中 $N = 10\,000$ 个智能体每个抽取个人 $\varepsilon<em>n \sim \mathcal N(0, 0.4^2)$（WebTAG / Wardman 校准的变异系数）叠加在已恢复的 $\beta</em>t (1 + \phi z<em>o + \psi z</em>w)$ 上。聚合每个智能体的 softmax 预测：</p>
+
+<ul>
+<li>Stratford 9 集群干预：聚合 Δ 流入 +134.2，智能体 +131.4，<strong>Jensen 偏差 +2.1%</strong></li>
+<li>随机外伦敦 9 集群（低就业基线）：聚合 +589，智能体 +707，<strong>Jensen 偏差 −16.7%</strong></li>
+</ul>
+
+<p>成熟（高就业基线）集群上偏差小，greenfield 集群上偏差大且为<strong>负</strong>。负号意味着当目的地从低吸引力基线开始时，聚合模型<strong>低估</strong>智能体级响应——这对应于 softmax 的凸区域。在 $\sigma \in {0.0, 0.2, 0.4, 0.6, 0.8, 1.0}$ 上的灵敏度扫描（表 T8）确认 Stratford 集群上 |bias| &lt; 4%，说明智能体层方法不依赖精确的 $\sigma$ 选择。</p>
+
+<p>该框架不依赖任何个人级出行调查数据：每智能体 $\sigma$ 完全由公共 WebTAG TAG A1.3 收入分档出行时间价值分布与 Wardman（2014）元分析变异系数校准。这是扩展到个人级数据不可获得城市（如北京）时的主要可移植优势。</p>
+
+<p><img src="../evaluation_outputs/paper_a/F9_jensen_bias.png" alt="<strong>图 F9.</strong> 智能体级 Jensen 偏差。(A) Stratford 9 集群干预上的 CoV 灵敏度扫描：在整个 WebTAG 合理 σ 范围内 |bias| 始终 &lt; 4%，包括 σ = 0.40（Wardman 元分析锚点）。(B) 偏差方向与量级取决于干预背景：成熟 CBD 干预下偏差小且略正，greenfield 干预下偏差大且为负（聚合模型低估）。" /></p>
+
+<hr />
+
+<h2 id="8-讨论与局限">8 · 讨论与局限</h2>
+
+<p>本文主方法论贡献是证明聚合 OD 反向训练图结构深度选择模型可在城市尺度上恢复行为基本量，并具备三个对政策分析有用的性质：(i) 与 gravity 类基线在统计上显著分离（§5.1），(ii) 由 2011→2021 回测证据（第 6 节）支撑的非平凡跨时段泛化能力，(iii) 通过每智能体异质性层（§7.3）连接到 ABM 模拟，量化不同干预模态下的 Jensen 偏差。同一模型架构同时支持两种干预（第 7 节），并在不平等维度给出对立的判决。</p>
+
+<p>然而这些主张受多项实质性局限。</p>
+
+<ol>
+<li><p><strong>反向训练中使用自由流 $t<em>{ij}$。</strong> 流量与出行时间间的同时性需要工具变量或不动点训练机制以从内生性处理。我们在反向循环中全程使用自由流 $t</em>{ij}$，仅在反事实前向中恢复 BPR——这一刻意选择以可识别性与计算可行性换取拟合 $\beta_t$ 中的部分现实性。</p></li>
+<li><p><strong>Hackney 行政区 CPC = 0.20。</strong> 模型对内城非 CBD 居住型通勤模式拟合最弱。我们未解决其原因；候选包括内城更高的方式分担可变性、静态特征中未观测的居住自我选择、聚合计数对行政区内异质性的有限信息量。</p></li>
+<li><p><strong>2021 Census 通勤量缩水。</strong> 2021 年 3 月 Census 落入英国第二次封锁。即使使用完整 Census 表（121 万通勤者）而非 1.1% 微样本，主体量仍较疫情前水平低约 60%。我们的回测因此把再开发效应与 COVID 引发的 CBD 邻接区域通勤下降混淆。我们以比例占比而非绝对计数缓解，但问题不可完全消除。</p></li>
+<li><p><strong>单干预案例研究。</strong> 回测仅测试 Stratford 再开发。多案例研究（Vauxhall–Nine Elms、Battersea Power Station、Crossrail 走廊）会增强验证。我们留待后续工作。</p></li>
+<li><p><strong>未建模通勤方式选择。</strong> 通勤方式在底层 Census 中被记录但本工作未建模。在 (mode, destination) 上的嵌套 logit 是自然扩展，列入计划中的北京姊妹论文议程。</p></li>
+<li><p><strong>聚合可识别性歧义（§5.3）。</strong> 无约束变体拟合 OD 更好但恢复了与传统 RP/SP 文献符号相反的目的地工资交互 $\psi$。我们未解决此歧义——可能是劳动力市场匹配 artefact，聚合数据无法将其与行为基本量分离——但同时报告两种变体并量化行为可解释性的 CPC 代价。</p></li>
+<li><p><strong>异质性层使用合成智能体人群。</strong> 1 万智能体人群（§7.3）为合成构造，边际拟合至 ASHE 居住收入与 Census KS101 行政区人口分布。(收入、职业、居住) 的联合分布因此与边际一致但非真实显示偏好面板。Jensen 偏差量化因此是从可观测聚合加文献先验 $\sigma$ 可推得的上界，而非真值测量。</p></li>
+<li><p><strong>单城训练。</strong> 所有训练数据来自伦敦。跨城泛化（要么联合拟合多城，如 Simini <em>et al.</em> 2021 的策略；要么以不变性惩罚将伦敦拟合模型迁移至北京）是计划中北京应用（第 9 节）的研究主题。</p></li>
+</ol>
+
+<hr />
+
+<h2 id="9-北京应用姊妹论文展望">9 · 北京应用（姊妹论文展望）</h2>
+
+<p>同一深度选择 + GNN + 智能体异质性框架可直接应用于北京，三处替换：(i) <strong>出行时间</strong>：高德爬取的车辆方向 API 替代我们的 OSMnx 自由流车辆矩阵；公共交通出行时间矩阵由北京 BMTU GTFS 数据派生。(ii) <strong>就业</strong>：北京统计年鉴按区报告总就业，按人口加权面积分摊降至 1 公里网格，替代英国 BRES 数据集。(iii) <strong>VOT 离散度</strong>：智能体异质性层中的 $\sigma$ 由中文背景的 VOT 元分析（Bao <em>et al.</em>, 2024; Wang <em>et al.</em>, 2018）重新校准，而非 WebTAG。验证替代证据——多重宇宙稳健性、合理性度量、与 gravity 的三角化——皆可获得；回测<strong>不可</strong>，因北京缺乏开放历史 OD 数据于 MSOA 等价分辨率。北京应用因此继承本文已验证的方法学，并以替代证据链替代历史回测。</p>
+
+<hr />
+
+<h2 id="10-可重现性">10 · 可重现性</h2>
+
+<p>所有代码位于仓库 <code>experiments/paper_a/</code>（实验 harness）与 <code>models_lib/inverse_rum/</code>（模型组件）。单个 Phase B v6 ckpt 在单个 CPU 核上约 30 秒完成训练；主 10 种子无约束集成约 8 分钟。100 配置多重宇宙扫描（§5.4）在单 CPU 上约 50 分钟。智能体异质性层（§7.3）与每小时情景 B（§7.2）在同样硬件上各运行不到 1 分钟。所有原始数据可从公共来源（NOMIS Census 2021 ODWP01EW、NOMIS 2011 WU03EW、NOMIS BRES、ONS 开放地理门户 MSOA-2011↔MSOA-2021 查找表、OpenStreetMap via OSMnx、TfL Open Data）下载，无需注册或额外许可（除标准开放政府许可外）。我们发布所有派生 NPZ / CSV 中间产物及第 5–7 节使用的训练 ckpt。</p>
+
+<hr />
+
+<h2 id="参考文献">参考文献</h2>
+
+<p><em>（待扩展；正文中关键引用如下）</em></p>
+
+<ul>
+<li>Wilson, A. G. (1971). A family of spatial interaction models. <em>Environment and Planning A</em>.</li>
+<li>McFadden, D. (1974). Conditional logit analysis of qualitative choice behaviour.</li>
+<li>McFadden, D. (1978). Modelling the choice of residential location.</li>
+<li>Sheffi, Y. (1985). <em>Urban Transportation Networks</em>. Prentice Hall.</li>
+<li>Hamilton, W., Ying, Z., Leskovec, J. (2017). Inductive representation learning on large graphs. <em>NeurIPS</em>.</li>
+<li>Veličković, P. <em>et al.</em> (2018). Graph Attention Networks. <em>ICLR</em>.</li>
+<li>Train, K. E. (2009). <em>Discrete Choice Methods with Simulation</em>, 2nd ed.</li>
+<li>Simini, F. <em>et al.</em> (2012). A universal model for mobility and migration patterns. <em>Nature</em>.</li>
+<li>Lenormand, M. <em>et al.</em> (2012). Universal patterns of human mobility from a multi-day GPS dataset. <em>PLOS ONE</em>.</li>
+<li>Wardman, M., Chintakayala, V. P. K., de Jong, G. (2016). Values of travel time in Europe: Review and meta-analysis. <em>Transportation Research Part A</em>.</li>
+<li>Yao, X. <em>et al.</em> (2021). Spatial-interaction graph convolutional network for OD matrix estimation. <em>IEEE TITS</em>.</li>
+<li>Simini, F. <em>et al.</em> (2021). A Deep Gravity model for mobility flows. <em>Nature Communications</em>.</li>
+<li>Wang, S., Klabjan, D. (2018). Effects of distance on travel demand. <em>NeurIPS workshop</em>.</li>
+<li>Sifringer, B., Lurkin, V., Alahi, A. (2020). TasteNet: deep learning for taste heterogeneity in choice models. <em>Transportation Research Part B</em>.</li>
+<li>Wong, M., Farooq, B. (2021). ResLogit: A residual deep learning model for choice. <em>Transportation Research Part C</em>.</li>
+<li>Department for Transport (2024). <em>TAG Unit A1.3: Use of Time and Reliability Values</em>. WebTAG.</li>
+<li>Steegen, S. <em>et al.</em> (2016). Increasing transparency through a multiverse analysis. <em>Perspectives on Psychological Science</em>.</li>
+<li>Kim, S. <em>et al.</em> (2024). Counterfactual Explanations for Deep Learning-Based Traffic Forecasting. <em>arXiv</em>.</li>
+</ul>
+
+</body>
+</html>

@@ -1,0 +1,299 @@
+% Figure 1 v6 — ML-ABM framework (NOT RUM-framed).
+% Wang KBS-style with deeper module granularity, but consolidated to 9
+% sub-modules (4+2+3). Each box has explicit Input → Operation → Output
+% with tensor shapes.  Stage C explicitly visualises agent heterogeneity.
+%
+% Compile:  pdflatex figure1_architecture_v6.tex
+
+\documentclass[border=10pt]{standalone}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath, amssymb}
+\usepackage{tikz}
+\usepackage{xcolor}
+\usepackage{graphicx}
+
+\usetikzlibrary{
+  positioning, arrows.meta, shapes.geometric, calc, fit, backgrounds,
+}
+
+% ─── Wang-inspired pastel palette ───────────────────────────────────────────
+\definecolor{stageABg}    {HTML}{E0EBF5}
+\definecolor{stageABanner}{HTML}{3B6FB6}
+\definecolor{stageBBg}    {HTML}{FAE5DD}
+\definecolor{stageBBanner}{HTML}{C44E52}
+\definecolor{stageCBg}    {HTML}{FCF1D6}
+\definecolor{stageCBanner}{HTML}{B8732E}
+\definecolor{cFlow}       {HTML}{E07A5F}
+\definecolor{cBack}       {HTML}{8B5CF6}
+\definecolor{cBPR}        {HTML}{F59E0B}
+\definecolor{cText}       {HTML}{1F2937}
+\definecolor{cMuted}      {HTML}{6B7280}
+\definecolor{cBorder}     {HTML}{CBD5E1}
+\definecolor{cIO}         {HTML}{0F766E}    % teal for I/O shape annotations
+
+\begin{document}
+
+\begin{tikzpicture}[
+  font=\sffamily\small,
+  thick,
+  >={Stealth[length=5pt, width=5pt]},
+  every node/.style={align=center, text=cText},
+  %
+  stageframe/.style={
+    draw=none, fill=#1, rounded corners=6pt,
+    inner xsep=10pt, inner ysep=12pt,
+  },
+  stagebanner/.style={
+    fill=#1, text=white, font=\sffamily\bfseries\small,
+    rounded corners=4pt, inner sep=6pt,
+  },
+  modA/.style={
+    draw=stageABanner, fill=white, line width=0.7pt,
+    rounded corners=3pt, inner sep=5pt,
+    font=\sffamily\footnotesize,
+  },
+  modB/.style={
+    draw=stageBBanner, fill=white, line width=0.7pt,
+    rounded corners=3pt, inner sep=5pt,
+    font=\sffamily\footnotesize,
+  },
+  modC/.style={
+    draw=stageCBanner, fill=white, line width=0.7pt,
+    rounded corners=3pt, inner sep=5pt,
+    font=\sffamily\footnotesize,
+  },
+  iolabel/.style={
+    font=\sffamily\scriptsize, text=cIO,
+  },
+  arrFwd/.style={->, line width=1.6pt, draw=cFlow},
+  arrInner/.style={->, line width=0.8pt, draw=cText!70},
+  arrBack/.style={->, line width=1.0pt, draw=cBack, dashed},
+  arrBPR/.style={->, line width=1.0pt, draw=cBPR, dashed},
+  arrlbl/.style={font=\sffamily\scriptsize\itshape, text=cMuted, fill=white,
+                 inner sep=1pt, midway},
+]
+
+% ════════════════════════════════════════════════════════════════════════
+%  STAGE A · ENCODER — Spatio-temporal representation learning
+% ════════════════════════════════════════════════════════════════════════
+
+\begin{scope}[local bounding box=stageA]
+
+  % ── Inputs (left column, full height) ──
+  \node[modA, minimum width=40mm,
+         anchor=north west] (inputs) at (0, 0)
+    {\begin{minipage}{36mm}\centering
+      \textcolor{stageABanner}{\textbf{Inputs}}\\[2pt]
+      \textcolor{cIO}{\textit{tensor shapes}}\\[2pt]
+      \scriptsize\textsf{$X^{\text{static}}\!\in\!\mathbb{R}^{N\!\times\!22}$}\\
+      \scriptsize POI · jobs · IMD · subway\\[2pt]
+      \scriptsize\textsf{$X^{\text{dyn}}\!\in\!\mathbb{R}^{T\!\times\!N\!\times\!5}$}\\
+      \scriptsize hourly congestion · inflow\\[2pt]
+      \scriptsize\textsf{$\mathcal{G}\!=\!(V,\!E)$, 1\,km grid}\\
+      \scriptsize\textsf{$t_{ij}^{(m)},\;\log d_{ij}$}\\[5pt]
+      \includegraphics[width=32mm]{../figures/arch/grid_vjt_heatmap.png}\\
+      \scriptsize\textit{baseline $V_{j,t}$}
+    \end{minipage}};
+
+  % ── ① Static branch ──
+  \node[modA, minimum width=44mm,
+         right=10mm of inputs.north east, anchor=north west] (m1)
+    {\begin{minipage}{40mm}
+      \centering\textcolor{stageABanner}{\textbf{\textcircled{\scriptsize 1} Static branch}}\\[3pt]
+      \raggedright
+      \textcolor{cIO}{\scriptsize\textsf{IN:}} $X^{\text{static}}\!\in\!\mathbb{R}^{N\!\times\!22}$\\
+      \textcolor{cIO}{\scriptsize\textsf{OP:}} GraphSAGE $\!\times\!2$ layers\\
+      \textcolor{cIO}{\scriptsize\textsf{OUT:}} $h_s\!\in\!\mathbb{R}^{N\!\times\!32}$\\[2pt]
+      \centering\includegraphics[width=32mm]{../figures/arch/sage_v2.png}
+    \end{minipage}};
+
+  % ── ② Dynamic branch (below static) ──
+  \node[modA, minimum width=44mm,
+         below=4mm of m1.south, anchor=north] (m2)
+    {\begin{minipage}{40mm}
+      \centering\textcolor{stageABanner}{\textbf{\textcircled{\scriptsize 2} Dynamic branch}}\\[3pt]
+      \raggedright
+      \textcolor{cIO}{\scriptsize\textsf{IN:}} $X^{\text{dyn}}\!\in\!\mathbb{R}^{T\!\times\!N\!\times\!5}$\\
+      \textcolor{cIO}{\scriptsize\textsf{OP:}} per-hour SAGE $+$ GRU $+$ multi-scale TCN\\
+      \textcolor{cIO}{\scriptsize\textsf{OUT:}} $h_d\!\in\!\mathbb{R}^{T\!\times\!N\!\times\!32}$\\[2pt]
+      \centering\includegraphics[width=38mm]{../figures/arch/dyn_branch_v2.png}
+    \end{minipage}};
+
+  % ── ③ Gated fusion (right of branches) ──
+  \node[modA, minimum width=42mm,
+         right=8mm of m1.north east, anchor=north west] (m3)
+    {\begin{minipage}{38mm}
+      \centering\textcolor{stageABanner}{\textbf{\textcircled{\scriptsize 3} Gated fusion}}\\[3pt]
+      \raggedright
+      \textcolor{cIO}{\scriptsize\textsf{IN:}} $h_s,\,h_d$\\
+      \textcolor{cIO}{\scriptsize\textsf{OP:}} $\sigma$-gate per $(t,j)$\\[1pt]
+      \scriptsize $V\!=\!W_v(\mathrm{gate}\,h_s\!+\!(1{-}\mathrm{gate})\,h_d)$\\
+      \textcolor{cIO}{\scriptsize\textsf{OUT:}} $V_{j,t}\!\in\!\mathbb{R}^{T\!\times\!N}$\\[2pt]
+      \centering\includegraphics[width=30mm]{../figures/arch/fusion_v2.png}
+    \end{minipage}};
+
+  % inner arrows
+  \draw[arrInner] (inputs.east |- m1.west) -- (m1.west);
+  \draw[arrInner] (inputs.east |- m2.west) -- (m2.west);
+  \draw[arrInner] (m1.east) -- node[arrlbl, above] {$h_s$} (m3.west);
+  \draw[arrInner] (m2.east) -| ($(m3.south)+(0,-2mm)$) -- (m3.south);
+
+\end{scope}
+
+\begin{pgfonlayer}{background}
+  \node[stageframe=stageABg, fit=(stageA)] (frameA) {};
+\end{pgfonlayer}
+\node[stagebanner=stageABanner, anchor=north west]
+  at ($(frameA.north west)+(8pt, 0pt)$)
+  {\textsc{Stage A · Encoder}\;\,\textmd{\itshape — ML representation learning · 33{,}026 weights}};
+
+% ════════════════════════════════════════════════════════════════════════
+%  STAGE B · CHOICE HEAD + TRAINING
+% ════════════════════════════════════════════════════════════════════════
+
+\begin{scope}[local bounding box=stageB, shift={(170mm, 0)}]
+
+  % ── ④ Choice head ──
+  \node[modB, minimum width=66mm, minimum height=68mm,
+         anchor=north west] (m4) at (0, 0)
+    {\begin{minipage}{62mm}
+      \centering\textcolor{stageBBanner}{\textbf{\textcircled{\scriptsize 4} Choice head}}\\[2pt]
+      \scriptsize \textit{aggregated mode $\times$ tier mixture softmax}\\[3pt]
+      \raggedright
+      \textcolor{cIO}{\scriptsize\textsf{IN:}} $V_{j,t}$, $t_{ij}^{(m)}$, $\log d_{ij}$, OccM, $\pi_m(i\!,\!j)$, $\pi_k(i)$\\[1pt]
+      \textcolor{cIO}{\scriptsize\textsf{OP:}} mixture aggregation\\[2pt]
+      \centering\scriptsize $U^{(m,k)}_{ij,t}\!=\!\alpha V_{j,t}+\beta_{t,m}\kappa_k t_{ij}^{(m)}+\gamma\log d_{ij}+\delta_k \mathrm{OccM}$\\[2pt]
+      \scriptsize $P(j|i,t)\!=\!\!\!\sum\limits_{m,k}\!\!\pi_m(i\!,\!j)\,\pi_k(i)\;\mathrm{sm}_j U^{(m,k)}_{ij,t}$\\[3pt]
+      \raggedright\textcolor{cIO}{\scriptsize\textsf{OUT:}} $P(j|i,t)\!\in\!\mathbb{R}^{T\!\times\!N\!\times\!N}$\\[2pt]
+      \centering\includegraphics[width=58mm]{../figures/arch/mode_tier_pies.png}\\
+      \scriptsize\textit{$\pi_m$ mode share, $\pi_k$ income tier (per origin)}
+    \end{minipage}};
+
+  % ── ⑤ Training (cross-entropy + backprop) ──
+  \node[modB, minimum width=66mm, fill=stageBBanner!8,
+         below=4mm of m4.south, anchor=north west] (m5)
+    {\begin{minipage}{62mm}
+      \centering\textcolor{stageBBanner}{\textbf{\textcircled{\scriptsize 5} Training · cross-entropy + backprop}}\\[3pt]
+      \raggedright
+      \textcolor{cIO}{\scriptsize\textsf{IN:}} $P(j|i,t)$, observed $F_{ij,t}$\\
+      \textcolor{cIO}{\scriptsize\textsf{OP:}} $\mathcal{L}\!=\!-\!\sum F_{ij,t}\log P(j|i,t)$;\\
+      Adam (enc lr 1e-3, head lr 1e-2);\\
+      $\nabla_\Theta\mathcal{L}$ jointly updates encoder $\Theta_{\text{enc}}$ (33{,}026)\\
+      and choice parameters $\beta\!,\,\gamma\!,\,\delta\!,\,\kappa$ (77).\\
+      \textcolor{cIO}{\scriptsize\textsf{OUT:}} trained $\Theta\!=\!(\Theta_{\text{enc}},\,\beta,\gamma,\delta,\kappa)$\\[2pt]
+      \centering\includegraphics[width=56mm]{../figures/arch/train_curve_v2.png}\\
+      \scriptsize \textit{val CPC = 0.488 (London 2019, 200 ep)}
+    \end{minipage}};
+
+\end{scope}
+
+\begin{pgfonlayer}{background}
+  \node[stageframe=stageBBg, fit=(stageB)] (frameB) {};
+\end{pgfonlayer}
+\node[stagebanner=stageBBanner, anchor=north west]
+  at ($(frameB.north west)+(8pt, 0pt)$)
+  {\textsc{Stage B · Choice head + Training}\;\,\textmd{\itshape — supervised learning on aggregate hourly OD · 77 interpretable parameters}};
+
+% ════════════════════════════════════════════════════════════════════════
+%  STAGE C · ABM FORWARD SIMULATION (counterfactual deployment)
+% ════════════════════════════════════════════════════════════════════════
+
+\begin{scope}[local bounding box=stageC, shift={(330mm, 0)}]
+
+  % ── ⑥ Counterfactual intervention ──
+  \node[modC, minimum width=70mm,
+         anchor=north west] (m6) at (0, 0)
+    {\begin{minipage}{66mm}
+      \centering\textcolor{stageCBanner}{\textbf{\textcircled{\scriptsize 6} Counterfactual intervention $\,\,\Theta\!\bigstar$ frozen}}\\[3pt]
+      \raggedright
+      \textcolor{cIO}{\scriptsize\textsf{IN:}} trained $\Theta$ (frozen $\bigstar$); perturbed input\\
+      \textcolor{cIO}{\scriptsize\textsf{OP:}} apply $\mathrm{do}$-operator on input tensor:\\
+      \;\;\;\;\;\fbox{\scriptsize\textbf{Sc.\,A}: $\mathrm{do}(X^{\text{static}})$ — OOC $+65$k jobs}\\[1pt]
+      \;\;\;\;\;\fbox{\scriptsize\textbf{Sc.\,B}: $\mathrm{do}(X^{\text{dyn}})$ — peak $\!\times\!0.5$, shoulder $\!\times\!1.5$}\\
+      \textcolor{cIO}{\scriptsize\textsf{OUT:}} $V_{j,t}^{\,\prime}$ — re-encoded $V$ under intervention\\
+      \scriptsize\textit{(no re-fit; encoder + choice params unchanged)}
+    \end{minipage}};
+
+  % ── ⑦ Agent dispatch + heterogeneity + BPR ──
+  \node[modC, minimum width=110mm,
+         below=4mm of m6.south, anchor=north west] (m7)
+    {\begin{minipage}{106mm}
+      \centering\textcolor{stageCBanner}{\textbf{\textcircled{\scriptsize 7} Agent-based forward $+$ BPR closure $\,\,\circlearrowleft$ MSA}}\\[2pt]
+      \scriptsize \textit{Each agent $n$ is sampled with attributes $(i_n, t_n, m_n, k_n)\!\sim\!(\pi_m(i)\,\pi_k(i))$ and uses personalised parameters.}\\[3pt]
+      \raggedright
+      \textcolor{cIO}{\scriptsize\textsf{IN:}} $V_{j,t}^{\,\prime}$, $\Theta$ frozen, $\pi_m$, $\pi_k$, $t_{ij}^{(m)}$\\
+      \textcolor{cIO}{\scriptsize\textsf{OP:}} per-agent Gumbel-max choice; aggregate to $\widehat{F}_{ij,t}$; BPR multiplier on car; MSA fixed-point\\
+      \textcolor{cIO}{\scriptsize\textsf{OUT:}} equilibrium flow $\widehat{F}^*\!,\,$ congested time $t^{(\text{car}),\text{eq}}_{ij,t}$\\[3pt]
+      \centering\includegraphics[width=92mm]{../figures/arch/agent_heterogeneity.png}\\[1pt]
+      \scriptsize\textit{Three example agents: same $V_{j,t}$, different $(\beta_m, \kappa_k)$ $\Rightarrow$ different choice distributions $\Rightarrow$ aggregated $\widehat{F}_{ij,t}$.}\\[2pt]
+      \scriptsize\textit{BPR loop: $t^{\text{cong}}\!=\!t_0(1\!+\!0.15(\mathit{V/C})^4)$, MSA until rel-gap $<\!0.5\%$.}
+    \end{minipage}};
+
+  % ── ⑧ Outputs + welfare deltas ──
+  \node[modC, minimum width=110mm, fill=stageCBanner!8,
+         below=4mm of m7.south, anchor=north west] (m8)
+    {\begin{minipage}{106mm}
+      \centering\textcolor{stageCBanner}{\textbf{\textcircled{\scriptsize 8} Outputs · counterfactual welfare assessment}}\\[3pt]
+      \raggedright
+      \textcolor{cIO}{\scriptsize\textsf{IN:}} $\widehat{F}^*$, $t^{(\text{car}),\text{eq}}$, employment $E_j$\\
+      \textcolor{cIO}{\scriptsize\textsf{OP:}} Hansen accessibility $A_i\!=\!\sum_j E_j\,e^{\beta_{\text{car}} t^{(\text{car}),\text{eq}}_{ij}}$;\,population-weighted Gini, Palma, Atkinson\\
+      \textcolor{cIO}{\scriptsize\textsf{OUT:}} $\Delta A_i$, $\Delta\text{Gini}$, $\Delta\text{Palma}$, $\Delta\text{Atkinson}$ for each scenario\\[2pt]
+      \begin{minipage}[t]{52mm}\centering
+        \includegraphics[width=50mm]{../figures/arch/grid_accessibility_small.png}\\
+        \scriptsize\textit{$A_i$ heat-map (real London, $\beta_{\text{car}}\!=\!-0.187$)}\\
+        \scriptsize\textit{max\,/\,p10 ratio $\approx$\,25$\times$ — CBD concentrated}
+      \end{minipage}\hfill
+      \begin{minipage}[t]{52mm}\centering
+        \includegraphics[width=50mm]{../figures/arch/inequality_bars.png}\\
+        \scriptsize\textbf{Sc.\,A}: regressive (\,$\Delta\text{Gini}\!=\!+1.3\%$)\\
+        \scriptsize\textbf{Sc.\,B}: progressive (\,$\Delta\text{Gini}\!<\!0$)
+      \end{minipage}
+    \end{minipage}};
+
+  % inner arrows
+  \draw[arrInner] (m6.south) -- (m7.north);
+  \draw[arrInner] (m7.south) -- (m8.north);
+  % BPR loop indicator inside m7 (orange dashed circular arrow)
+  \node[font=\sffamily\scriptsize\itshape, text=cBPR, anchor=west]
+   at ($(m7.east)+(2mm, 8mm)$) {BPR\,$\circlearrowleft$};
+
+\end{scope}
+
+\begin{pgfonlayer}{background}
+  \node[stageframe=stageCBg, fit=(stageC)] (frameC) {};
+\end{pgfonlayer}
+\node[stagebanner=stageCBanner, anchor=north west]
+  at ($(frameC.north west)+(8pt, 0pt)$)
+  {\textsc{Stage C · ABM Forward Simulation}\;\,\textmd{\itshape — agent-based deployment with congestion feedback · $\Theta$ frozen}};
+
+% ════════════════════════════════════════════════════════════════════════
+%  MAIN FLOW ARROWS BETWEEN STAGES
+% ════════════════════════════════════════════════════════════════════════
+
+\draw[arrFwd] (frameA.east) -- node[arrlbl, above, font=\sffamily\small\bfseries]
+              {$V_{j,t}$} (frameB.west);
+
+\draw[arrFwd, draw=cMuted, dashed] (frameB.east) --
+        node[arrlbl, fill=white, draw=cMuted, rounded corners=2pt, inner sep=3pt,
+              font=\sffamily\scriptsize\itshape]
+              {$\bigstar$\;trained $\Theta$ frozen} (frameC.west);
+
+% ════════════════════════════════════════════════════════════════════════
+%  Footer
+% ════════════════════════════════════════════════════════════════════════
+
+\node[font=\sffamily\scriptsize\itshape, text=cMuted, anchor=north west,
+       text width=540mm]
+  at ($(frameA.south west)+(0, -8pt)$)
+  {\textbf{ML-ABM hybrid framework.}\;\,
+  \textbf{Stage A} (ML side): GNN encoder learns spatio-temporal representation $V_{j,t}$ from features and graph.\;\,
+  \textbf{Stage B} (training): supervised learning fits 33{,}026 encoder weights $+$ 77 interpretable choice parameters jointly via $\nabla_\Theta\mathcal{L}$.\;\,
+  \textbf{Stage C} (ABM side): synthetic agents with heterogeneous $(m,k)$ attributes make individual destination choices using frozen $\Theta$; destination-side BPR closes the congestion feedback loop in MSA fixed point.\;\,
+  Counterfactual interventions perturb only \emph{inputs}; behavioural mechanism is structural and stable (single-component invariance, Sch{\"o}lkopf 2021).\;\,
+  Trainable parameters: see Table~1.};
+
+\end{tikzpicture}
+
+\end{document}

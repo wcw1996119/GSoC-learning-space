@@ -1,0 +1,42 @@
+# Data (raw is large, processed is generated)
+data/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Trained model artifacts
+*.pt
+*.pth
+*.ckpt
+checkpoints/
+
+# Logs / reports
+*.log
+runs/
+wandb/
+
+# Images / generated figures
+*.png
+*.jpg
+*.svg
+
+# Claude Code instructions (matching v1 convention)
+CLAUDE.md
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+
+# Env
+.venv/
+.env
+
+# Evaluation artifacts (regeneratable)
+evaluation_outputs/
+phase13_results*.tar.gz
+hs_err_*.log
+
+# Claude Code local settings
+.claude/

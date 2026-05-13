@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>重塑职位可达性 —— 一个评估城市政策干预对社会-空间不平等影响的精细化模拟工具</title>
+<style>
+@page {
+    size: A4;
+    margin: 22mm 22mm 22mm 22mm;
+    @bottom-center {
+        content: counter(page);
+        font-family: 'Times New Roman', 'SimSun', serif;
+        font-size: 10pt;
+        color: #333;
+    }
+}
+
+body {
+    font-family: 'Times New Roman', 'SimSun', '宋体', serif;
+    font-size: 11pt;
+    line-height: 1.55;
+    color: #1a1a1a;
+    max-width: 165mm;
+    margin: 0 auto;
+}
+
+h1 {
+    font-size: 20pt;
+    line-height: 1.25;
+    margin: 0 0 16pt 0;
+    text-align: left;
+}
+
+h2 {
+    font-size: 14pt;
+    margin-top: 20pt;
+    margin-bottom: 8pt;
+    border-bottom: 0.4pt solid #888;
+    padding-bottom: 3pt;
+}
+
+h3 {
+    font-size: 12pt;
+    margin-top: 14pt;
+    margin-bottom: 5pt;
+    font-style: italic;
+}
+
+h4 {
+    font-size: 11pt;
+    margin-top: 10pt;
+    margin-bottom: 4pt;
+}
+
+p {
+    text-align: justify;
+    margin: 6pt 0;
+    text-indent: 0;
+}
+
+ul, ol {
+    margin: 5pt 0;
+    padding-left: 22pt;
+}
+
+li {
+    margin: 3pt 0;
+    text-align: justify;
+}
+
+table {
+    border-collapse: collapse;
+    margin: 12pt auto;
+    font-size: 9.5pt;
+    page-break-inside: avoid;
+}
+
+th, td {
+    border: 0.4pt solid #444;
+    padding: 4pt 7pt;
+    vertical-align: top;
+}
+
+th {
+    background-color: #efefef;
+    font-weight: 600;
+    text-align: left;
+}
+
+td {
+    text-align: left;
+}
+
+code {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 9.5pt;
+    background: #f6f6f6;
+    padding: 1pt 3pt;
+    border-radius: 2pt;
+}
+
+pre {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 9pt;
+    background: #f6f6f6;
+    padding: 8pt;
+    overflow-x: auto;
+    page-break-inside: avoid;
+}
+
+blockquote {
+    border-left: 2pt solid #aaa;
+    padding-left: 10pt;
+    margin-left: 0;
+    color: #444;
+    font-style: italic;
+}
+
+hr {
+    border: 0;
+    border-top: 0.4pt solid #888;
+    margin: 14pt 0;
+}
+
+em { font-style: italic; }
+strong { font-weight: 700; }
+
+/* Section separators (---) become hr */
+.abstract {
+    background: #f9f9f9;
+    padding: 10pt 14pt;
+    border-left: 2pt solid #555;
+    margin: 14pt 0 16pt 0;
+    font-size: 10pt;
+}
+
+/* Math rendering */
+.MathJax_Display { margin: 6pt 0; }
+mjx-container {
+    font-size: 100% !important;
+}
+
+/* Figures: never exceed page width */
+img {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 12pt auto;
+}
+figure {
+    page-break-inside: avoid;
+    margin: 12pt 0;
+}
+figcaption, p > strong:first-child {
+    font-size: 9pt;
+    color: #333;
+}
+</style>
+<script>
+MathJax = {
+  tex: {
+    inlineMath: [['$', '$'], ['\\(', '\\)']],
+    displayMath: [['$$', '$$'], ['\\[', '\\]']],
+    processEscapes: true,
+    tags: 'none'
+  },
+  options: {
+    renderActions: {
+      addMenu: [],
+      checkLoading: []
+    }
+  },
+  startup: {
+    pageReady: () => {
+      return MathJax.startup.defaultPageReady().then(() => {
+        document.body.dataset.mathjaxReady = "1";
+      });
+    }
+  }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+</head>
+<body>
+<h1 id="重塑职位可达性-一个评估城市政策干预对社会-空间不平等影响的精细化模拟工具">重塑职位可达性 —— 一个评估城市政策干预对社会-空间不平等影响的精细化模拟工具</h1>
+
+<h3 id="应用于伦敦的工作报告old-oak-common-副中心规划-与-弹性办公时段">应用于伦敦的工作报告（Old Oak Common 副中心规划 与 弹性办公时段）</h3>
+
+<p><strong>作者：</strong> 王成伟 <br />
+<strong>工作报告 — 2026 年 5 月</strong></p>
+
+<hr />
+
+<h2 id="三句话概览">三句话概览</h2>
+
+<p><strong>研究目标。</strong> 开发一个精细化的城市通勤模拟工具，<strong>用于评估不同政策干预如何重塑社会-空间维度的通勤与职位可达性不平等</strong> —— 通过直接从公开聚合 OD 数据中<strong>反推个体行为决策参数</strong>，让"政策干预对城市不同社会群体的可达性分配影响"得以被识别。</p>
+
+<p><strong>研究方法。</strong> 设计本质上是把<strong>随机效用模型 (RUM) 的行为可解释性</strong>和<strong>深度学习的灵活函数逼近能力</strong>绑在一起 —— 核心是<strong>从聚合 OD 数据中反推个体行为决策参数</strong>：写一个标准的 multinomial logit 选择模型 $P(j|i) = e^{V<em>{ij}}/\sum</em>k e^{V<em>{ik}}$，其中目的地"工作地吸引力&#8221; $A</em>j$ 由 GraphSAGE 图神经网络从空间特征中<strong>学出来</strong>，而出行时间敏感度 $\beta$、吸引力权重 $\alpha$、GNN 内部权重则从观测 OD 流量分布中<strong>统一倒推</strong>；RUM 保证 GNN 学出的 $A_j$ 仍是有经济学意义的标量、参数仍可解释，深度学习提供 RUM 单靠手工编码做不到的空间溢出表达力。</p>
+
+<p><strong>研究结果。</strong> 工具揭示伦敦两类干预的<strong>质性不同的分布性签名</strong> —— Old Oak Common 空间集中加就业<strong>轻度回归</strong>（人口加权 Palma 由 0.552 升至 0.561、自由流条件下 2/3 表面收益被道路拥堵吸收）；弹性办公时间分散<strong>进步</strong>（早高峰通勤量重分布 −46% / +63%、外伦敦高峰通勤占比 &gt;50% 的居民最受益）—— 并由 mixed-logit 诊断暴露出<strong>聚合预测在 greenfield 干预上系统性低估 17%</strong> 的方法学副产物，这一不平等敏感的偏差在传统聚合流量分析中是看不见的。</p>
+
+<hr />
+
+<h2 id="1-研究问题与意义">1. 研究问题与意义</h2>
+
+<p><strong>职位可达性</strong> —— <em>从你住的地方出发，实际可以到达多少个工作岗位</em> —— 是衡量城市机会公平性最干净的总量指标之一。两个工资相同但住地相距 5 公里的伦敦人，能现实通勤到达的工作集合可能完全不同；这个差距又会和收入、私家车持有、公共交通网络形态相互交织。几乎所有交通相关的城市政策杠杆 —— 从空间再开发到弹性工时到新建轨道交通 —— 都会推动这个差距朝某个方向变化，但<strong>很少在城市内均匀地推</strong>：一个让平均水平上升的政策完全可能同时<strong>扩大</strong>条件好与条件差地区之间的差距。这份报告要解决的方法学任务是：建立一个工具，让我们能看到<strong>重分配的方向</strong>，而不只是平均值的变化。</p>
+
+<p>我们把这个工具应用于两个伦敦正在讨论的政策杠杆：</p>
+
+<ol>
+<li><p><strong>Old Oak Common (OOC) 空间再开发。</strong> 英国规划中规模最大的交通枢纽，预计在 Hammersmith / Ealing 边界的再开发集群中提供约 65,000 个新就业岗位。经典问题：在指定副中心新增就业，是真的把可达性从中心伦敦<strong>分散</strong>出去，还是仅在已有可达性地图上多点一个小亮点？</p></li>
+<li><p><strong>弹性办公 / 错峰通勤。</strong> 把 7–9 点高峰通勤负荷的 50% 移到 10–15 点的 shoulder 时段。经典问题：谁受益 —— 减少了拥堵的高峰办公族，还是终于等到合理发车间隔的非高峰服务业从业者？</p></li>
+</ol>
+
+<p>这两类政策也都是北京目前正在讨论的（副中心战略、弹性办公政策）。<strong>伦敦在这里只是方法学开发的沙盒</strong>，不是研究目标本身。报告里每一个方法学选择都是按"将来可以平移到北京"这一硬约束筛过的。</p>
+
+<h2 id="2-方法-把-rum-和深度学习结合">2. 方法 —— 把 RUM 和深度学习结合</h2>
+
+<p>现有文献里模拟通勤如何在政策下变化的方法主要有三大类，但每一类都缺一件政策影响评估必需的能力：</p>
+
+<table>
+<thead>
+<tr>
+  <th>方法族</th>
+  <th>长处</th>
+  <th>缺什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>Gravity / radiation 模型</td>
+  <td>在校准数据上能预测聚合流量</td>
+  <td>不还原行为参数 → 反事实推断不连贯</td>
+</tr>
+<tr>
+  <td>纯深度学习（如 Deep Gravity）</td>
+  <td>拟合好</td>
+  <td>参数无可解释行为意义 → 说不清"为什么"结果会变</td>
+</tr>
+<tr>
+  <td>纯 ABM</td>
+  <td>行为丰富、个体级</td>
+  <td>智能体规则常靠拍脑袋设定 → 偏离真实数据</td>
+</tr>
+</tbody>
+</table>
+
+<p>本工具的设计是把<strong>随机效用模型 (RUM) 的行为可解释性</strong>和<strong>图神经网络的灵活函数逼近能力</strong>绑在一起 —— 每一块都补另一边缺的能力。</p>
+
+<h3 id="21-可达性度量">2.1 可达性度量</h3>
+
+<p>每个 1×1 公里网格 <em>i</em> 的 Hansen 式可达性：</p>
+
+<p>$$
+A<em>i \;=\; \sum</em>j E<em>j \cdot e^{-\beta\, t</em>{ij}}, \qquad \beta = 0.058 \text{ /分钟}.
+$$</p>
+
+<p>衰减参数 $\beta$ <strong>就是</strong> §2.2 的选择模型反推出来的同一个 $\beta$ —— 所以 $A<em>i$ 数值的解释是"伦敦人实际权衡时间成本之后的有效就业触达"，而不是某个分析师拍脑袋的权重。30 分钟外的目的地相对 0 分钟外的权重为 18%；60 分钟外为 3%。$A</em>i$ 单位是"等效工作岗位数"：$A_i = 100{,}000$ 意味着该网格的有效可达性等于"门口 0 分钟有 100,000 个工作"。</p>
+
+<h3 id="22-选择模型-随机效用-学出来的吸引力">2.2 选择模型 —— 随机效用 + 学出来的吸引力</h3>
+
+<p>住在 $i$ 的工作者面对全部 $N=1{,}725$ 个候选目的地，权衡两件事：</p>
+
+<ul>
+<li><strong>吸引力</strong>：目的地 $j$ 作为工作地有多吸引人 —— 行业结构、就业密度、交通枢纽效应、邻里业态；</li>
+<li><strong>摩擦</strong>：通勤到 $j$ 要多久。</li>
+</ul>
+
+<p>这写成 multinomial logit：</p>
+
+<p>$$
+P(j \mid i;\,\theta) \;=\; \frac{\exp(V<em>{ij})}{\sum</em>{k=1}^{N} \exp(V<em>{ik})},
+\qquad V</em>{ij} \;=\; \alpha\, A<em>j(\mathbf{X};\,\phi) \;-\; \beta\, t</em>{ij}.
+$$</p>
+
+<p>难的是 $A_j(\mathbf{X};\phi)$ —— 目的地的<strong>作为工作地的吸引力</strong>。手工编码成"jobs × wage × 业态指数"对观测流量拟合很弱，因为工作地吸引力依赖<strong>邻里溢出</strong>（Soho 的工作之所以吸引人，部分原因是 Soho 邻居也业态丰富）、<strong>交通枢纽网络位置</strong>、<strong>产业集群交互</strong> —— 这些没有分析师能手工指定。</p>
+
+<p>我们让一个<strong>图神经网络 (GraphSAGE)</strong> 通过 1km 网格上的 1-hop 空间图，读取每个网格自己的 22 维特征 + 邻居特征，输出最贴合观测流量的吸引力标量 $A_j$：</p>
+
+<p>$$
+A<em>j(\mathbf{X};\,\phi) \;=\; \mathrm{GraphSAGE}</em>\phi!\left(\mathbf{X}<em>j,\; {\mathbf{X}</em>k : k \in \mathcal{N}(j)}\right).
+$$</p>
+
+<p>关键：<strong>GNN 自己不预测 OD</strong>。它只提供一个结构化输入 —— 目的地吸引力向量 $A$ —— 喂给做实际预测的离散选择模型。这和 Deep-Gravity 风格 (Simini et al., 2021) 的方案不同 —— 后者把 origin / destination 特征塞进一个大神经网络、没有显式选择结构 —— 牺牲了让我们能就反事实政策做行为推断的可解释性。</p>
+
+<h3 id="23-从聚合-od-反推行为参数的统计学原理">2.3 &#8220;从聚合 OD 反推行为参数"的统计学原理</h3>
+
+<blockquote>
+  <p>任何一篇文章声称从聚合数据里反推出个体行为参数，自然会被问：靠什么统计机制？有什么保证？我们欠读者一个干净的回答。</p>
+</blockquote>
+
+<p>机制是 McFadden (1974) 传统下的<strong>离散选择模型极大似然估计 (MLE)</strong>，数值上由梯度下降执行。两个名字其实是同一件事。</p>
+
+<p><strong>第 1 步。</strong> 在 RUM 假设（i.i.d. 极值-1 误差）下，观测到的 origin-$i$ 流量向量服从多项分布：</p>
+
+<p>$$
+F<em>{i,\cdot} \;\sim\; \mathrm{Multinomial}!\left(O</em>i,\; P(\cdot \mid i;\,\theta)\right),
+\qquad
+\theta = (\alpha,\, \beta,\, \phi).
+$$</p>
+
+<p><strong>第 2 步。</strong> 因此参数向量 $\theta$ 在所有观测流量下的对数似然（差一个 $\theta$ 无关的常数）是：</p>
+
+<p>$$
+\mathcal{L}(\theta) \;=\; \sum<em>{i=1}^{N}\sum</em>{j=1}^{N} F_{ij} \log P(j \mid i;\,\theta).
+$$</p>
+
+<p><strong>第 3 步。</strong> $-\mathcal{L}(\theta)$ <strong>逐项就是</strong>深度学习分类问题里普遍使用的<strong>categorical cross-entropy loss</strong>，target 分布为 $F<em>{ij}/O</em>i$、predicted 分布为 $P(j|i;\theta)$：</p>
+
+<p>$$
+-\mathcal{L}(\theta) \;=\; -\sum<em>{i,j} F</em>{ij} \log\frac{e^{V<em>{ij}}}{\sum</em>k e^{V<em>{ik}}} \;=\; \mathrm{CrossEntropy}!\left(F</em>{ij}/O_i,\; P(\cdot|i;\theta)\right).
+$$</p>
+
+<p><strong>因此。</strong> 用反向传播最小化深度学习的 cross-entropy loss，<strong>数值上等同于</strong>对 multinomial 离散选择模型做 MLE。深度学习社区和离散选择计量经济学社区在用不同的名字做同一件事 —— 这一等价性至少自 Bentz &amp; Merunka (2000) 以来已被多次指出，正是它<strong>给我们权利</strong>声称所得 $(\hat{\alpha}, \hat{\beta}, \hat{\phi})$ 是 MLE 估计、具有 MLE 应有的标准统计性质。</p>
+
+<p><strong>可识别性 (identification)。</strong> 每个参数都由数据中的某条变异轴识别：
+- $\hat\beta$ —— 由 OD pair 间 $t<em>{ij}$ 的横截面变异 + 流量份额随时间衰减的形状识别；
+- $A</em>j$ 的<strong>形状</strong> —— 由 destination 间 $(E<em>j, \mathbf{X}</em>j, \mathbf{X}<em>{\mathcal{N}(j)})$ 横截面变异识别；
+- $\hat\alpha$ —— 由 $A</em>j$ 与 $\beta\, t_{ij}$ 的相对尺度识别（softmax 自带一个 scale 自由度的固定）。</p>
+
+<p>伦敦训练集提供 $1{,}725 \times 1{,}725 \times 24 \approx 7{,}100$ 万 OD-小时单元，对应 ~40,000 个 GNN 权重 + 2 个行为系数 —— 强 over-identified。</p>
+
+<p><strong>已知 caveats</strong>：</p>
+
+<table>
+<thead>
+<tr>
+  <th>Caveat</th>
+  <th>我们的应对</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>神经网络让 loss 面非凸 → 不保证全局最优</td>
+  <td>Multi-seed restart（Phase B+ 跑 5 个 seed）；seed 间 loss 差 &lt; 2%</td>
+</tr>
+<tr>
+  <td>聚合数据下 SE 比 individual 数据宽</td>
+  <td>不报点估的 SE；用 §7 reliability scan 给一个<strong>经验</strong>的 ±25% 置信带</td>
+</tr>
+<tr>
+  <td>EV1 误差假设可能不严格成立</td>
+  <td>用 mixed-logit 蒙特卡罗（随机系数）做 sensitivity check —— 副产物就是 §3 的 <em>Jensen-bias</em> 诊断</td>
+</tr>
+</tbody>
+</table>
+
+<h3 id="24-数据">2.4 数据</h3>
+
+<p>聚合 OD 流量表来自 UCL CASA 团队公开的<strong>匿名化手机定位数据</strong>（<a href="https://www.nature.com/articles/s41597-025-06323-8">Zhong &amp; Zhou, 2025, <em>Scientific Data</em></a>；数据集 DOI 10.5281/zenodo.13327082）：来自约 200 个智能手机应用的 GPS 记录，<strong>2021 年 11 月</strong>在英格兰范围采集，住地由夜间 (22–06) GPS 记录最多位置推断，工作地由白天 stay-point detection 推断，聚合到 MSOA 级 travel-to-work 流量。我们用按陆地面积重分配的方法 re-grid 到 1×1 公里直角网格（覆盖大伦敦的 1,725 个有人口网格）。训练集总通勤流：约 121 万对 OD 关系。</p>
+
+<p>2021 年 11 月这个采集时点处在英格兰秋季解封到 12 月 Omicron Plan B 之间的 inter-lockdown 窗口 —— 比如比 Census 2021（2021 年 3 月，全面封控）更接近"正常"基线，但仍部分受 hybrid working 影响。<strong>pre-COVID 重训</strong> 计划用 Geographic Data Service 2019 mobile data（见 §8）。</p>
+
+<p>其他输入：1km 网格按行业的就业（BRES 2024）、POI 计数（OpenStreetMap）、travel-time 矩阵 $t_{ij}$（TfL 公共交通路线规划）、用于 BPR 均衡的路网。</p>
+
+<h3 id="25-为什么这套方法可平移到北京">2.5 为什么这套方法可平移到北京</h3>
+
+<p>每一个输入 —— POI、按行业就业、出行时间、匿名化手机 OD —— 北京都有等价（高德 POI、国家统计年鉴、高德路径规划、高校授权的手机 OD）。反过来 —— 用伦敦专属的人工编码 census 变量（ASHE income、JTS 出行时间统计、TS063 SOC9 职业表）拟合一个伦敦专属 RUM —— 是<strong>不能</strong>平移的。这一约束塑造了报告里每一个方法学选择。</p>
+
+<h2 id="3-今天的伦敦长什么样">3. 今天的伦敦长什么样</h2>
+
+<h3 id="31-工作在哪人在哪">3.1 工作在哪、人在哪</h3>
+
+<p><img src="figures/M1_employment.png" alt="M1" /></p>
+
+<p><strong>图 M1.</strong> 1×1 公里网格的就业数（log scale）。City / Canary Wharf 集群比其他高一个数量级；次级集群在 Stratford、King&#8217;s Cross、Hammersmith、Croydon。Old Oak Common 集群（星标）目前就业不多 —— 这正是再开发要填的缺口。</p>
+
+<p><img src="figures/M2_population.png" alt="M2" /></p>
+
+<p><strong>图 M2.</strong> 1×1 公里网格的居住人口（log scale）。M1 和 M2 的错位是所有通勤的来源：工作集中在中心伦敦，居民分布在内环和更稀疏的外环。</p>
+
+<h3 id="32-可达性曲面">3.2 可达性曲面</h3>
+
+<p><img src="figures/M3_accessibility.png" alt="M3" /></p>
+
+<p><strong>图 M3.</strong> 基线 Hansen 可达性 $A_i$，AM 高峰。中心伦敦 $A &gt; 600{,}000$ 等效岗位数；外环东南部网格（Bromley、Bexley、Havering）在 30,000 以下 —— 大约 <strong>20× 比例</strong>。cell 级 Gini 系数 = <strong>0.46</strong> —— 高。</p>
+
+<table>
+<thead>
+<tr>
+  <th>行政区（顶部）</th>
+  <th style="text-align:right;">人口加权 $A_i$</th>
+  <th>行政区（底部）</th>
+  <th style="text-align:right;">人口加权 $A_i$</th>
+  <th style="text-align:right;">比</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>City of London</td>
+  <td style="text-align:right;">1,017,845</td>
+  <td>Havering</td>
+  <td style="text-align:right;">47,314</td>
+  <td style="text-align:right;">21.5×</td>
+</tr>
+<tr>
+  <td>Westminster</td>
+  <td style="text-align:right;">571,752</td>
+  <td>Bromley</td>
+  <td style="text-align:right;">52,604</td>
+  <td style="text-align:right;">10.9×</td>
+</tr>
+<tr>
+  <td>Islington</td>
+  <td style="text-align:right;">496,160</td>
+  <td>Bexley</td>
+  <td style="text-align:right;">53,956</td>
+  <td style="text-align:right;">9.2×</td>
+</tr>
+</tbody>
+</table>
+
+<h3 id="33-lorenz-decile-视图">3.3 Lorenz / decile 视图</h3>
+
+<p><img src="figures/M7_inequality_summary.png" alt="M7" /></p>
+
+<p><strong>图 M7.</strong> <em>左</em>：cell 级可达性的 Lorenz 曲线 —— 曲线与对角线之间的面积就是 Gini = 0.46 的可视化。<em>右</em>：各收入层 (Tier 1/2/3) 居民住地网格的 mean / median 可达性。<strong>Tier 3 / Tier 1 比 = 1.17×</strong>。</p>
+
+<p>两个观察值得说。(i) cell 级 Gini (0.46) 远高于按收入层的梯度 (1.17×)，因为伦敦的低收入工作者并非全部在外围 —— 不少住在内环社会住房存量大的高可达网格里（Tower Hamlets、Lambeth、Southwark）。(ii) 即使有这种平滑作用，Tier-3 居民平均仍比 Tier-1 多 <strong>17% 的可达性</strong>。</p>
+
+<h2 id="4-不平等视角-谁能触达什么">4. 不平等视角 —— 谁能触达什么</h2>
+
+<p><img src="figures/M4_access_by_income.png" alt="M4" /></p>
+
+<p><strong>图 M4 (3 panel)。</strong> 同一个可达性曲面，从每个收入层的居民住地视角看 —— 该层居民少的网格被淡化。Panel (a) 是 Tier-1（低收入）居民实际看到的；Panel (c) 是 Tier-3 看到的。</p>
+
+<p>读图：Tier-1 居民集中在内东和内南伦敦（Tower Hamlets、Hackney、Lambeth、Southwark）—— 这些网格连接性合理但不在最高峰。Tier-3 居民集中在中央西部和内北部（Westminster、Camden、Islington、Kensington &amp; Chelsea）—— 正中最高 $A$ 网格。Tier-2 在两者之间。</p>
+
+<p>这 17% 的差距是真实的，但比"伦敦不平等"标题修辞所暗示的要小。伦敦特有的原因是中央东部各 borough 把高可达性和强大的社会住房传统结合在一起 —— 这一特征<strong>并非</strong>所有大都市通用，<strong>不能</strong>假定北京也有。</p>
+
+<h2 id="5-情景-a-old-oak-common65000-个就业岗位">5. 情景 A —— Old Oak Common（+65,000 个就业岗位）</h2>
+
+<p>我们对 OOC 9 个网格集群（Hammersmith / Ealing 边界）一致性增加 +65,000 个就业岗位，然后在三种设置下重跑全管道：</p>
+
+<table>
+<thead>
+<tr>
+  <th>设置</th>
+  <th style="text-align:right;">Mean $A_i$</th>
+  <th style="text-align:right;">人口加权 Gini</th>
+  <th style="text-align:right;">人口加权 Palma</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>基线（今天）</td>
+  <td style="text-align:right;">1,222,444</td>
+  <td style="text-align:right;">0.167</td>
+  <td style="text-align:right;">0.552</td>
+</tr>
+<tr>
+  <td>OOC，free-flow $t_{ij}$</td>
+  <td style="text-align:right;">1,237,783</td>
+  <td style="text-align:right;">0.169</td>
+  <td style="text-align:right;">0.557</td>
+</tr>
+<tr>
+  <td>OOC，拥堵均衡 (BPR)</td>
+  <td style="text-align:right;">1,225,612</td>
+  <td style="text-align:right;">0.169</td>
+  <td style="text-align:right;">0.561</td>
+</tr>
+</tbody>
+</table>
+
+<p>（来自 <code>evaluation_outputs/paper_a/scenario_A_accessibility.json</code>。Gini 和 Palma 在 agent 人口上算 —— 按人加权视角。）</p>
+
+<p><img src="figures/M5_scenarioA_delta.png" alt="M5" /></p>
+
+<p><strong>图 M5.</strong> 每个网格因 OOC 干预的 $\Delta A_i$，自由流 opportunity-field 假设下。增量场以反推出的 $\beta = 0.058$/分钟从 OOC 径向衰减；OOC 30 分钟内的网格吸收大部分新机会；外环东南伦敦几乎没有。</p>
+
+<p><strong>读法。</strong> 自由流条件下平均 $A$ 升 +1.3%，到拥堵均衡只剩 +0.3% —— 大部分自由流收益被拥堵吸收。不平等<strong>轻微上升</strong>：人口加权 Palma 从 0.552 升到 0.561，因为收益主要落在已经连接好的西北网格上。一句话总结：<strong>OOC 创造了真实的新可达性，但收益沿收入分布向上扩散得比向下快</strong>。要让再开发真正实现可达性重分配，可能需要配合 (i) 把 OOC 接进外环南部伦敦的轨道交通改进、或 (ii) OOC 集群本身的可负担住房供给、或 (iii) 偏离已经在内西伦敦集中的高薪行业的产业组合。仅靠这份报告我们无权推荐其中任一项 —— 但我们<strong>有权</strong>说："建好它，可达性自然就重分配"不是模型预测的结果。</p>
+
+<h2 id="6-情景-b-弹性办公-错峰">6. 情景 B —— 弹性办公 / 错峰</h2>
+
+<p>模拟将 7–9 点高峰拥堵降低 50%，重分配到 10–15 点 shoulder 窗口。模型的时间分辨版本在新拥堵向量下重新分配每个住地网格的全天通勤分布。</p>
+
+<p><img src="figures/M6_scenarioB_share.png" alt="M6" /></p>
+
+<p><strong>图 M6.</strong> 每个住地网格通勤行程中、于 7–9 点 AM 高峰出发的份额。外环高峰份额<strong>超过 50%</strong> 的网格的居民对高峰成本暴露最大 —— 也是真正"把需求挪开高峰"的弹性办公政策下受益最大的居民。</p>
+
+<table>
+<thead>
+<tr>
+  <th>时段</th>
+  <th style="text-align:right;">Δ流量（基线百分比）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>7–9 点高峰</td>
+  <td style="text-align:right;"><strong>−45.7%</strong></td>
+</tr>
+<tr>
+  <td>10–15 点 shoulder</td>
+  <td style="text-align:right;"><strong>+63.0%</strong></td>
+</tr>
+<tr>
+  <td>其他非高峰</td>
+  <td style="text-align:right;">+8.7%</td>
+</tr>
+</tbody>
+</table>
+
+<p>（<code>evaluation_outputs/paper_a/T7_scenario_B_per_hour.csv</code>。）</p>
+
+<p><strong>读法。</strong> 高峰办公族一次性减少约 46% 拥堵暴露，但更大的故事在 shoulder —— 排班已经在 10–15 点窗口的服务业 / 班次工作者拿到明显更密的发车间隔，这提高了他们的有效可达性。结合图 M6，受益最大的网格是：高峰份额高的外环东南伦敦（Bromley、Bexley），以及非高峰发车间隔目前掉得很快的外环东北部分。</p>
+
+<p>诚实的 caveat：本报告<strong>还未</strong>量化对 Tier-1 服务业从业者的发车间隔 / 等车时间效应；要做扎实，需要把选择模型和公交网络的排队模型耦合。</p>
+
+<h2 id="7-这些预测什么时候可以信">7. 这些预测什么时候可以信？</h2>
+
+<p>一个在历史 OD 上拟合很好的模型，在外推时仍可能跑偏。所以我们在引用政策数字之前先跑了一个 <strong>reliability scan</strong>：60 个随机分布的 9-cell 合成 cluster × 6 个就业扰动幅度（10%、30%、50%、100%、200%、500%），共 360 次实验。每次都比对<strong>聚合预测</strong>和<strong>蒙特卡罗 per-agent 预测</strong>（mixed-logit、按 agent 收入分布抽样）。两者之间的差距就是任何聚合目的地选择模型在做反事实声明时都会带的 <strong>Jensen 偏差</strong>。</p>
+
+<p><img src="../evaluation_outputs/paper_a/F8_reliability.png" alt="F8" /></p>
+
+<p><strong>图 F8.</strong> <em>左</em>：每次实验的 $|\text{Jensen bias}|$ 作为 干预幅度 × cluster 基线就业的函数。绿色轮廓是经验"可信"区域 ($|\text{bias}| &lt; 5\%$)。<em>右</em>：360 次实验上 $|\text{Jensen bias}|$ 的 CDF —— 12% 落在 5% 以下（可信）、再 31% 落在 20% 以下（warrant caveat）、56% 在 20% 以上（不可信）。</p>
+
+<p>OOC 干预对应的位置是 <strong>基线 cluster 就业 ~150,000 × +43% 幅度</strong> —— scan 把它判进 <strong>caveat 带</strong>。所以我们把 §5 的 headline 数字理解为带一个大约 <strong>±25% 的置信带</strong>：自由流 +1.3% / 均衡 +0.3% 的方向和数量级是对的，但不要把第三位有效数字当真。</p>
+
+<p>这个 scan 本身是方法学贡献。多数可达性建模文章只报单一情景的 $\Delta$ 数字；我们报的是<strong>模型在 policy space 中能产生可信 $\Delta$ 的区域、不能的区域</strong>。</p>
+
+<h2 id="8-局限和下一步">8. 局限和下一步</h2>
+
+<ol>
+<li><strong>时段。</strong> 2021 年 11 月在第二轮封控之后、Omicron 之前。Hybrid working 部分被烤进基线。在 GDS 2019 mobile data 上做 pre-COVID 重训会让解释更紧 —— 尤其是弹性办公场景。</li>
+<li><strong>收入颗粒度。</strong> 三层是手机数据隐私聚合的硬限。更细的拆分（收入十分位 × 职业）需要链接到收入微观数据。</li>
+<li><strong>反事实是结构性投影，不是预报。</strong> 模型假设偏好和摩擦参数在空间布局变化下不变。§7 的 reliability scan 是部分护栏，不是完整护栏。</li>
+<li><strong>伦敦是沙盒。</strong> 北京复制需要在 高德 routing、NBS POI、北京 OD 上重训。管道为这种 swap 设计；本报告里的数字不可平移。</li>
+</ol>
+
+<p><strong>下一步计划。</strong> (i) GDS 2019 上的 pre-COVID 重训；(ii) OOC × 轨道交通耦合（Crossrail-2 / GLA bus-route 层加进 $t_{ij}$）；(iii) 弹性办公 × 发车间隔：把目的地选择模型耦合到一个简单的公交发车间隔模型，让 Tier-1 服务业从业者的收益可量化；(iv) 北京 parallel build —— 数据 clearance 一旦落地（目标 2026 年底）。</p>
+
+<hr />
+
+<h2 id="参考文献">参考文献</h2>
+
+<ul>
+<li>Bentz, Y., &amp; Merunka, D. (2000). <em>Neural networks and the multinomial logit for brand choice modelling: A hybrid approach</em>. Journal of Forecasting, 19(3), 177–200.</li>
+<li>Hansen, W. G. (1959). <em>How accessibility shapes land use</em>. JAIP, 25(2), 73–76.</li>
+<li>Hamilton, W., Ying, Z., &amp; Leskovec, J. (2017). <em>Inductive representation learning on large graphs (GraphSAGE)</em>. NeurIPS.</li>
+<li>McFadden, D. (1974). <em>Conditional logit analysis of qualitative choice behavior</em>. In Frontiers in Econometrics, ed. P. Zarembka.</li>
+<li>Simini, F., Barlacchi, G., Luca, M., &amp; Pappalardo, L. (2021). <em>A Deep Gravity model for mobility flows generation</em>. Nature Communications, 12, 6576.</li>
+<li>Train, K. (2009). <em>Discrete Choice Methods with Simulation</em>, 2nd ed. Cambridge UP. (Chs 3, 5.)</li>
+<li>Yao, X., Cheng, T., et al. (2021). <em>Spatial OD flow imputation using graph convolutional networks</em>. IEEE T-ITS.</li>
+<li>Zhong, C., &amp; Zhou, Z. (2025). <em>Anonymised human location data in England for urban mobility research</em>. Scientific Data, 12. (数据集 DOI 10.5281/zenodo.13327082。)</li>
+</ul>
+
+<hr />
+
+<p><em>可复现：<code>report/build_accessibility_maps.py</code> 重生成全部图。数字 headline 来自 <code>report/data/accessibility_per_grid.csv</code> 和 <code>evaluation_outputs/paper_a/*.json</code>。</em></p>
+
+</body>
+</html>

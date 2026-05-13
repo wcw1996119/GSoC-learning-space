@@ -1,0 +1,831 @@
+% Figure 1 v8 — Wang KBS layout: 3 stacked rows (full-width per row).
+% Row 1: Stage A · Inputs (3 horizontal panels)
+% Row 2: Stage B · Encoder (3 horizontal panels: static / dynamic / fusion)
+% Row 3: Stage C · Choice head + Loss + Trained Θ output card
+%
+% Compile:  pdflatex figure1_architecture_v8.tex
+
+\documentclass[border=8pt]{standalone}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath, amssymb}
+\usepackage{tikz}
+\usepackage{xcolor}
+\usepackage{graphicx}
+
+\usetikzlibrary{
+  positioning, arrows.meta, shapes.geometric, calc, fit, backgrounds,
+  matrix, decorations.pathmorphing,
+}
+
+\definecolor{stageABg}    {HTML}{E0EBF5}
+\definecolor{stageABanner}{HTML}{3B6FB6}
+\definecolor{stageBBg}    {HTML}{E6F1E5}
+\definecolor{stageBBanner}{HTML}{2E7D32}
+\definecolor{stageCBg}    {HTML}{FAE5DD}
+\definecolor{stageCBanner}{HTML}{C44E52}
+\definecolor{cFlow}       {HTML}{E07A5F}
+\definecolor{cBack}       {HTML}{8B5CF6}
+\definecolor{cText}       {HTML}{1F2937}
+\definecolor{cMuted}      {HTML}{6B7280}
+\definecolor{cBorder}     {HTML}{CBD5E1}
+\definecolor{cIO}         {HTML}{0F766E}
+
+% Tensor cell category colours
+\definecolor{cPOI}      {HTML}{93C5FD}
+\definecolor{cSector}   {HTML}{86EFAC}
+\definecolor{cEmp}      {HTML}{FDBA74}
+\definecolor{cPop}      {HTML}{FDE68A}
+\definecolor{cIMD}      {HTML}{FCA5A5}
+\definecolor{cTube}     {HTML}{C4B5FD}
+
+% Mixture utility 4-term colours
+\definecolor{cTermV}    {HTML}{8172B2}
+\definecolor{cTermBeta} {HTML}{C44E52}
+\definecolor{cTermGamma}{HTML}{F59E0B}
+\definecolor{cTermDelta}{HTML}{0E7490}
+
+% Parameter category colours
+\definecolor{cParEnc}   {HTML}{475569}
+\definecolor{cParBeta}  {HTML}{C44E52}
+\definecolor{cParGamma} {HTML}{F59E0B}
+\definecolor{cParDelta} {HTML}{0E7490}
+\definecolor{cParKappa} {HTML}{8172B2}
+
+% Agent type colours (consistent with agent_heterogeneity icon)
+\definecolor{cAgentWalk}   {HTML}{10B981}
+\definecolor{cAgentTransit}{HTML}{F59E0B}
+\definecolor{cAgentCar}    {HTML}{3B82F6}
+
+\newcommand{\rowwidth}{300mm}    % uniform row width
+
+\begin{document}
+
+\begin{tikzpicture}[
+  font=\sffamily\small,
+  thick,
+  >={Stealth[length=4.5pt, width=4pt]},
+  every node/.style={align=center, text=cText},
+  %
+  rowframe/.style={
+    draw=none, fill=#1, rounded corners=6pt,
+    inner xsep=8pt, inner ysep=10pt,
+  },
+  rowbanner/.style={
+    fill=#1, text=white, font=\sffamily\bfseries\small,
+    rounded corners=4pt, inner sep=6pt,
+  },
+  modA/.style={
+    draw=stageABanner, fill=white, line width=0.7pt,
+    rounded corners=3pt, inner sep=5pt,
+  },
+  modB/.style={
+    draw=stageBBanner, fill=white, line width=0.7pt,
+    rounded corners=3pt, inner sep=5pt,
+  },
+  modC/.style={
+    draw=stageCBanner, fill=white, line width=0.7pt,
+    rounded corners=3pt, inner sep=5pt,
+  },
+  arrFwd/.style={->, line width=1.6pt, draw=cFlow},
+  arrInner/.style={->, line width=0.8pt, draw=cText!70},
+  arrBack/.style={->, line width=1.0pt, draw=cBack, dashed},
+  arrlbl/.style={font=\sffamily\scriptsize\itshape, text=cMuted, fill=white,
+                 inner sep=1pt, midway},
+  cellgrid/.style={draw=cMuted!50, fill=#1, line width=0.3pt, rectangle},
+]
+
+% ════════════════════════════════════════════════════════════════════════
+%  ROW 1 · STAGE A · INPUTS  (7 horizontal panels with encoder/choice divider)
+%  Left group  (3 panels): X^static, X^dyn, G — go through ENCODER
+%  Right group (4 panels): t^(m), log d, OccMatch, π_m+π_k — skip encoder,
+%                          go DIRECTLY to choice head
+% ════════════════════════════════════════════════════════════════════════
+
+\begin{scope}[local bounding box=row1]
+
+  % ────────── LEFT GROUP: ENCODER INPUTS ──────────
+
+  % Panel 1: Static features (text content + small matrix preview)
+  \node[modA, anchor=north west] (xstatic) at (0, 0)
+    {\begin{minipage}{52mm}
+      \centering\textbf{\textcolor{stageABanner}{Static features}}\\
+      \scriptsize $X^{\text{static}}\!\in\!\mathbb{R}^{N\!\times\!22}$\;·\;time-invariant\\[3pt]
+      \raggedright\scriptsize
+      \textcolor{cPOI!50!black}{$\bullet$} POI counts (office · retail · F\&B · other)\\
+      \textcolor{cSector!60!black}{$\bullet$} Sectoral employment ($\times$\,8 sectors)\\
+      \textcolor{cEmp!60!black}{$\bullet$} Total employment $+$ density\\
+      \textcolor{cPop!60!black}{$\bullet$} Population density\\
+      \textcolor{cIMD!60!black}{$\bullet$} IMD income decile\\
+      \textcolor{cTube!60!black}{$\bullet$} Tube / station distance ($\times$\,5)\\[3pt]
+      \centering\begin{tikzpicture}[scale=0.7, baseline=0]
+        \foreach \r in {0,...,3} {
+          \foreach \c in {0,1,2,3}
+            \node[cellgrid=cPOI, minimum size=2mm] at (\c*2mm, -\r*2mm) {};
+          \foreach \c [evaluate=\c as \cc using int(\c+4)] in {0,...,7}
+            \node[cellgrid=cSector, minimum size=2mm] at (\cc*2mm, -\r*2mm) {};
+          \foreach \c [evaluate=\c as \cc using int(\c+12)] in {0,1}
+            \node[cellgrid=cEmp, minimum size=2mm] at (\cc*2mm, -\r*2mm) {};
+          \foreach \c [evaluate=\c as \cc using int(\c+14)] in {0,1}
+            \node[cellgrid=cPop, minimum size=2mm] at (\cc*2mm, -\r*2mm) {};
+          \node[cellgrid=cIMD, minimum size=2mm] at (16*2mm, -\r*2mm) {};
+          \foreach \c [evaluate=\c as \cc using int(\c+17)] in {0,...,4}
+            \node[cellgrid=cTube, minimum size=2mm] at (\cc*2mm, -\r*2mm) {};
+        }
+        \node[font=\sffamily\tiny, text=cMuted] at (10*2mm, -5*2mm) {$\vdots\;N\!=\!1725$};
+      \end{tikzpicture}
+    \end{minipage}};
+
+  % Panel 2: Dynamic features (text content + small cube preview)
+  \node[modA, anchor=north west] (xdyn) at (62mm, 0)
+    {\begin{minipage}{52mm}
+      \centering\textbf{\textcolor{stageABanner}{Dynamic features}}\\
+      \scriptsize $X^{\text{dyn}}\!\in\!\mathbb{R}^{T\!\times\!N\!\times\!5}$\;·\;hourly\\[3pt]
+      \raggedright\scriptsize
+      \textcolor{stageABanner}{$\bullet$} Hourly congestion (z-scored)\\
+      \textcolor{stageABanner}{$\bullet$} Hourly destination inflow (z)\\
+      \textcolor{stageABanner}{$\bullet$} Queue residual (placeholder)\\
+      \textcolor{stageABanner}{$\bullet$} Cyclic time: $\sin h$, $\cos h$\\[3pt]
+      \centering\begin{tikzpicture}[baseline=0]
+        \foreach \r in {0,...,3} {
+          \foreach \c in {0,...,4} {
+            \node[cellgrid=stageABanner, minimum size=2.0mm,
+                   opacity={0.30+0.15*\r}]
+                  at (\c*2.0mm, -\r*2.0mm) {};
+          }
+        }
+        \draw[fill=stageABanner!30, opacity=0.6, line width=0.3pt]
+          (0, 0.8mm) -- (5*2.0mm, 0.8mm) -- (5*2.0mm + 6mm, 4mm) -- (6mm, 4mm) -- cycle;
+        \draw[fill=stageABanner!20, opacity=0.6, line width=0.3pt]
+          (5*2.0mm, 0.8mm) -- (5*2.0mm + 6mm, 4mm)
+            -- (5*2.0mm + 6mm, 4mm - 4*2.0mm) -- (5*2.0mm, -3*2.0mm) -- cycle;
+        \node[font=\sffamily\tiny, text=cMuted] at (-3mm, -3mm) {$N$};
+        \node[font=\sffamily\tiny, text=cMuted] at (5mm, 5mm) {$T\!=\!24$};
+        \node[font=\sffamily\tiny, text=cMuted] at (5*2.0mm + 8mm, -2mm) {$F\!=\!5$};
+      \end{tikzpicture}
+    \end{minipage}};
+
+  % Panel 3: G (graph)
+  \node[modA, anchor=north west] (xgraph) at (124mm, 0)
+    {\begin{minipage}{40mm}
+      \centering\textbf{\textcolor{stageABanner}{$\mathcal{G}\!=\!(V,E)$}}\;\\\tiny\textcolor{cMuted}{edge\_index, derived}\\[3pt]
+      \begin{tikzpicture}[baseline=0]
+        \foreach \x/\y/\name in
+          {0/0/n00, 1/0/n10, 2/0/n20, 3/0/n30,
+           0/1/n01, 1/1/n11, 2/1/n21, 3/1/n31,
+           0/2/n02, 1/2/n12, 2/2/n22, 3/2/n32,
+           0/3/n03, 1/3/n13, 2/3/n23, 3/3/n33}{
+          \node[circle, fill=stageABanner, minimum size=1.4mm, inner sep=0pt]
+                (\name) at (\x*4mm, -\y*4mm) {};
+        }
+        \foreach \y in {0,1,2,3}{
+          \foreach \x in {0,1,2}{
+            \pgfmathtruncatemacro{\xn}{\x+1}
+            \draw[stageABanner!60, line width=0.3pt] (\x*4mm, -\y*4mm) -- (\xn*4mm, -\y*4mm);
+          }
+        }
+        \foreach \x in {0,1,2,3}{
+          \foreach \y in {0,1,2}{
+            \pgfmathtruncatemacro{\yn}{\y+1}
+            \draw[stageABanner!60, line width=0.3pt] (\x*4mm, -\y*4mm) -- (\x*4mm, -\yn*4mm);
+          }
+        }
+        \node[font=\sffamily\tiny, text=cMuted] at (6mm, -16mm) {1\,km · 4-neighbour};
+        \node[font=\sffamily\tiny, text=cMuted] at (6mm, -19mm) {$|V|\!=\!1725$, $|E|\!\approx\!6900$};
+      \end{tikzpicture}
+    \end{minipage}};
+
+\end{scope}
+
+% Stage A frame (left 3 panels — encoder inputs only)
+\begin{pgfonlayer}{background}
+  \node[rowframe=stageABg, fit=(row1)] (frameRow1) {};
+\end{pgfonlayer}
+\node[rowbanner=stageABanner, anchor=north west]
+  at ($(frameRow1.north west)+(8pt, 0pt)$)
+  {\textsc{Stage A · Encoder inputs}\;\,\textmd{\itshape — fed into encoder (Stage B) below}};
+
+% ════════════════════════════════════════════════════════════════════════
+%  RIGHT COLUMN · CHOICE-HEAD INPUTS (vertical stack, parallel to Stage A+B)
+%  Bypass the encoder; feed directly into Stage C choice head.
+% ════════════════════════════════════════════════════════════════════════
+
+\begin{scope}[local bounding box=rightcol, shift={(186mm, 0)}]
+
+  % R1: Travel time per mode
+  \node[modA, anchor=north west, draw=stageBBanner] (tij) at (0, 0)
+    {\begin{minipage}{96mm}
+      \centering\textbf{\textcolor{stageBBanner}{Travel time per mode}}\;\scriptsize $t_{ij}^{(m)}\!\in\!\mathbb{R}^{N\!\times\!N\!\times\!3}$\\
+      \tiny\textcolor{cMuted}{free-flow car / transit / walk · OD-pair travel time}\\[3pt]
+      \begin{tikzpicture}[baseline=0]
+        \foreach \mname/\yoff/\col in {car/0/cAgentCar, transit/-7mm/cAgentTransit, walk/-14mm/cAgentWalk}{
+          \node[font=\sffamily\tiny, text=\col, anchor=east] at (-1mm, \yoff) {\mname};
+          \foreach \c in {0,...,29}{
+            \pgfmathsetmacro{\val}{0.15 + 0.025*\c}
+            \node[cellgrid=cTermBeta, minimum size=1.5mm, opacity=\val]
+                  at (\c*1.5mm, \yoff) {};
+          }
+        }
+        \node[font=\sffamily\tiny, text=cMuted] at (24mm, -19mm)
+              {feeds $\beta_{t,m}\!\cdot\! t_{ij}^{(m)}$ in choice head};
+      \end{tikzpicture}
+    \end{minipage}};
+
+  % R2: OccMatch — pushed lower so right column spans Stage A + Stage B vertically
+  \node[modA, anchor=north west, draw=stageBBanner] (occm) at (0, -65mm)
+    {\begin{minipage}{96mm}
+      \centering\textbf{\textcolor{stageBBanner}{Occupational matching}}\;\scriptsize OccMatch$_{ij}\!\in\!\mathbb{R}^{N\!\times\!N}$\\
+      \tiny\textcolor{cMuted}{cosine similarity, origin SOC9 $\times$ destination sector}\\[3pt]
+      \begin{tikzpicture}[baseline=0]
+        \foreach \r in {0,...,5}{
+          \foreach \c in {0,...,17}{
+            \pgfmathsetmacro{\val}{0.1 + 0.5*rnd}
+            \node[cellgrid=cTermDelta, minimum size=1.5mm, opacity=\val]
+                  at (\c*1.5mm, -\r*1.5mm) {};
+          }
+        }
+        \node[font=\sffamily\tiny, text=cMuted] at (14mm, -12mm)
+              {feeds $\delta_k\!\cdot\!$OccM in choice head};
+      \end{tikzpicture}
+    \end{minipage}};
+
+  % R3: Heterogeneity priors π_m + π_k — bottom of right column, aligned with Stage B bottom
+  \node[modA, anchor=north west, draw=stageBBanner] (pies) at (0, -130mm)
+    {\begin{minipage}{96mm}
+      \centering\textbf{\textcolor{stageBBanner}{Heterogeneity priors}}\;\scriptsize $\pi_m(i,j),\,\pi_k(i)$\\
+      \tiny\textcolor{cMuted}{mode share + income tier per origin}\\[3pt]
+      \begin{tikzpicture}[baseline=0]
+        \begin{scope}[shift={(8mm, -3mm)}]
+          \draw[fill=cAgentCar!70, line width=0.3pt] (0,0) -- (0:4mm) arc (0:216:4mm) -- cycle;
+          \draw[fill=cAgentTransit!70, line width=0.3pt] (0,0) -- (216:4mm) arc (216:324:4mm) -- cycle;
+          \draw[fill=cAgentWalk!70, line width=0.3pt] (0,0) -- (324:4mm) arc (324:360:4mm) -- cycle;
+          \node[font=\sffamily\tiny, text=cMuted] at (0, -7mm) {$\pi_m$ mode share};
+          \node[font=\sffamily\tiny, text=cMuted] at (0, -10mm) {distance-aware:};
+          \node[font=\sffamily\tiny, text=cMuted] at (0, -13mm) {walk only $d\!<\!5$\,km};
+        \end{scope}
+        \begin{scope}[shift={(50mm, -3mm)}]
+          \draw[fill=cParEnc!50, line width=0.3pt] (0,0) -- (0:4mm) arc (0:120:4mm) -- cycle;
+          \draw[fill=cParKappa!50, line width=0.3pt] (0,0) -- (120:4mm) arc (120:240:4mm) -- cycle;
+          \draw[fill=cParDelta!50, line width=0.3pt] (0,0) -- (240:4mm) arc (240:360:4mm) -- cycle;
+          \node[font=\sffamily\tiny, text=cMuted] at (0, -7mm) {$\pi_k$ income tier};
+          \node[font=\sffamily\tiny, text=cMuted] at (0, -10mm) {3 IMD bins:};
+          \node[font=\sffamily\tiny, text=cMuted] at (0, -13mm) {low / mid / high};
+        \end{scope}
+        \node[font=\sffamily\tiny, text=cMuted] at (28mm, -18mm)
+              {feeds mixture aggregation $\sum_{m,k}\pi_m\pi_k\,\mathrm{softmax}\,U^{(m,k)}$};
+      \end{tikzpicture}
+    \end{minipage}};
+
+\end{scope}
+
+\begin{pgfonlayer}{background}
+  \node[rowframe=stageBBg, fit=(rightcol)] (frameRightCol) {};
+\end{pgfonlayer}
+\node[rowbanner=stageBBanner, anchor=north west]
+  at ($(frameRightCol.north west)+(8pt, 0pt)$)
+  {\textsc{Choice-head inputs}\;\,\textmd{\itshape — bypass the encoder, feed directly to Stage C}};
+
+% ════════════════════════════════════════════════════════════════════════
+%  ROW 2 · STAGE B · ENCODER  (static / dynamic / fusion horizontal)
+% ════════════════════════════════════════════════════════════════════════
+
+\begin{scope}[local bounding box=row2, shift={(0, -80mm)}]
+
+  % ════════════════════════════════════════════════════════════════════
+  %  SVG-style vertical dataflow:
+  %  Static branch (left) + Dynamic branch (right, with internal split)
+  %  → Gated fusion (below) → V_jt
+  %
+  %  Each module has a mini icon reflecting its operation.
+  % ════════════════════════════════════════════════════════════════════
+
+  % ─── STATIC BRANCH (left column) ──────────────────────────────────────
+
+  % Container for static branch
+  \node[draw=stageABanner, fill=stageABanner!8, rounded corners=4pt, line width=0.7pt,
+         minimum width=64mm, minimum height=104mm,
+         anchor=north west] (sbox) at (0, 0) {};
+  \node[font=\sffamily\bfseries\small, text=stageABanner, anchor=north]
+        at ($(sbox.north)+(0,-3mm)$) {\textcircled{\scriptsize 1} Static branch};
+  \node[font=\sffamily\scriptsize, text=stageABanner, anchor=north]
+        at ($(sbox.north)+(0,-8mm)$) {3{,}520 params};
+
+  % SAGE Layer 1 box with mini icon
+  \node[draw=stageABanner, fill=white, line width=0.5pt, rounded corners=2pt,
+         minimum width=54mm, minimum height=22mm,
+         anchor=north] (sage1) at ($(sbox.north)+(0,-13mm)$) {};
+  \node[font=\sffamily\scriptsize\bfseries, text=stageABanner, anchor=north west]
+        at ($(sage1.north west)+(2mm, -1mm)$) {SAGE layer 1};
+  \node[font=\sffamily\tiny, text=cMuted, anchor=north west]
+        at ($(sage1.north west)+(2mm, -5mm)$) {$22 \to 32$};
+  % mini icon: graph aggregation (right side of box)
+  \begin{scope}[shift={($(sage1.east)+(-12mm, -2mm)$)}, scale=0.5]
+    \node[circle, fill=stageABanner, minimum size=2mm, inner sep=0pt] (h_a) at (0, 0) {};
+    \foreach \angle in {30, 90, 150, 210, 330}{
+      \node[circle, fill=stageABanner!40, minimum size=1.5mm, inner sep=0pt] (n\angle)
+            at (\angle:5mm) {};
+      \draw[->, line width=0.2pt, draw=cMuted!70] (n\angle) -- (h_a);
+    }
+  \end{scope}
+
+  % h_s^(1) intermediate
+  \node[font=\sffamily\tiny, text=cMuted] at ($(sage1.south)+(0,-2mm)$) {(N, 32)};
+
+  % SAGE Layer 2
+  \node[draw=stageABanner, fill=white, line width=0.5pt, rounded corners=2pt,
+         minimum width=54mm, minimum height=22mm,
+         anchor=north] (sage2) at ($(sage1.south)+(0,-7mm)$) {};
+  \node[font=\sffamily\scriptsize\bfseries, text=stageABanner, anchor=north west]
+        at ($(sage2.north west)+(2mm, -1mm)$) {SAGE layer 2};
+  \node[font=\sffamily\tiny, text=cMuted, anchor=north west]
+        at ($(sage2.north west)+(2mm, -5mm)$) {$32 \to 32$};
+  % mini icon: same graph
+  \begin{scope}[shift={($(sage2.east)+(-12mm, -2mm)$)}, scale=0.5]
+    \node[circle, fill=stageABanner, minimum size=2mm, inner sep=0pt] (h_b) at (0, 0) {};
+    \foreach \angle in {30, 90, 150, 210, 330}{
+      \node[circle, fill=stageABanner!40, minimum size=1.5mm, inner sep=0pt] (m\angle)
+            at (\angle:5mm) {};
+      \draw[->, line width=0.2pt, draw=cMuted!70] (m\angle) -- (h_b);
+    }
+  \end{scope}
+
+  % h_s output label
+  \node[font=\sffamily\scriptsize\bfseries, text=stageABanner, anchor=north]
+        at ($(sage2.south)+(0,-3mm)$) {$h_s : (N, 32)$};
+
+  % arrows
+  \draw[arrInner] (sage1.south) -- (sage2.north);
+
+  % ─── DYNAMIC BRANCH (right container) ────────────────────────────────
+
+  \node[draw=stageBBanner, fill=stageBBanner!8, rounded corners=4pt, line width=0.7pt,
+         minimum width=160mm, minimum height=144mm,
+         anchor=north west] (dbox) at (74mm, 0) {};
+  \node[font=\sffamily\bfseries\small, text=stageBBanner, anchor=north]
+        at ($(dbox.north)+(0,-3mm)$) {\textcircled{\scriptsize 2} Dynamic branch};
+  \node[font=\sffamily\scriptsize, text=stageBBanner, anchor=north]
+        at ($(dbox.north)+(0,-8mm)$) {29{,}408 params};
+
+  % Per-hour SAGE
+  \node[draw=stageBBanner, fill=white, line width=0.5pt, rounded corners=2pt,
+         minimum width=144mm, minimum height=22mm,
+         anchor=north] (phsage) at ($(dbox.north)+(0,-13mm)$) {};
+  \node[font=\sffamily\scriptsize\bfseries, text=stageBBanner, anchor=north west]
+        at ($(phsage.north west)+(2mm,-1mm)$) {Per-hour GraphSAGE $\times 2$};
+  \node[font=\sffamily\tiny, text=cMuted, anchor=north west]
+        at ($(phsage.north west)+(2mm,-5mm)$) {$5 \to 32 \to 32$, for each $t \in 0..23$};
+  % mini icon: 6 mini graphs in time strip
+  \begin{scope}[shift={($(phsage.east)+(-46mm, -2mm)$)}]
+    \foreach \t/\xoff in {1/0, 2/8mm, 3/16mm, 4/24mm, 5/32mm, 6/40mm}{
+      \begin{scope}[shift={(\xoff, 0)}, scale=0.32]
+        \node[circle, fill=stageBBanner, minimum size=1.6mm, inner sep=0pt] (a\t) at (0,0) {};
+        \node[circle, fill=stageBBanner!50, minimum size=1.0mm, inner sep=0pt] at (2mm, 1mm) {};
+        \node[circle, fill=stageBBanner!50, minimum size=1.0mm, inner sep=0pt] at (-1mm, 2mm) {};
+      \end{scope}
+    }
+  \end{scope}
+  \node[font=\sffamily\tiny, text=cMuted] at ($(phsage.south)+(0,-2mm)$) {(T, N, 32)};
+
+  % Split into GRU and TCN
+  % GRU box (left)
+  \node[draw=cTermDelta, fill=cTermDelta!8, line width=0.5pt, rounded corners=2pt,
+         minimum width=66mm, minimum height=22mm,
+         anchor=north west] (gru) at ($(phsage.south west)+(0,-7mm)$) {};
+  \node[font=\sffamily\scriptsize\bfseries, text=cTermDelta, anchor=north west]
+        at ($(gru.north west)+(2mm,-1mm)$) {GRU cell};
+  \node[font=\sffamily\tiny, text=cMuted, anchor=north west]
+        at ($(gru.north west)+(2mm,-5mm)$) {6{,}336 params · sequential};
+  % mini icon: cell with z r ñ gates
+  \begin{scope}[shift={($(gru.east)+(-15mm, -2mm)$)}]
+    \node[draw=cTermDelta, rounded corners=0.5pt, fill=white, line width=0.3pt,
+           minimum width=12mm, minimum height=6mm, font=\sffamily\tiny, text=cTermDelta]
+          at (0, 0) {z\,r\,$\tilde h$};
+    \node[font=\sffamily\tiny, text=cMuted] at (-9mm, 0) {$h_{t-1}\!\to$};
+    \node[font=\sffamily\tiny, text=cMuted] at (9mm, 0) {$\to h_t$};
+  \end{scope}
+  \node[font=\sffamily\tiny, text=cMuted, anchor=south]
+        at ($(gru.south)+(0, -3mm)$) {gru\_out: (T, N, 32)};
+
+  % TCN box (right)
+  \node[draw=cTermGamma, fill=cTermGamma!8, line width=0.5pt, rounded corners=2pt,
+         minimum width=66mm, minimum height=22mm,
+         anchor=north east] (tcn) at ($(phsage.south east)+(0,-7mm)$) {};
+  \node[font=\sffamily\scriptsize\bfseries, text=cTermGamma!70!black, anchor=north west]
+        at ($(tcn.north west)+(2mm,-1mm)$) {Multi-scale TCN};
+  \node[font=\sffamily\tiny, text=cMuted, anchor=north west]
+        at ($(tcn.north west)+(2mm,-5mm)$) {18{,}560 params · Conv1d $k\!=\!3,5,7$};
+  % mini icon: 3 parallel kernels of widths 3, 5, 7
+  \begin{scope}[shift={($(tcn.east)+(-22mm, -2mm)$)}]
+    \draw[draw=cTermGamma, fill=cTermGamma!50, line width=0.3pt, rounded corners=0.3mm]
+          (0, 2mm) rectangle (4mm, 4mm);
+    \node[font=\sffamily\tiny, text=cMuted] at (-3mm, 3mm) {3};
+    \draw[draw=cTermGamma, fill=cTermGamma!60, line width=0.3pt, rounded corners=0.3mm]
+          (0, -1mm) rectangle (8mm, 1mm);
+    \node[font=\sffamily\tiny, text=cMuted] at (-3mm, 0mm) {5};
+    \draw[draw=cTermGamma, fill=cTermGamma!70, line width=0.3pt, rounded corners=0.3mm]
+          (0, -4mm) rectangle (12mm, -2mm);
+    \node[font=\sffamily\tiny, text=cMuted] at (-3mm, -3mm) {7};
+  \end{scope}
+  \node[font=\sffamily\tiny, text=cMuted, anchor=south]
+        at ($(tcn.south)+(0, -3mm)$) {tcn\_out: (T, N, 32)};
+
+  % Concat box (full width below)
+  \node[draw=stageBBanner, fill=white, line width=0.5pt, rounded corners=2pt,
+         minimum width=144mm, minimum height=18mm,
+         anchor=north] (concat) at ($(dbox.north)+(0,-83mm)$) {};
+  \node[font=\sffamily\scriptsize\bfseries, text=stageBBanner, anchor=north west]
+        at ($(concat.north west)+(2mm,-1mm)$) {Concat};
+  \node[font=\sffamily\tiny, text=cMuted, anchor=north west]
+        at ($(concat.north west)+(2mm,-5mm)$) {[gru\_out $|$ tcn\_out]\,$\to$\,(T, N, 64)};
+  % mini icon: 2 boxes stacking horizontally + bigger box
+  \begin{scope}[shift={($(concat.east)+(-22mm, 0)$)}]
+    \draw[draw=cTermDelta, fill=cTermDelta!30, line width=0.3pt]
+          (0, 1mm) rectangle (4mm, 4mm);
+    \draw[draw=cTermGamma, fill=cTermGamma!30, line width=0.3pt]
+          (0, -4mm) rectangle (4mm, -1mm);
+    \node[font=\sffamily\tiny] at (6mm, 0) {$\to$};
+    \draw[draw=stageBBanner, fill=stageBBanner!20, line width=0.3pt]
+          (8mm, -3mm) rectangle (14mm, 3mm);
+  \end{scope}
+
+  % Fuse linear + ReLU
+  \node[draw=stageBBanner, fill=white, line width=0.5pt, rounded corners=2pt,
+         minimum width=144mm, minimum height=22mm,
+         anchor=north] (flin) at ($(concat.south)+(0,-3mm)$) {};
+  \node[font=\sffamily\scriptsize\bfseries, text=stageBBanner, anchor=north west]
+        at ($(flin.north west)+(2mm,-1mm)$) {Fuse linear + ReLU};
+  \node[font=\sffamily\tiny, text=cMuted, anchor=north west]
+        at ($(flin.north west)+(2mm,-5mm)$) {$64 \to 32$, 2{,}080 params};
+  % mini icon: linear arrow + ReLU
+  \begin{scope}[shift={($(flin.east)+(-22mm, -2mm)$)}]
+    \draw[->, line width=0.3pt, draw=cMuted] (0, 0) -- (4mm, 0);
+    \draw[draw=stageBBanner, fill=stageBBanner!20, line width=0.3pt]
+          (4mm, -2.5mm) rectangle (10mm, 2.5mm);
+    \node[font=\sffamily\tiny, text=stageBBanner] at (7mm, 0) {Lin};
+    \draw[->, line width=0.3pt, draw=cMuted] (10mm, 0) -- (14mm, 0);
+    \draw[cMuted, line width=0.4pt] (14mm, 0) -- (16mm, 0) (16mm, 0) -- (18mm, 2mm) (18mm, 2mm) -- (20mm, 2mm);
+    \node[font=\sffamily\tiny, text=cMuted] at (17mm, -2mm) {ReLU};
+  \end{scope}
+
+  % h_d output label
+  \node[font=\sffamily\scriptsize\bfseries, text=stageBBanner, anchor=north]
+        at ($(flin.south)+(0,-3mm)$) {$h_d : (T, N, 32)$};
+
+  % inner arrows in dynamic branch
+  \draw[arrInner] (phsage.south) -- ($(gru.north)$);
+  \draw[arrInner] (phsage.south) -- ($(tcn.north)$);
+  \draw[arrInner] (gru.south) -- ($(concat.north west)+(20mm,0)$);
+  \draw[arrInner] (tcn.south) -- ($(concat.north east)+(-20mm,0)$);
+  \draw[arrInner] (concat.south) -- (flin.north);
+
+  % ─── GATED FUSION (below both branches, centered) ───────────────────
+
+  \node[draw=stageBBanner, fill=stageBBanner!8, rounded corners=4pt, line width=0.7pt,
+         minimum width=200mm, minimum height=86mm,
+         anchor=north west] (gbox) at (16mm, -156mm) {};
+  \node[font=\sffamily\bfseries\small, text=stageBBanner, anchor=north]
+        at ($(gbox.north)+(0,-3mm)$) {\textcircled{\scriptsize 3} Gated fusion};
+  \node[font=\sffamily\scriptsize, text=stageBBanner, anchor=north]
+        at ($(gbox.north)+(0,-8mm)$) {98 params};
+
+  % Broadcast + concat
+  \node[draw=stageBBanner, fill=white, line width=0.5pt, rounded corners=2pt,
+         minimum width=180mm, minimum height=18mm,
+         anchor=north] (bcast) at ($(gbox.north)+(0,-13mm)$) {};
+  \node[font=\sffamily\scriptsize\bfseries, text=stageBBanner, anchor=north west]
+        at ($(bcast.north west)+(2mm,-1mm)$) {Broadcast $h_s\!\to\!$ concat $[h_s\,|\,h_d]$};
+  \node[font=\sffamily\tiny, text=cMuted, anchor=north west]
+        at ($(bcast.north west)+(2mm,-5mm)$) {$h_s\!:\!(N,32)\!\to\!(T,N,32)$;\;\;concat $\to (T,N,64)$};
+  % mini icon: tensor expand arrow
+  \begin{scope}[shift={($(bcast.east)+(-22mm, 0)$)}]
+    \draw[draw=stageABanner, fill=stageABanner!30, line width=0.3pt]
+          (0, -2mm) rectangle (4mm, 2mm);
+    \draw[->, line width=0.3pt, draw=cMuted, dashed] (4mm, 0) -- (10mm, 0);
+    \node[font=\sffamily\tiny, text=cMuted] at (7mm, 2mm) {bcast};
+    \foreach \j in {0,1,2}{
+      \draw[draw=stageABanner, fill=stageABanner!30, line width=0.3pt, opacity=0.6]
+            (10mm + \j*1mm, -2mm + \j*0.4mm) rectangle (14mm + \j*1mm, 2mm + \j*0.4mm);
+    }
+  \end{scope}
+
+  % Sigmoid gate
+  \node[draw=stageCBanner, fill=white, line width=0.5pt, rounded corners=2pt,
+         minimum width=180mm, minimum height=18mm,
+         anchor=north] (sigm) at ($(bcast.south)+(0,-3mm)$) {};
+  \node[font=\sffamily\scriptsize\bfseries, text=stageCBanner, anchor=north west]
+        at ($(sigm.north west)+(2mm,-1mm)$) {$W_g$: $64 \to 1$, sigmoid};
+  \node[font=\sffamily\tiny, text=cMuted, anchor=north west]
+        at ($(sigm.north west)+(2mm,-5mm)$) {gate $\in [0,1]^{(T,N,1)}$};
+  % mini icon: sigma curve
+  \begin{scope}[shift={($(sigm.east)+(-18mm, 0)$)}]
+    \draw[->, line width=0.2pt, draw=cMuted] (-1mm, -3mm) -- (10mm, -3mm);
+    \draw[->, line width=0.2pt, draw=cMuted] (0, -4mm) -- (0, 4mm);
+    \draw[cTermDelta, line width=0.6pt, smooth, samples=20, domain=-3:3]
+          plot (\x*1.5mm + 4.5mm, {3mm/(1+exp(-\x)) - 3mm});
+  \end{scope}
+
+  % Weighted sum + W_v + z-norm
+  \node[draw=stageCBanner, fill=white, line width=0.5pt, rounded corners=2pt,
+         minimum width=180mm, minimum height=22mm,
+         anchor=north] (wsum) at ($(sigm.south)+(0,-3mm)$) {};
+  \node[font=\sffamily\scriptsize\bfseries, text=stageCBanner, anchor=north west]
+        at ($(wsum.north west)+(2mm,-1mm)$) {gate $\cdot h_s + (1{-}$gate$)\cdot h_d$};
+  \node[font=\sffamily\tiny, text=cMuted, anchor=north west]
+        at ($(wsum.north west)+(2mm,-5mm)$) {$W_v\!:\!32\to1$, then z-norm $\to V_{j,t}$};
+  % mini icon: × × +
+  \begin{scope}[shift={($(wsum.east)+(-22mm, -2mm)$)}]
+    \draw[draw=stageABanner, fill=stageABanner!30, line width=0.3pt] (0, 1mm) rectangle (3mm, 4mm);
+    \node[font=\sffamily\tiny] at (4.5mm, 2.5mm) {$\times$};
+    \node[font=\sffamily\tiny, text=cTermDelta] at (1.5mm, 5.5mm) {gate};
+    \draw[draw=stageBBanner, fill=stageBBanner!30, line width=0.3pt] (0, -4mm) rectangle (3mm, -1mm);
+    \node[font=\sffamily\tiny] at (4.5mm, -2.5mm) {$\times$};
+    \node[font=\sffamily\tiny, text=cMuted] at (3mm, -5.5mm) {$1{-}$gate};
+    \node[font=\sffamily\small, text=cText] at (8mm, 0) {$+$};
+    \draw[->, line width=0.3pt, draw=cMuted] (10mm, 0) -- (14mm, 0);
+    \draw[draw=stageCBanner, fill=stageCBanner!30, line width=0.3pt] (14mm, -2mm) rectangle (18mm, 2mm);
+  \end{scope}
+
+  % Output V_jt
+  \node[draw=cText, fill=cText!4, line width=0.7pt, rounded corners=2pt,
+         minimum width=80mm, minimum height=12mm,
+         anchor=north] (vjt) at ($(wsum.south)+(0,-3mm)$) {};
+  \node[font=\sffamily\bfseries\footnotesize, text=cText]
+        at (vjt.center) {$V_{j,t}\,:\,(T,N)$};
+
+  % inner arrows in gated fusion
+  \draw[arrInner] (bcast.south) -- (sigm.north);
+  \draw[arrInner] (sigm.south) -- (wsum.north);
+  \draw[arrInner] (wsum.south) -- (vjt.north);
+
+  % ─── h_s and h_d → gated fusion ──────────────────────────────────────
+  \draw[arrInner] (sage2.south) |- ($(gbox.north)+(-90mm, 1mm)$);
+  \draw[arrInner] (flin.south) |- ($(gbox.north)+(70mm, 1mm)$);
+
+\end{scope}
+
+\begin{pgfonlayer}{background}
+  \node[rowframe=stageBBg, fit=(row2)] (frameRow2) {};
+\end{pgfonlayer}
+\node[rowbanner=stageBBanner, anchor=north west]
+  at ($(frameRow2.north west)+(8pt, 0pt)$)
+  {\textsc{Stage B · Encoder}\;\,\textmd{\itshape — dual-branch ST-GNN $+$ gated fusion · 33{,}026 weights}};
+
+% ════════════════════════════════════════════════════════════════════════
+%  ROW 3 · STAGE C · CHOICE HEAD + LOSS + TRAINED Θ
+% ════════════════════════════════════════════════════════════════════════
+
+\begin{scope}[local bounding box=row3, shift={(0, -180mm)}]
+
+  % ── ④ Compute 9 utilities U^(m,k) (Stage C extends to A+rightcol total width 282mm) ──
+  \node[modC, anchor=north west] (utility) at (0, 0)
+    {\begin{minipage}{96mm}
+      \centering\textbf{\textcolor{stageCBanner}{\textcircled{\scriptsize 4} Compute 9 utilities $U^{(m,k)}$}}\\[1pt]
+      \scriptsize 1 utility per (mode $m$, origin tier $k$) cell\\[3pt]
+      \scriptsize $U^{(m,k)}_{ij,t} =\;$\textcolor{cTermV}{$\alpha V_{j,t}$}$+$\textcolor{cTermBeta}{$\beta_{t,m}\kappa_k t_{ij}^{(m)}$}\\
+      \;\;\;$+$\textcolor{cTermGamma}{$\gamma\log d_{ij}$}$+$\textcolor{cTermDelta}{$\delta_k\mathrm{OccM}_{ij}$}\\[2pt]
+      \tiny\textcolor{cMuted}{$\kappa_k,\delta_k$ carry $k$ = \emph{origin's income tier}\;(low/mid/high)}\\[3pt]
+      \begin{tikzpicture}[baseline=0]
+        % 3x3 grid of U^(m,k) cells
+        \foreach \r/\m in {0/car, 1/tr, 2/wk}{
+          \foreach \c/\k in {0/lo, 1/mi, 2/hi}{
+            \node[draw=cTermBeta, fill=cTermBeta!20, line width=0.4pt,
+                   minimum size=10mm, font=\sffamily\tiny, text=cText]
+                  (u\m\k) at (\c*11mm, -\r*11mm) {$U^{(\m,\k)}$};
+          }
+        }
+        \foreach \c/\k in {0/lo, 1/mi, 2/hi}
+          \node[font=\sffamily\tiny, text=cMuted] at (\c*11mm, 8mm) {tier=\k};
+        \foreach \r/\m in {0/car, 1/tr, 2/wk}
+          \node[font=\sffamily\tiny, text=cMuted, anchor=east] at (-7mm, -\r*11mm) {mode=\m};
+      \end{tikzpicture}
+    \end{minipage}};
+
+  % ── ⑤ Apply softmax to each → 9 distributions ──
+  \node[modC, anchor=north west] (softmax) at (102mm, 0)
+    {\begin{minipage}{86mm}
+      \centering\textbf{\textcolor{stageCBanner}{\textcircled{\scriptsize 5} Softmax over destinations $j$}}\\[1pt]
+      \scriptsize 9 probability distributions: $\mathrm{sm}_j(U^{(m,k)})$\\[3pt]
+      \begin{tikzpicture}[baseline=0]
+        \foreach \r in {0,1,2}{
+          \foreach \c in {0,1,2}{
+            \begin{scope}[shift={(\c*11mm, -\r*11mm)}]
+              \draw[draw=cTermBeta, fill=white, line width=0.4pt,
+                     rounded corners=0.5pt]
+                    (-4mm, -3mm) rectangle (4mm, 3mm);
+              \pgfmathtruncatemacro{\peak}{2 + Mod(\r+\c, 4)}
+              \foreach \b in {0,1,2,3,4,5}{
+                \pgfmathsetmacro{\dist}{(\b-\peak)*(\b-\peak)}
+                \pgfmathsetmacro{\hh}{0.6 + 2.0*exp(-0.6*\dist)}
+                \fill[cTermBeta, opacity=\hh, opacity={min(\hh,1)}]
+                  (-3.5mm + \b*1.2mm, -2.5mm) rectangle
+                  (-3.5mm + \b*1.2mm + 0.9mm, -2.5mm + \hh*0.6mm);
+              }
+            \end{scope}
+          }
+        }
+        \node[font=\sffamily\scriptsize, text=cMuted] at (11mm, -38mm) {each cell: $P^{(m,k)}(j\!\mid\!i,t)$};
+      \end{tikzpicture}
+    \end{minipage}};
+
+  % ── ⑥ Mixture aggregation → P(j|i,t) ──
+  \node[modC, anchor=north west] (mixture) at (194mm, 0)
+    {\begin{minipage}{86mm}
+      \centering\textbf{\textcolor{stageCBanner}{\textcircled{\scriptsize 6} Mixture aggregation}}\\[1pt]
+      \scriptsize weighted by $\pi_m(i,j)\!\cdot\!\pi_k(i)$ (\textit{from Heterogeneity priors})\\[3pt]
+      \scriptsize $P(j|i,t) = \!\!\sum_{m,k}\!\pi_m(i,j)\,\pi_k(i)$\\
+      \;\;$\cdot\,\mathrm{softmax}_j\,U^{(m,k)}_{ij,t}$\\[5pt]
+      \begin{tikzpicture}[baseline=0]
+        \foreach \i in {0,1,2,3,4,5,6,7,8}{
+          \pgfmathtruncatemacro{\row}{int(\i/3)}
+          \pgfmathtruncatemacro{\col}{Mod(\i, 3)}
+          \node[draw=cTermBeta, fill=cTermBeta!30, minimum size=2.5mm, line width=0.3pt]
+                (s\i) at (\col*4mm, -\row*4mm) {};
+          \draw[->, line width=0.3pt, draw=cMuted] (s\i.east) -- (24mm, -\row*4mm);
+        }
+        \node[draw=cMuted, fill=white, circle, line width=0.5pt,
+               minimum size=8mm, font=\sffamily\small]
+              (sigma) at (28mm, -4mm) {$\Sigma$};
+        \node[draw=cTermBeta, fill=cTermBeta, rounded corners=2pt,
+               line width=0.7pt, minimum width=18mm, minimum height=8mm,
+               font=\sffamily\scriptsize, text=white]
+              (P) at (50mm, -4mm) {$P(j|i,t)$};
+        \draw[->, line width=0.7pt, draw=cTermBeta] (sigma.east) -- (P.west);
+        \node[font=\sffamily\tiny, text=cMuted] at (12mm, -16mm) {9 weighted softmax};
+      \end{tikzpicture}
+    \end{minipage}};
+
+  % ── ⑦ Cross-entropy loss + backprop (compact, less prominent than ④⑤⑥) ──
+  \node[modC, anchor=north west, fill=stageCBanner!8] (loss) at (60mm, -56mm)
+    {\begin{minipage}{160mm}
+      \centering\textbf{\textcolor{stageCBanner}{\textcircled{\scriptsize 7} Cross-entropy loss + joint backprop}}\;
+      \textcolor{stageCBanner}{\textbf{(1 scalar, not 9)}}\\[1pt]
+      \scriptsize $\mathcal{L} = -\!\!\sum_{i,t,j}\! F_{ij,t}\,\log P(j|i,t)$\;\;|\;\;
+      Adam: enc lr 1e-3, head lr 1e-2\;\;|\;\;$\nabla_\Theta\mathcal{L}$ updates $\Theta_{\text{enc}} \cup (\beta,\gamma,\delta,\kappa)$\\[3pt]
+      \begin{minipage}[c]{72mm}\centering
+        \includegraphics[width=68mm]{../figures/arch/train_curve_v2.png}\\
+        \tiny\textit{val CPC = 0.488 · London 2019 · 200 ep}
+      \end{minipage}\hfill
+      \begin{minipage}[c]{82mm}\raggedright\tiny
+        $\bullet$ \textbf{Monolithic CE} on aggregate hourly OD\\
+        $\bullet$ 9 components fit \emph{1} observed flow via $\pi_m\pi_k$ mixture\\
+        $\bullet$ $\Theta_{\text{enc}}$ learns flexible $V_{j,t}$ from data\\
+        $\bullet$ $(\beta,\gamma,\delta,\kappa)$ identified \emph{conditional on V}\\
+        $\bullet$ All 33{,}103 params updated together
+      \end{minipage}
+    \end{minipage}};
+
+  % inner arrows in row 3
+  \draw[arrInner] (utility.east) -- node[arrlbl, above]{$U^{(m,k)}$} (softmax.west);
+  \draw[arrInner] (softmax.east) -- node[arrlbl, above]{$P^{(m,k)}$} (mixture.west);
+  \draw[arrInner] (mixture.south) |- node[arrlbl, near end, above]{$P(j|i,t)$} ($(loss.north)+(0,0)$);
+
+  % backprop arrow (red dashed) — simple horizontal path
+  \draw[arrBack] (loss.north west) -- ++(-12mm, 0) |-
+          node[arrlbl, near end, font=\sffamily\scriptsize\itshape, fill=white, text=cBack]
+              {$\nabla_\Theta\mathcal{L}$}
+          (utility.west);
+
+\end{scope}
+
+\begin{pgfonlayer}{background}
+  \node[rowframe=stageCBg, fit=(row3)] (frameRow3) {};
+\end{pgfonlayer}
+\node[rowbanner=stageCBanner, anchor=north west]
+  at ($(frameRow3.north west)+(8pt, 0pt)$)
+  {\textsc{Stage C · Choice head + Loss}\;\,\textmd{\itshape — supervised learning · 77 interpretable parameters}};
+
+% ── π_m, π_k from Heterogeneity priors → ⑥ mixture aggregation ────────
+% (drawn outside row3 scope so cross-scope coords stay clean)
+\draw[->, line width=0.9pt, draw=stageBBanner, dashed]
+  (pies.south) -- ++(0, -4mm) -|
+  node[fill=white, font=\sffamily\scriptsize\itshape, text=stageBBanner,
+        inner sep=1.5pt, pos=0.25]
+        {$\pi_m(i,j),\,\pi_k(i)$ feed mixture}
+  ($(mixture.north)+(0, 1mm)$);
+
+% ── Travel time t_ij^(m) → ④ utility (β·κ·t term) ────────────────────
+\draw[->, line width=0.7pt, draw=stageBBanner, dashed]
+  (tij.south west) -- ++(0, -3mm) -|
+  node[fill=white, font=\sffamily\scriptsize\itshape, text=stageBBanner,
+        inner sep=1.5pt, pos=0.25]
+        {$t_{ij}^{(m)}$ feeds $\beta_{t,m}\kappa_k t$}
+  ($(utility.north)+(20mm, 1mm)$);
+
+% ── OccMatch → ④ utility (δ_k·OccM term) ─────────────────────────────
+\draw[->, line width=0.7pt, draw=stageBBanner, dashed]
+  (occm.west) -|
+  node[fill=white, font=\sffamily\scriptsize\itshape, text=stageBBanner,
+        inner sep=1.5pt, pos=0.25]
+        {OccM feeds $\delta_k\!\cdot\!$OccM}
+  ($(utility.north)+(-20mm, 1mm)$);
+
+% ════════════════════════════════════════════════════════════════════════
+%  ROW 4 · TRAINED Θ — output card with 5 sub-cards (full width)
+% ════════════════════════════════════════════════════════════════════════
+
+\begin{scope}[local bounding box=row4, shift={(0, -320mm)}]
+
+  % Trained Θ cards: BIG English meaning first; math symbols + counts secondary.
+  % NO row banner — the cards themselves carry the message.
+
+  \node[draw=cParEnc, fill=cParEnc!10, rounded corners=4pt, line width=0.9pt,
+         font=\sffamily\footnotesize, text=cParEnc, anchor=north west] (penc) at (0mm, 0)
+     {\begin{minipage}{48mm}
+      \centering\textbf{\large Encoder weights}\\
+      \scriptsize\textit{deep ML representation}\\[5pt]
+      \raggedright\tiny\textbullet\;encoder maps inputs $\to V_{j,t}$\\
+      \textbullet\;used in every agent's encode pass\\
+      \textbullet\;not directly interpretable\\[4pt]
+      \centering\scriptsize $\Theta_{\text{enc}}$ · 33{,}026 weights
+    \end{minipage}};
+
+  \node[draw=cParBeta, fill=cParBeta!10, rounded corners=4pt, line width=0.9pt,
+         font=\sffamily\footnotesize, text=cParBeta, anchor=north west] (pbeta) at (54mm, 0)
+     {\begin{minipage}{54mm}
+      \centering\textbf{\large Time sensitivity}\\
+      \scriptsize\textit{per mode $\times$ per hour}\\[5pt]
+      \raggedright\tiny\textbullet\;how strongly travel time deters choice\\
+      \textbullet\;agent uses sensitivity for their own mode\\[3pt]
+      \centering\tiny car ${-}.187$\;\;transit ${-}.105$\;\;walk ${-}.049$\\[4pt]
+      \scriptsize $\beta_{t,m}$ · 72 trained values
+    \end{minipage}};
+
+  \node[draw=cParGamma, fill=cParGamma!10, rounded corners=4pt, line width=0.9pt,
+         font=\sffamily\footnotesize, text=cParGamma, anchor=north west] (pgamma) at (114mm, 0)
+     {\begin{minipage}{42mm}
+      \centering\textbf{\large Distance decay}\\
+      \scriptsize\textit{universal log-distance}\\[5pt]
+      \raggedright\tiny\textbullet\;penalises long-distance OD pairs\\
+      \textbullet\;shared across ALL agents\\[5pt]
+      \centering\scriptsize recovered: $-0.328$\\[3pt]
+      \scriptsize $\gamma$ · 1 trained scalar
+    \end{minipage}};
+
+  \node[draw=cParDelta, fill=cParDelta!10, rounded corners=4pt, line width=0.9pt,
+         font=\sffamily\footnotesize, text=cParDelta, anchor=north west] (pdelta) at (160mm, 0)
+     {\begin{minipage}{54mm}
+      \centering\textbf{\large Occupational matching}\\
+      \scriptsize\textit{by income tier}\\[5pt]
+      \raggedright\tiny\textbullet\;rewards origin-occ.\,$\to$ dest-sector match\\
+      \textbullet\;agent uses coefficient for their tier\\[3pt]
+      \centering\tiny low $0$\;\;mid $+.20$\;\;high $+.20$\\[4pt]
+      \scriptsize $\delta_k$ · 2 trained values
+    \end{minipage}};
+
+  \node[draw=cParKappa, fill=cParKappa!10, rounded corners=4pt, line width=0.9pt,
+         font=\sffamily\footnotesize, text=cParKappa, anchor=north west] (pkappa) at (220mm, 0)
+     {\begin{minipage}{54mm}
+      \centering\textbf{\large Income tier scaling}\\
+      \scriptsize\textit{multiplier on time sensitivity}\\[5pt]
+      \raggedright\tiny\textbullet\;higher tiers value time more (larger $|\beta|$)\\
+      \textbullet\;agent uses scaling for their tier\\[3pt]
+      \centering\tiny low $1.00$\;\;mid $1.97$\;\;high $1.97$\\[4pt]
+      \scriptsize $\kappa_k$ · 2 trained values
+    \end{minipage}};
+
+\end{scope}
+
+\begin{pgfonlayer}{background}
+  \node[rowframe=cParEnc!4, fit=(row4)] (frameRow4) {};
+\end{pgfonlayer}
+
+% ════════════════════════════════════════════════════════════════════════
+%  MAIN VERTICAL FLOW ARROWS BETWEEN ROWS
+% ════════════════════════════════════════════════════════════════════════
+
+\draw[arrFwd] ($(frameRow1.south)+(0, 0)$) --
+              node[arrlbl, fill=white, font=\sffamily\small\bfseries]{tensors}
+              ($(frameRow2.north)+(0, 0)$);
+\draw[arrFwd] ($(frameRow2.south)+(0, 0)$) --
+              node[arrlbl, fill=white, font=\sffamily\small\bfseries]{$V_{j,t}$}
+              ($(frameRow3.north)+(0, 0)$);
+\draw[arrFwd] ($(frameRow3.south)+(0, 0)$) --
+              node[arrlbl, fill=white, font=\sffamily\small\bfseries]{trained $\Theta$}
+              ($(frameRow4.north)+(0, 0)$);
+
+% ════════════════════════════════════════════════════════════════════════
+%  Title and footer
+% ════════════════════════════════════════════════════════════════════════
+
+\node[font=\sffamily\bfseries\Large, anchor=south west, text=cText]
+  at ($(frameRow1.north west)+(0, 8mm)$)
+  {Figure 1 — ML Training Pipeline};
+\node[font=\sffamily\itshape\large, anchor=south west, text=cMuted]
+  at ($(frameRow1.north west)+(0, 4mm)$)
+  {supervised inverse learning of choice parameters from aggregate hourly OD};
+
+\node[font=\sffamily\scriptsize\itshape, text=cMuted, anchor=north west,
+       text width=300mm]
+  at ($(frameRow4.south west)+(0, -6pt)$)
+  {Trained $\Theta$ has \textbf{5 functional categories}:
+   $\Theta_{\text{enc}}$ (deep ML, used by anyone going through encoder);
+   $\beta_{t,m}$ (time sensitivity, fetched per agent's mode);
+   $\gamma$ (distance, shared);
+   $\delta_k$ (occ.\ match, fetched per tier);
+   $\kappa_k$ (tier scaling on $\beta$, fetched per tier).
+   These five types bridge to Figure~2 (ABM forward simulation).};
+
+\end{tikzpicture}
+
+\end{document}

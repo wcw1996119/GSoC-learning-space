@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Figure 1 — Model Architecture</title>
+<style>
+  /* ─── reset + base ─────────────────────────────────────────────── */
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: #f5f5f7;
+    color: #0f172a;
+    font-family: -apple-system, "Helvetica Neue", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    line-height: 1.45;
+  }
+  .page {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 36px 32px 60px;
+    background: white;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+    margin-top: 28px; margin-bottom: 28px;
+  }
+
+  /* ─── title block ──────────────────────────────────────────────── */
+  .title {
+    text-align: center;
+    margin-bottom: 22px;
+    padding-bottom: 18px;
+    border-bottom: 1px solid #e2e8f0;
+  }
+  .title h1 {
+    font-size: 19px;
+    font-weight: 600;
+    color: #0f172a;
+    margin: 0 0 4px;
+  }
+  .title .sub {
+    font-size: 12.5px;
+    color: #64748b;
+    font-style: italic;
+    font-weight: 400;
+  }
+  .name-pending {
+    background: #fef9c3;
+    color: #854d0e;
+    padding: 1px 7px;
+    border-radius: 3px;
+    font-style: normal;
+    font-size: 11.5px;
+    margin-left: 6px;
+  }
+
+  /* ─── colour tokens (academic palette) ────────────────────────── */
+  :root {
+    --c-input:     #cbd5e1;
+    --c-encoder:   #15803d;          /* green for ML encoder */
+    --c-encoder-bg:#ecfdf5;
+    --c-fusion:    #0f766e;
+    --c-fusion-bg: #ccfbf1;
+    --c-rum:       #6d28d9;          /* purple for behavioural choice */
+    --c-rum-bg:    #f3e8ff;
+    --c-loss:      #b91c1c;          /* red for loss */
+    --c-loss-bg:   #fee2e2;
+    --c-agent:     #ea580c;          /* orange for ABM */
+    --c-agent-bg:  #ffedd5;
+    --c-bpr:       #92400e;          /* brown for BPR */
+    --c-bpr-bg:    #fef3c7;
+    --c-output:    #1e293b;
+    --c-output-bg: #f1f5f9;
+
+    --arrow-fwd:   #1e40af;          /* blue: forward (Stage 1 + 2) */
+    --arrow-back:  #b91c1c;          /* red dashed: backprop (Stage 1) */
+    --arrow-bpr:   #ea580c;          /* orange dashed: BPR feedback (Stage 2) */
+    --arrow-stage: #475569;          /* gray: sub-step within block */
+  }
+
+  /* ─── module block (the "card") ───────────────────────────────── */
+  .block {
+    border: 1px solid;
+    border-radius: 6px;
+    padding: 10px 12px;
+    background: white;
+    position: relative;
+  }
+  .block .head {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 6px;
+  }
+  .block .body {
+    font-size: 12px;
+    color: #1e293b;
+  }
+  .block .formula {
+    font-family: "Cambria Math", "STIX Two Math", "Times New Roman", serif;
+    font-size: 12px;
+    color: #0f172a;
+    background: #f8fafc;
+    padding: 6px 9px;
+    border-radius: 4px;
+    border: 1px solid #e2e8f0;
+    margin: 6px 0 4px;
+    overflow-x: auto;
+  }
+  .block .miniviz {
+    margin-top: 8px;
+    text-align: center;
+  }
+  .block .miniviz img {
+    max-width: 100%;
+    height: auto;
+  }
+  .block .note {
+    font-size: 10.5px;
+    color: #64748b;
+    margin-top: 4px;
+    font-style: italic;
+  }
+
+  /* per-colour skins */
+  .blk-input    { border-color: var(--c-input);   }
+  .blk-encoder  { border-color: var(--c-encoder); background: var(--c-encoder-bg); }
+  .blk-encoder .head { color: var(--c-encoder); }
+  .blk-fusion   { border-color: var(--c-fusion);  background: var(--c-fusion-bg);  }
+  .blk-fusion  .head { color: var(--c-fusion);  }
+  .blk-rum      { border-color: var(--c-rum);     background: var(--c-rum-bg);     }
+  .blk-rum     .head { color: var(--c-rum);     }
+  .blk-loss     { border-color: var(--c-loss);    background: var(--c-loss-bg);    }
+  .blk-loss    .head { color: var(--c-loss);    }
+  .blk-agent    { border-color: var(--c-agent);   background: var(--c-agent-bg);   }
+  .blk-agent   .head { color: var(--c-agent);   }
+  .blk-bpr      { border-color: var(--c-bpr);     background: var(--c-bpr-bg);     }
+  .blk-bpr     .head { color: var(--c-bpr);     }
+  .blk-output   { border-color: var(--c-output);  background: var(--c-output-bg);  }
+  .blk-output  .head { color: var(--c-output);  }
+
+  /* ─── flow scaffolding ────────────────────────────────────────── */
+  .row {
+    display: grid;
+    gap: 12px;
+    margin-bottom: 0;
+  }
+  .row-3in   { grid-template-columns: 1fr 1fr 1fr; }
+  .row-2enc  { grid-template-columns: 1fr 1.5fr;   }
+  .row-2agt  { grid-template-columns: 1fr 1fr;     }
+
+  /* arrow between vertical blocks */
+  .arrow-down {
+    height: 32px;
+    position: relative;
+    margin: 0 0 0 0;
+  }
+  .arrow-down svg {
+    width: 100%; height: 100%;
+    display: block;
+  }
+  /* labels on arrows */
+  .arrow-down .label {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    background: white;
+    padding: 1px 7px;
+    font-size: 11px;
+    font-family: "Cambria Math", "Times New Roman", serif;
+    color: #0f172a;
+    border: 1px solid #cbd5e1;
+    border-radius: 3px;
+  }
+  .arrow-down .label.center { left: 50%; transform: translate(-50%, -50%); }
+  .arrow-down .label.right  { left: 60%; }
+
+  /* shared parameter bus */
+  .params-bus {
+    background: linear-gradient(90deg, #fef3c7, #fed7aa);
+    border: 1px solid #f59e0b;
+    border-radius: 6px;
+    padding: 7px 14px;
+    margin: 10px 0;
+    text-align: center;
+    font-size: 12px;
+    font-family: "Cambria Math", "Times New Roman", serif;
+    color: #78350f;
+  }
+  .params-bus .label {
+    font-family: -apple-system, sans-serif;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #92400e;
+    font-weight: 600;
+    margin-right: 8px;
+  }
+
+  /* identification invariant callout (key paper claim) */
+  .invariant {
+    border: 1px dashed #64748b;
+    background: #f8fafc;
+    border-radius: 5px;
+    padding: 9px 14px;
+    margin: 14px 0;
+    font-size: 11.5px;
+    color: #334155;
+  }
+  .invariant .lab {
+    color: #0f172a;
+    font-weight: 600;
+    margin-right: 6px;
+  }
+
+  /* legend for arrow colours */
+  .arrow-legend {
+    display: flex;
+    justify-content: center;
+    gap: 22px;
+    margin-top: 22px;
+    padding: 10px 14px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 5px;
+    font-size: 11.5px;
+    color: #334155;
+    flex-wrap: wrap;
+  }
+  .arrow-legend .item { display: flex; align-items: center; gap: 6px; }
+  .arrow-legend svg { width: 32px; height: 8px; }
+
+  /* responsive on narrow screens */
+  @media (max-width: 720px) {
+    .row-3in, .row-2enc, .row-2agt { grid-template-columns: 1fr; }
+  }
+
+  /* print: PDF ready */
+  @media print {
+    body { background: white; }
+    .page { box-shadow: none; border: none; max-width: none; padding: 12mm; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+<!-- ─── title ───────────────────────────────────────────────────── -->
+<div class="title">
+  <h1>Figure 1 — Model Architecture<span class="name-pending">name TBD</span></h1>
+  <div class="sub">
+    Joint inverse-recovery of behavioural primitives from aggregate hourly OD,
+    with destination-side BPR closure for counterfactual deployment.
+  </div>
+</div>
+
+<!-- ─── INPUTS row ───────────────────────────────────────────────── -->
+<div class="row row-3in">
+  <div class="block blk-input">
+    <div class="head">Input · static</div>
+    <div class="body">
+      <b>X<sup>static</sup></b> ∈ ℝ<sup>N×22</sup><br>
+      <span class="note">POI (office, retail, F&amp;B), sectoral employment ×8, population, IMD income decile, distance to nearest tube — time-invariant per grid.</span>
+    </div>
+  </div>
+  <div class="block blk-input">
+    <div class="head">Input · dynamic</div>
+    <div class="body">
+      <b>X<sup>dyn</sup></b> ∈ ℝ<sup>T×N×5</sup><br>
+      <span class="note">Hourly congestion z, hourly destination-inflow z, queue residual placeholder, sin/cos hour-of-day. T = 24.</span>
+    </div>
+  </div>
+  <div class="block blk-input">
+    <div class="head">Input · graph + cost</div>
+    <div class="body">
+      <b>𝒢</b> = (V, E) — 1 km grid 4-neighbour adjacency<br>
+      <b>t<sub>ij</sub><sup>(m)</sup></b> ∈ ℝ<sup>N×N</sup>, m ∈ {car, transit, walk}<br>
+      <b>log d<sub>ij</sub></b>, π<sub>m</sub>(i, j), π<sub>k</sub>(i), OccMatch
+      <span class="note">Distance-aware choice set: walk active only when d &lt; 5 km.</span>
+    </div>
+  </div>
+</div>
+
+<!-- arrow into encoder -->
+<div class="arrow-down">
+  <svg><line x1="50%" y1="0" x2="50%" y2="100%" stroke="var(--arrow-fwd)" stroke-width="1.6"/>
+       <polygon points="0,0 -5,-8 5,-8" fill="var(--arrow-fwd)" transform="translate(50%,100%) rotate(180)"/>
+  </svg>
+</div>
+
+<!-- ─── ENCODER row (static + dynamic side by side) ───────────────── -->
+<div class="row row-2enc">
+  <div class="block blk-encoder">
+    <div class="head">① Static branch</div>
+    <div class="body">
+      GraphSAGE × 2 layers over time-invariant features.<br>
+      Computed once per forward pass (no temporal axis).
+    </div>
+    <div class="miniviz"><img src="figures/arch/sage_aggregation.png" alt="SAGE neighbour aggregation"></div>
+    <div class="note">Output: <b>h<sub>s</sub></b> ∈ ℝ<sup>N×32</sup></div>
+  </div>
+  <div class="block blk-encoder">
+    <div class="head">② Dynamic branch (per-hour SAGE → GRU + multi-scale TCN)</div>
+    <div class="body">
+      For each hour t: GraphSAGE × 2 → stack to (T, N, hidden).<br>
+      Then GRU along T (sequential memory) + parallel multi-scale TCN
+      (kernel widths 3 / 5 / 7, circular padding for 24-h cycle).
+    </div>
+    <div class="miniviz" style="display:flex; gap:6px; justify-content:center;">
+      <img src="figures/arch/gru_cell.png"   alt="GRU cell"   style="height:90px; width:auto;">
+      <img src="figures/arch/tcn_kernels.png" alt="TCN kernels" style="height:90px; width:auto;">
+    </div>
+    <div class="note">Output: <b>h<sub>d</sub></b> ∈ ℝ<sup>T×N×32</sup></div>
+  </div>
+</div>
+
+<!-- arrow into fusion -->
+<div class="arrow-down">
+  <svg><line x1="50%" y1="0" x2="50%" y2="100%" stroke="var(--arrow-fwd)" stroke-width="1.6"/>
+       <polygon points="0,0 -5,-8 5,-8" fill="var(--arrow-fwd)" transform="translate(50%,100%) rotate(180)"/>
+  </svg>
+  <span class="label center">h<sub>s</sub>, h<sub>d</sub></span>
+</div>
+
+<!-- ─── GATED FUSION ─────────────────────────────────────────────── -->
+<div class="block blk-fusion">
+  <div class="head">③ Gated fusion → V<sub>j,t</sub></div>
+  <div class="body">
+    Per (t, j) sigmoid gate decides static vs dynamic dominance, then a
+    linear head maps fused hidden to a scalar destination utility.
+  </div>
+  <div class="formula">
+    gate(t, j) = σ(W<sub>g</sub> [h<sub>s</sub> ⊕ h<sub>d</sub>])
+    &nbsp;&nbsp;
+    h<sub>fused</sub> = gate · h<sub>s</sub> + (1 − gate) · h<sub>d</sub>
+    &nbsp;&nbsp;
+    V<sub>j,t</sub> = W<sub>v</sub> h<sub>fused</sub>
+    &nbsp;then&nbsp;
+    V ← (V − μ<sub>V</sub>) / σ<sub>V</sub>
+  </div>
+  <div class="miniviz"><img src="figures/arch/gated_fusion.png" alt="Gated fusion sigmoid + per-hour gate" style="height:120px; width:auto;"></div>
+  <div class="note">Output: <b>V<sub>j,t</sub></b> ∈ ℝ<sup>T×N</sup>, z-normalised so α (= 1, fixed) need not absorb scale — cleanly identifies β.</div>
+</div>
+
+<!-- arrow into RUM -->
+<div class="arrow-down">
+  <svg><line x1="50%" y1="0" x2="50%" y2="100%" stroke="var(--arrow-fwd)" stroke-width="1.6"/>
+       <polygon points="0,0 -5,-8 5,-8" fill="var(--arrow-fwd)" transform="translate(50%,100%) rotate(180)"/>
+  </svg>
+  <span class="label center">V<sub>j,t</sub></span>
+</div>
+
+<!-- ─── BEHAVIOURAL CHOICE LAYER ─────────────────────────────────── -->
+<div class="block blk-rum">
+  <div class="head">④ Behavioural choice layer — mode × tier mixture RUM</div>
+  <div class="body">
+    Per-(mode m, tier k) systematic utility, then mixture over the
+    pair-level mode share π<sub>m</sub>(i, j) and origin tier share
+    π<sub>k</sub>(i):
+  </div>
+  <div class="formula">
+    U<sub>ij,t</sub><sup>(m,k)</sup> = α V<sub>j,t</sub>
+    + β<sub>t,m</sub> · κ<sub>k</sub> · t<sub>ij</sub><sup>(m)</sup>
+    + γ log d<sub>ij</sub>
+    + δ<sub>k</sub> OccMatch<sub>ij</sub>
+  </div>
+  <div class="formula">
+    P(j | i, t) = ∑<sub>m</sub> π<sub>m</sub>(i, j) ∑<sub>k</sub> π<sub>k</sub>(i) · softmax<sub>j</sub> U<sup>(m,k)</sup>
+  </div>
+  <div class="miniviz"><img src="figures/arch/mode_tier_beta.png" alt="Mode×Tier β heatmap" style="height:160px; width:auto;"></div>
+  <div class="note">
+    Recovered (this London run, mean over hours):
+    β<sub>car</sub> = −0.187, β<sub>transit</sub> = −0.105, β<sub>walk</sub> = −0.049,
+    γ = −0.325, κ = [1, 1.98, 1.98], δ<sub>k</sub> = [0, 0.20, 0.20].
+    Walk identifiable on d &lt; 5 km only (distance-aware choice set).
+  </div>
+</div>
+
+<!-- arrow into LOSS -->
+<div class="arrow-down" style="height:36px;">
+  <svg><line x1="50%" y1="0" x2="50%" y2="100%" stroke="var(--arrow-fwd)" stroke-width="1.6"/>
+       <polygon points="0,0 -5,-8 5,-8" fill="var(--arrow-fwd)" transform="translate(50%,100%) rotate(180)"/>
+       <line x1="50%" y1="100%" x2="50%" y2="0" stroke="var(--arrow-back)" stroke-width="1.4" stroke-dasharray="3 3" transform="translate(20,0)"/>
+       <polygon points="0,0 -5,-8 5,-8" fill="var(--arrow-back)" transform="translate(50%,0) translate(20,0) rotate(0)"/>
+  </svg>
+  <span class="label center">P(j | i, t)</span>
+  <span class="label right" style="left: 64%;">∇L &nbsp; <span style="color:var(--arrow-back)">↑</span></span>
+</div>
+
+<!-- ─── LOSS ─────────────────────────────────────────────────────── -->
+<div class="block blk-loss">
+  <div class="head">⑤ Cross-entropy loss · multinomial NLL on observed F<sub>ij,t</sub></div>
+  <div class="body">
+    Over all valid (origin i, hour t), cross-entropy of model probability
+    against observed flow distribution. Backprop updates encoder weights
+    Θ<sub>enc</sub> and behavioural parameters jointly.
+  </div>
+  <div class="formula">
+    ℒ = − ∑<sub>i, t</sub> ∑<sub>j</sub> F<sub>ij,t</sub> log P(j | i, t)
+    &nbsp; + &nbsp; weight-decay regularisation
+  </div>
+  <div class="miniviz"><img src="figures/arch/training_curve.png" alt="Training NLL + CPC curve" style="height:155px; width:auto;"></div>
+  <div class="note">Adam: encoder lr 1e−3, RUM lr 1e−2, weight decay 1e−4. Early stop on val NLL with patience 30. 200 epochs / ~80 min on CPU. Final CPC = 0.488.</div>
+</div>
+
+<!-- ─── shared parameter bus ─────────────────────────────────────── -->
+<div class="params-bus">
+  <span class="label">Trained parameters</span>
+  Θ<sub>enc</sub> (≈ 33 k weights) · β<sub>t,m</sub> · γ · δ<sub>k</sub> · κ<sub>k</sub>
+  &nbsp;&nbsp;<span style="color:#a16207; font-style:italic; font-size:10.5px;">(frozen at deployment — no re-fit)</span>
+</div>
+
+<!-- ─── identification invariant callout ─────────────────────────── -->
+<div class="invariant">
+  <span class="lab">Identification.</span>
+  Training uses <b>free-flow t<sub>ij</sub><sup>(m)</sup></b> throughout, so β<sub>t,m</sub>
+  is the sensitivity of utility to free-flow time. At deployment the
+  same β<sub>t,m</sub> is applied with congested t<sub>ij,t</sub><sup>(car), eq</sup> from BPR.
+  Avoiding flow ↔ time simultaneity in the inverse loop preserves
+  MLE asymptotics for β; substitution at deployment is consistent
+  under the single-component invariance assumption (Schölkopf et al., 2021).
+</div>
+
+<!-- arrow into Stage 2 ABM (orange BPR feedback emerges here) -->
+<div class="arrow-down">
+  <svg><line x1="50%" y1="0" x2="50%" y2="100%" stroke="var(--arrow-fwd)" stroke-width="1.6"/>
+       <polygon points="0,0 -5,-8 5,-8" fill="var(--arrow-fwd)" transform="translate(50%,100%) rotate(180)"/>
+  </svg>
+  <span class="label center">deploy with frozen Θ</span>
+</div>
+
+<!-- ─── ABM AGENTS + UTILITY ────────────────────────────────────── -->
+<div class="row row-2agt">
+  <div class="block blk-agent">
+    <div class="head">⑥ Synthetic agents</div>
+    <div class="body">
+      Sample N<sub>agents</sub> from empirical (π<sub>m</sub>(i), π<sub>k</sub>(i))
+      with assigned origin i<sub>n</sub> and departure hour t<sub>n</sub>.
+    </div>
+    <div class="miniviz"><img src="figures/arch/synthetic_agents.png" alt="Synthetic agent grid" style="height:110px; width:auto;"></div>
+  </div>
+  <div class="block blk-agent">
+    <div class="head">⑦ Utility evaluation + Gumbel-max choice</div>
+    <div class="body">
+      Each agent draws ε ~ Gumbel(0, 1) and picks
+      j<sub>n</sub><sup>*</sup> = argmax<sub>j</sub> (U<sub>i<sub>n</sub>j,t<sub>n</sub></sub><sup>(m<sub>n</sub>,k<sub>n</sub>)</sup> + ε).
+    </div>
+    <div class="miniviz"><img src="figures/arch/softmax_gumbel.png" alt="Softmax + Gumbel choice" style="height:110px; width:auto;"></div>
+  </div>
+</div>
+
+<!-- arrow into BPR -->
+<div class="arrow-down">
+  <svg><line x1="50%" y1="0" x2="50%" y2="100%" stroke="var(--arrow-fwd)" stroke-width="1.6"/>
+       <polygon points="0,0 -5,-8 5,-8" fill="var(--arrow-fwd)" transform="translate(50%,100%) rotate(180)"/>
+  </svg>
+  <span class="label center">F̂<sub>ij,t</sub></span>
+</div>
+
+<!-- ─── BPR FEEDBACK ─────────────────────────────────────────────── -->
+<div class="block blk-bpr">
+  <div class="head">⑧ Destination-side BPR feedback (car only)</div>
+  <div class="body">
+    Aggregate inflow per destination, apply BPR multiplier on car-mode
+    travel time only (transit and walk untouched), MSA fixed point.
+  </div>
+  <div class="formula">
+    Inflow<sub>j,t</sub> = ∑<sub>i</sub> F̂<sub>ij,t</sub>
+    &nbsp;&nbsp;
+    t<sub>ij,t</sub><sup>(car), cong</sup> = t<sub>ij</sub><sup>(car), free</sup> · (1 + 0.15 · (Inflow<sub>j,t</sub> / C<sub>j</sub>)<sup>4</sup>),
+    capped at 2.5
+  </div>
+  <div class="formula">
+    MSA: F̂<sup>(k+1)</sup> = (1 − 1/k) F̂<sup>(k)</sup> + (1/k) · choice(t<sup>(k)</sup>),
+    iterate until rel-gap &lt; 0.5%
+  </div>
+  <div class="miniviz"><img src="figures/arch/bpr_curve.png" alt="BPR V/C curve" style="height:155px; width:auto;"></div>
+  <div class="note">Capacity proxy C<sub>j</sub> = baseline daily inflow × scale. Walk/transit times unchanged — no transit-crowding model in this version.</div>
+</div>
+
+<!-- BPR feedback arrow back to ⑦ (orange dashed) -->
+<div class="arrow-down" style="height:46px;">
+  <svg>
+    <!-- forward arrow into output -->
+    <line x1="50%" y1="0" x2="50%" y2="100%" stroke="var(--arrow-fwd)" stroke-width="1.6"/>
+    <polygon points="0,0 -5,-8 5,-8" fill="var(--arrow-fwd)" transform="translate(50%,100%) rotate(180)"/>
+    <!-- BPR feedback arrow looping up on the right -->
+    <path d="M 75% 50% Q 92% 50% 92% -260% Q 92% -340% 75% -340%"
+          fill="none" stroke="var(--arrow-bpr)" stroke-width="1.4" stroke-dasharray="4 3"/>
+    <polygon points="0,0 6,-4 6,4" fill="var(--arrow-bpr)" transform="translate(75%,-340%) rotate(180)"/>
+  </svg>
+  <span class="label center">F̂<sup>*</sup>, t<sub>eq</sub></span>
+  <span class="label" style="left:78%; color:var(--arrow-bpr); border-color:var(--arrow-bpr);">BPR loop</span>
+</div>
+
+<!-- ─── OUTPUT row ───────────────────────────────────────────────── -->
+<div class="block blk-output">
+  <div class="head">⑨ Outputs &amp; counterfactual deployment</div>
+  <div class="body" style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; font-size: 11.5px;">
+    <div>
+      <b style="color:var(--c-output);">Predictive</b><br>
+      F̂<sub>ij,t</sub><sup>*</sup> &nbsp;hourly OD<br>
+      t<sub>ij,t</sub><sup>(car), eq</sup> &nbsp;equilibrium time<br>
+      <span class="note">Train CPC 0.49, val CPC 0.488 (London 2019)</span>
+    </div>
+    <div>
+      <b style="color:var(--c-output);">Welfare / accessibility</b><br>
+      A<sub>i</sub> = ∑<sub>j</sub> E<sub>j</sub> exp(β<sub>car</sub> t<sub>ij,t</sub><sup>(car)</sup>)<br>
+      Gini, Palma, Atkinson on A<sub>i</sub><br>
+      <span class="note">Population-weighted</span>
+    </div>
+    <div>
+      <b style="color:var(--c-output);">Counterfactual evaluation</b><br>
+      do(X<sup>static</sup>): spatial intervention<br>
+      do(X<sup>dyn</sup>): temporal intervention<br>
+      <span class="note">Same Θ — input perturbation only</span>
+    </div>
+  </div>
+</div>
+
+<!-- ─── arrow legend ─────────────────────────────────────────────── -->
+<div class="arrow-legend">
+  <div class="item">
+    <svg><line x1="0" y1="50%" x2="100%" y2="50%" stroke="var(--arrow-fwd)" stroke-width="2"/></svg>
+    forward (Stage 1 train + Stage 2 deploy)
+  </div>
+  <div class="item">
+    <svg><line x1="0" y1="50%" x2="100%" y2="50%" stroke="var(--arrow-back)" stroke-width="1.6" stroke-dasharray="3 3"/></svg>
+    backprop ∇<sub>Θ</sub>ℒ (Stage 1 only)
+  </div>
+  <div class="item">
+    <svg><line x1="0" y1="50%" x2="100%" y2="50%" stroke="var(--arrow-bpr)" stroke-width="1.6" stroke-dasharray="4 3"/></svg>
+    BPR feedback loop (Stage 2 only)
+  </div>
+</div>
+
+</div>
+</body>
+</html>

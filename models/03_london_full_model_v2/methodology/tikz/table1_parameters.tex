@@ -1,0 +1,54 @@
+% Table 1 — Parameter inventory
+% Standalone document, compiles to a one-page PDF that's easy to crop or
+% include via \input{} into the paper.  Uses booktabs for clean ruling.
+
+\documentclass[border=10pt]{standalone}
+
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{array}
+
+\definecolor{cText}    {HTML}{1F2937}
+\definecolor{cMuted}   {HTML}{6B7280}
+\definecolor{cInterp}  {HTML}{C44E52}    % red — flag the interpretable row
+\definecolor{cTotal}   {HTML}{1F2937}
+
+\renewcommand{\arraystretch}{1.18}
+\setlength{\tabcolsep}{12pt}
+
+\begin{document}
+{\sffamily
+\begin{tabular}{l r c}
+\toprule
+\textbf{Module} & \textbf{Parameters} & \textbf{Interpretable?} \\
+\midrule
+\multicolumn{3}{l}{\textcolor{cMuted}{\itshape Encoder $\Theta_{\text{enc}}$ — deep ML weights (opaque)}} \\
+\addlinespace[2pt]
+\quad \textcircled{\scriptsize 1} Static GraphSAGE ($\times 2$ layers)               & 3{,}520  & no \\
+\quad \textcircled{\scriptsize 2} Dynamic SAGE $+$ GRU $+$ multi-scale TCN $+$ fuse & 29{,}408 & no \\
+\quad \textcircled{\scriptsize 3} Gated fusion $+$ V-head                            & 98       & no \\
+\addlinespace[2pt]
+\multicolumn{1}{r}{\textcolor{cMuted}{\itshape encoder subtotal}} & \textcolor{cMuted}{33{,}026} & \\
+\midrule
+\multicolumn{3}{l}{\textcolor{cInterp}{\itshape Behavioural primitives — interpretable RUM coefficients}} \\
+\addlinespace[2pt]
+\quad \textcircled{\scriptsize 4} $\beta_{t,m}$ (24~hour $\times$ 3~mode time sensitivity) & 72 & yes \\
+\quad \textcircled{\scriptsize 4} $\gamma$ (distance decay)                                & 1  & yes \\
+\quad \textcircled{\scriptsize 4} $\delta_k$ (occupational match per income tier)         & 2  & yes \\
+\quad \textcircled{\scriptsize 4} $\kappa_k$ (income tier scaling, $\kappa_0\equiv 1$)    & 2  & yes \\
+\addlinespace[2pt]
+\multicolumn{1}{r}{\textcolor{cInterp}{\itshape RUM subtotal}} & \textcolor{cInterp}{\textbf{77}} & \\
+\midrule
+\textbf{Total trainable parameters}              & \textbf{33{,}103} & — \\
+\addlinespace[3pt]
+\textit{Interpretable share}                     & \textit{77 / 33{,}103 = 0.23\%} & \\
+\bottomrule
+\addlinespace[6pt]
+\multicolumn{3}{p{0.95\linewidth}}{\footnotesize\itshape\color{cMuted}%
+\textmd{\textbf{Note:}}\;Stage 2 deployment introduces no new parameters; BPR coefficients ($\alpha = 0.15$, $b = 4$, multiplier cap $= 2.5$) are hyperparameters fixed per Sheffi (1985) and Beckmann \emph{et al.} (1956).}\\
+\end{tabular}
+}
+\end{document}
