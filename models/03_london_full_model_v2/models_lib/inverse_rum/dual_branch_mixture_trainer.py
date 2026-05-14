@@ -147,6 +147,11 @@ class DualBranchMixtureTrainer:
         fixed_beta_per_mode: Optional[Dict[str, float]] = None,
         use_gnn_blend: bool = False,
         gnn_blend_init: float = 0.5,
+        # Wang TB-ResNet (2021) δ-control via architectural hard cap.
+        # blend_max=1.0: free sigmoid (legacy behaviour).
+        # blend_max=0.3: theory-dominant regime (Wang recommended).
+        # blend_max=0.0: pure-RUM ablation (V_GNN disabled).
+        blend_max: float = 1.0,
         mode_specific_gamma: bool = False,
         # ---- IRM (Module 1, Paper A Day 1) ----
         irm_variant: str = "none",                # "none" | "rex" | "irmv1"
@@ -300,10 +305,12 @@ class DualBranchMixtureTrainer:
                                    fixed_beta_vals=fixed_vals_t,
                                    use_gnn_blend=use_gnn_blend,
                                    gnn_blend_init=gnn_blend_init,
+                                   blend_max=blend_max,
                                    mode_specific_gamma=mode_specific_gamma).to(device)
         self._tier_specific_delta = tier_specific_delta
         self._fixed_beta_per_mode = fixed_beta_per_mode or {}
         self._use_gnn_blend = use_gnn_blend
+        self._blend_max = float(blend_max)
 
         self.optimizer = torch.optim.AdamW(
             [
@@ -488,6 +495,13 @@ class DualBranchMixtureTrainer:
                         per_origin_nll, self.origin_env_idx,
                         self.train_mask.bool(), dummy_scale, self.irm_n_envs,
                     )
+
+            # Wang TB-ResNet (2021) δ-control is now enforced architecturally
+            # via blend_max in MixtureRUMHead (gnn_blend = blend_max * sigmoid).
+            # No penalty term needed — δ is hard-capped at blend_max regardless
+            # of gradient steps. Switching from soft penalty to hard cap closes
+            # the failure mode observed on 2026-05-14 where λ=10 was negligible
+            # against the ~600 NLL loss scale.
             loss = loss_main + cur_lambda * penalty
 
             loss.backward()

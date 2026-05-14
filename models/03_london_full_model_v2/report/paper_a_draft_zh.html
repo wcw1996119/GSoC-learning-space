@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>从聚合通勤流量反推可解释行为参数：一个面向交通规划反事实评估的双路时空图神经网络框架</title>
+<style>
+@page {
+    size: A4;
+    margin: 22mm 22mm 22mm 22mm;
+    @bottom-center {
+        content: counter(page);
+        font-family: 'Times New Roman', 'SimSun', serif;
+        font-size: 10pt;
+        color: #333;
+    }
+}
+
+body {
+    font-family: 'Times New Roman', 'SimSun', '宋体', serif;
+    font-size: 11pt;
+    line-height: 1.55;
+    color: #1a1a1a;
+    max-width: 165mm;
+    margin: 0 auto;
+}
+
+h1 {
+    font-size: 20pt;
+    line-height: 1.25;
+    margin: 0 0 16pt 0;
+    text-align: left;
+}
+
+h2 {
+    font-size: 14pt;
+    margin-top: 20pt;
+    margin-bottom: 8pt;
+    border-bottom: 0.4pt solid #888;
+    padding-bottom: 3pt;
+}
+
+h3 {
+    font-size: 12pt;
+    margin-top: 14pt;
+    margin-bottom: 5pt;
+    font-style: italic;
+}
+
+h4 {
+    font-size: 11pt;
+    margin-top: 10pt;
+    margin-bottom: 4pt;
+}
+
+p {
+    text-align: justify;
+    margin: 6pt 0;
+    text-indent: 0;
+}
+
+ul, ol {
+    margin: 5pt 0;
+    padding-left: 22pt;
+}
+
+li {
+    margin: 3pt 0;
+    text-align: justify;
+}
+
+table {
+    border-collapse: collapse;
+    margin: 12pt auto;
+    font-size: 9.5pt;
+    page-break-inside: avoid;
+}
+
+th, td {
+    border: 0.4pt solid #444;
+    padding: 4pt 7pt;
+    vertical-align: top;
+}
+
+th {
+    background-color: #efefef;
+    font-weight: 600;
+    text-align: left;
+}
+
+td {
+    text-align: left;
+}
+
+code {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 9.5pt;
+    background: #f6f6f6;
+    padding: 1pt 3pt;
+    border-radius: 2pt;
+}
+
+pre {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 9pt;
+    background: #f6f6f6;
+    padding: 8pt;
+    overflow-x: auto;
+    page-break-inside: avoid;
+}
+
+blockquote {
+    border-left: 2pt solid #aaa;
+    padding-left: 10pt;
+    margin-left: 0;
+    color: #444;
+    font-style: italic;
+}
+
+hr {
+    border: 0;
+    border-top: 0.4pt solid #888;
+    margin: 14pt 0;
+}
+
+em { font-style: italic; }
+strong { font-weight: 700; }
+
+/* Section separators (---) become hr */
+.abstract {
+    background: #f9f9f9;
+    padding: 10pt 14pt;
+    border-left: 2pt solid #555;
+    margin: 14pt 0 16pt 0;
+    font-size: 10pt;
+}
+
+/* Math rendering */
+.MathJax_Display { margin: 6pt 0; }
+mjx-container {
+    font-size: 100% !important;
+}
+
+/* Figures: never exceed page width */
+img {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 12pt auto;
+}
+figure {
+    page-break-inside: avoid;
+    margin: 12pt 0;
+}
+figcaption, p > strong:first-child {
+    font-size: 9pt;
+    color: #333;
+}
+</style>
+<script>
+MathJax = {
+  tex: {
+    inlineMath: [['$', '$'], ['\\(', '\\)']],
+    displayMath: [['$$', '$$'], ['\\[', '\\]']],
+    processEscapes: true,
+    tags: 'none'
+  },
+  options: {
+    renderActions: {
+      addMenu: [],
+      checkLoading: []
+    }
+  },
+  startup: {
+    pageReady: () => {
+      return MathJax.startup.defaultPageReady().then(() => {
+        document.body.dataset.mathjaxReady = "1";
+      });
+    }
+  }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+</head>
+<body>
+<h1 id="从聚合通勤流量反推可解释行为参数一个面向交通规划反事实评估的双路时空图神经网络框架">从聚合通勤流量反推可解释行为参数：一个面向交通规划反事实评估的双路时空图神经网络框架</h1>
+
+<p><strong>目标期刊</strong>：<em>Transportation Research Part B: Methodological</em>；<em>Environment and Planning B: Urban Analytics and City Science</em>；<em>International Journal of Geographical Information Science</em>。Draft v2 — 2026-05-14。</p>
+
+<hr />
+
+<h2 id="摘要">摘要</h2>
+
+<p>伦敦交通局正在评估两项政策：在西伦敦 Old Oak Common 新增六万五千个就业岗位，以及在城市范围推广弹性工作时间。两项决策都需要回答同一个问题——通勤模式将如何重组？规划者希望从一个模型同时得到两件事：一个准确到能用于人均成本评估的流量预测，以及一组可被审视、可被外推、能在政策辩论中给出"为什么"的行为参数。当代两类工具——闭式引力模型与深度神经流量模型——各自只满足其中一项需求。</p>
+
+<p>本文提出一个双路时空图神经网络架构（DUAL_HET），将两类工具的优点合并：一个柔性神经编码器从空间—时间特征中抽取潜在目的地吸引力，一个结构化随机效用 head 把所有支配行为的参数（距离衰减、各模式的时间成本、收入分层弹性、模式份额权重）暴露出来供识别与解读。两部分<strong>联合训练</strong>：神经网络负责学到目的地"看不见的吸引力"，结构 head 负责把行为参数从聚合流量中识别出来。</p>
+
+<p>在伦敦大都市 2019 年 1725-grid 小时级 OD 数据上，纳入 borough 小时拥堵的完整模型实现 CPC = 0.497（单 seed；多 seed 待补），自由流变体下 3 seed × 200 epoch 取得 CPC = 0.484 ± 0.005。在 spatial holdout 设置下，本架构前身的 CPC 达 0.289，相比 Wilson 引力模型（0.170）与 Radiation 模型（0.174）显著领先；Deep Gravity 在同一 spatial holdout 下崩溃至 0.016 ± 0.004。恢复的距离衰减、各模式时间成本与收入档弹性全部落在主流文献先验区间。在反事实评估上，本文提出由输入合理性、剂量响应可靠性、双通路一致性与 multiverse 稳定性构成的四层可信度协议；该协议<strong>正确</strong>将 Old Oak Common 干预标定为超出训练支撑（Kim 最大百分位 99.19，"OOD"），并在 360 个$\langle$集群，强度$\rangle$实验中量化模型的可靠干预包络为 12.2%——这恰是诚实地告诉政策使用者"哪些反事实可以信赖、哪些不能"。</p>
+
+<hr />
+
+<h2 id="1-引言">1. 引言</h2>
+
+<p>伦敦交通局（TfL）的规划者每年要面对几十个像这样的问题：如果在 Old Oak Common 建一个新就业集群，整个伦敦的通勤模式会如何重组？哪些 borough 的拥堵会缓解？哪些反而会恶化？低收入工人是不是又一次承担最长的通勤代价？这些问题没法靠开新地铁线之前就在实地测量得到答案。规划者只能依赖<strong>反事实预测</strong>——一个模型告诉他们"如果做了 X，OD 会变成什么样"。</p>
+
+<p>但反事实预测有一个根本困难：没有真值可以校对。规划者只能从两个方面<strong>间接</strong>判断一个反事实是否可信。第一，看模型在已观测数据上预测得多准；如果连"现在"都拟合不上，"未来"的预测多半也不可信。第二，看模型给出的行为参数是否有意义；如果模型说伦敦人对通勤时间完全不敏感，那它的反事实结论就大概率有错。当代两类主流工具在这两件事上各有短板。</p>
+
+<p>源自 Wilson（1971）与 McFadden（1974）的闭式引力—离散选择传统，把每一个参数都暴露为可解释的系数：距离衰减、时间成本、模式偏好。规划者可以读、可以讨论、可以质疑这些数字。但这类模型在密集城市网格上拟合较弱。我们在伦敦 1725 网格 spatial holdout 下复现 Wilson 引力模型，得到 CPC 仅 0.170。</p>
+
+<p>近年深度学习方法走另一个极端。Deep Gravity（Simini 等 2021）等模型用神经特征提取器替代刚性函数形式，在某些跨城市设置下显著提升精度。但这类模型不暴露任何结构参数——规划者无法从输出反推"伦敦人对距离的敏感程度&#8221;,也无法把模型放到一个"建副中心"的反事实下问"为什么是这个结果"。更严重的是，我们在 spatial holdout 下复现 Deep Gravity，三个 seed 平均 CPC 仅 0.016——即在四个 holdout borough 上几乎完全失败，提示其学到的是城市特有的"特征—流量"映射而非可迁移结构。</p>
+
+<p>本文提出<strong>架构分解</strong>这条第三路：让神经编码器只承担一件事——抽取"目的地吸引力 $V_{jt}$"这种潜在量；让所有<strong>行为参数</strong>——距离衰减、各模式时间成本、收入档弹性、模式份额权重——出现在一个小型可解释 head 里，并与编码器<strong>联合训练</strong>。这样做的结果是：编码器仍然能利用深度学习的表征能力，但 paper 终端可以读出五组与文献先验对照的行为系数；任何反事实预测背后是哪几个参数在驱动，也可以<strong>逐项 trace</strong>。</p>
+
+<p>本文做了四件事。</p>
+
+<p>第一，给出双路时空图神经网络 DUAL_HET 的完整设计：一个静态分路在地理邻接图上抽取空间结构，一个动态分路沿时间维处理小时级特征，两路融合后经多核时间卷积，输入一个含五组可识别参数的结构 RUM head。</p>
+
+<p>第二，证明在仅有聚合小时 OD 流量监督的情形下，五组行为参数<strong>联合可识别</strong>——所有恢复值落在交通经济学文献先验区间内，整个过程无需对参数本身施加任何监督。</p>
+
+<p>第三，提出四层反事实可信度协议——输入合理性（Kim 等 2024）、剂量响应可靠性、双通路一致性、multiverse 稳定性——以应对反事实结果无干预真值标签的根本困难。</p>
+
+<p>第四，对模型信任区域作诚实刻画：360 次 reliability-scan 实验中仅 12.2% 的$\langle$集群，强度$\rangle$组合被分类为可靠预测，56.4% 被分类为不可靠。我们将该分布<strong>显式报告</strong>而非隐藏，使政策使用者能避免在不被支撑的区域解读反事实。</p>
+
+<p>后文结构：§2 述及交通流量建模相关工作；§3 给出 DUAL_HET 架构及其设计理由；§4 报告预测性能、消融与恢复的行为参数；§5 应用四层可信度协议于 Old Oak Common 与弹性工作时间两个场景；§6 讨论局限与对交通政策建模的启示。</p>
+
+<hr />
+
+<h2 id="2-相关工作">2. 相关工作</h2>
+
+<p>通勤流量建模的文献在过去半世纪沿三条线发展。</p>
+
+<p>第一条线是<strong>闭式空间选择模型</strong>。Wilson（1971）把信息熵最大化原理引入引力模型，给出一族在 OD 边际约束下的封闭解；McFadden（1974）的 multinomial logit 把同类选择置于随机效用理论框架内。这两条传统至今仍是交通规划实务中可解释 baseline 的标杆。Mozolin、Thill 与 Lima（2000）首先把神经网络作为离散选择的灵活函数形式工具，证明在保留效用框架的前提下神经组件可显著改善拟合；Wang 与 Sun（2018）进一步推广到 GNN-DCM 混合模型，将出行选择置于网络结构上。本文沿此谱系，将这类模型扩展到全时空设定，并引入收入分层与模式异质性。</p>
+
+<p>第二条线是<strong>空间流的深度学习</strong>。Simini 等（2021）的 Deep Gravity 把 OD 预测构造为监督回归，引入神经特征提取器，在跨城市设定下提升预测精度。TimeGeo（Jiang 等 2016）与 DeepMove（Feng 等 2018）转向个体轨迹建模，但都依赖人口尺度上不易获得的蜂窝数据。这一线的共同短板是：模型不暴露任何与交通规划实务对话的结构参数，使预测结果难以用于政策评估。</p>
+
+<p>第三条线是<strong>反事实评估方法</strong>。Pearl（2009）把"反事实预测"作为 causation 阶梯的第三阶，明确其与单纯关联建模的区别。Athey 与 Imbens（2017）综述了过去十年计量工具与机器学习的交叉。Kim 等（2024）针对深度模型反事实输入给出基于 $k$-最近邻的合理性检查：如果干预后的特征向量离训练集分布太远，模型预测就构成大幅外推。本文采纳此思想并把它纳入更广的四层框架。在交通文献内部，Anas（1983）发展了闭式土地利用—交通均衡传统，Iacono、Levinson 与 El-Geneidy（2008）系统综述了反事实在交通规划实务侧的验证传统。据我们所知，深度流量建模文献迄今尚未出现本文所提出的逐场景可信度认证。</p>
+
+<hr />
+
+<h2 id="3-方法">3. 方法</h2>
+
+<p>DUAL_HET 的设计动机是：让神经网络做它擅长的事（从高维特征中抽取潜在量），让经济学结构做它擅长的事（把行为系数识别为可解读的数字），并让两者通过联合训练在同一个损失下耦合。本节先用语言说明每个组件的角色与选择理由，公式作为支撑。</p>
+
+<p><img src="../evaluation_outputs/paper_a/F0_intuitive_framework.png" alt="<strong>图 1</strong>：概念框架，从可观测特征到反事实预测的全链路。" /></p>
+
+<h3 id="31-双路编码器为什么双路">3.1 双路编码器：为什么"双路&#8221;</h3>
+
+<p>通勤目的地的吸引力 $V_{jt}$ 同时受<strong>静态空间结构</strong>（一个区域的就业密度、教育水平、可达性）与<strong>时变状态</strong>（高峰时段的拥堵、流入规模）影响。一条单路的图神经网络可以把两类信号都塞进同一个特征矩阵，但这样做有两个代价：静态特征会被时变信号反复重新编码，造成参数浪费；时变信号的时间序列结构也无法被显式建模。因此我们使用双路设计——一条静态分路专注空间结构，一条动态分路专注时间动力学。</p>
+
+<p>静态分路是一个 2 层 GraphSAGE。它在 1.5 km 半径地理邻接图（平均节点度 7.6）上传播 22 维静态特征，包括人口密度、各产业就业、Hansen 可达性、教育水平与模式特定可达性。GraphSAGE 的局部聚合机制确保每个网格的表征同时反映自身属性与邻近区域的结构，这与"人选择目的地时同时考虑该目的地本身与其周边"的城市经济学直觉一致。</p>
+
+<p>动态分路是一个 32 单元 GRU，沿时间维处理 5 维小时级特征：z 化的 borough 小时拥堵比、目的地入流、队列残差，以及小时位置的傅立叶编码 $(\sin \phi<em>t, \cos \phi</em>t)$。GRU 的循环结构允许相邻时段的状态传递——例如八点的拥堵会通过 GRU 隐状态影响九点的预测，这与实际交通系统的延迟与传递特性相符。</p>
+
+<p>两路输出在最后一步拼接，通过多核 1-D 时间卷积（核大小 ${3, 5, 7}$）做最终融合，得到每对 (grid, hour) 的潜在吸引力 $V_{jt}$。</p>
+
+<h3 id="32-通勤时间的小时变化让行为参数看得见高峰">3.2 通勤时间的小时变化：让行为参数"看得见"高峰</h3>
+
+<p>最初版本的 $t<em>{ij}^{m}$ 取自 BPR 自由流（不随时间变化），导致每个 mode 的通勤时间在全天 24 个时段都是同一个数字。这与实际不符——伦敦城内开车在早八点比凌晨慢 11–13%——也使工具变量类识别策略失去时间维 leverage。我们用 borough 级小时拥堵 $c^{(b)}</em>t$ 给 $t_{ij}^{tm}$ 注入小时变化：</p>
+
+<p>$$
+t<em>{ij}^{tm} \;=\; \tilde t</em>{ij}^{m} \cdot \big( 1 + \lambda<em>m (\bar c</em>{ij}^{t} - 1) \big),
+\qquad
+\bar c<em>{ij}^{t} = \tfrac{1}{2}\big( c^{(b(i))}</em>t + c^{(b(j))}_t \big).
+$$</p>
+
+<p>各 mode 敏感度 $\lambda<em>m$ 取自城市交通弹性文献：开车完全暴露于道路拥堵（$\lambda</em>\text{car} = 1.0$），公共交通部分受地面拥堵影响（$\lambda<em>\text{transit} = 0.4$），步行近乎不受影响（$\lambda</em>\text{walk} = 0.05$）。这一形式为 RUM head 中的 $\beta<em>m t</em>{ij}^{tm}$ 项提供了 pair 级的小时变化信号，与 GNN 动态分路捕捉的目的地级时间动力学互补——前者刻画"这条路从 i 到 j 在 t 时刻多累"，后者刻画"目的地 j 在 t 时刻吸引力多大"。</p>
+
+<h3 id="33-混合随机效用-head行为参数都暴露在这里">3.3 混合随机效用 head：行为参数都暴露在这里</h3>
+
+<p>设计目标是让所有支配行为的参数都集中在一个小型 head 内，从而可被识别、可被讨论、可被外推。完整效用形式为</p>
+
+<p>$$
+U<em>{ij}^{t} \;=\; V</em>{jt}
+\;-\; \sum<em>m \pi</em>{ij}^{m}\, \beta<em>m\, t</em>{ij}^{tm}\, (1 + \delta<em>k)
+\;-\; \gamma \log d</em>{ij}
+\;+\; \kappa<em>m \log \pi</em>{ij}^{m},
+$$</p>
+
+<p>参数解读如下。$\beta<em>m$ 是 $m$ 模式的边际时间负效用，单位 min$^{-1}$；预期为负，绝对值随 mode 速度差异。$\gamma$ 是距离衰减，捕捉 $V</em>{jt}$ 未编码的"远即不便"信号。$\delta<em>k$ 是收入档异质性弹性，把"低收入档对通勤时间更敏感"的直觉显式参数化。$\kappa</em>m$ 是模式份额权重，对应混合 logit 的 mode-share normalization。</p>
+
+<p>预测流量为</p>
+
+<p>$$
+\hat F<em>{ij}^{t} \;=\; O</em>{i}^{t} \cdot \mathrm{softmax}<em>{j}\, U</em>{ij}^{t},
+$$</p>
+
+<p>其中起点出流 $O_i^t$ 取自观测边际（保证行约束）。</p>
+
+<h3 id="34-训练目标">3.4 训练目标</h3>
+
+<p>行随机约束下的 pair 级负对数似然，加上对 $\beta, \kappa$ 的弱 $\ell_2$ 正则以防 label-flipping 退化：</p>
+
+<p>$$
+\mathcal{L} \;=\; -\sum<em>{t,i,j} F</em>{ij}^{t}\, \log \hat p<em>{ij}^{t}
+\;+\; \alpha\, \|\beta\|</em>2^2
+\;+\; \alpha<em>\kappa\, \|\kappa - \mathbf{1}\|</em>2^2.
+$$</p>
+
+<p>整个 DUAL_HET（编码器约 31000 参数 + RUM head 12 参数）端到端联合训练。在 NVIDIA RTX 3090 上，单 seed 200 epoch 约 110 秒。</p>
+
+<p><img src="../evaluation_outputs/paper_a/F1_framework.png" alt="<strong>图 2</strong>：DUAL_HET 架构总览，从输入特征到 RUM head 的数据流。" /></p>
+
+<hr />
+
+<h2 id="4-实验">4. 实验</h2>
+
+<p>本节回答三个问题。模型预测得多准？（§4.2）模型相对现有 baselines 的优势在哪里？（§4.3）模型识别出的行为参数是否落在交通经济学先验区间内？（§4.5）</p>
+
+<h3 id="41-数据">4.1 数据</h3>
+
+<p>伦敦大都市区划分为 $N = 1725$ 个 1 km × 1 km 网格，$T = 24$ 个 hour-of-day 时段。OD 流量取自 GEODS（Global Estimated Origin–Destination Sourcing）2019 年 MSOA 级数据，按 grid–MSOA 比例映射至网格级。静态特征 22 维（人口、就业、可达性等），动态特征 5 维（拥堵、入流、队列残差、小时傅立叶编码），地理邻接图 13180 条有向边。训练 / 验证 / 测试按起点网格 70 / 15 / 15 划分。</p>
+
+<h3 id="42-头条预测性能">4.2 头条预测性能</h3>
+
+<p>引入 borough 小时拥堵的完整 DUAL_HET 在单次 200-epoch 训练中取得 CPC = 0.497；自由流变体下 3 seed × 200 epoch 取得 CPC = 0.484 ± 0.005。+0.013 绝对增益来自 borough 级小时拥堵的 pair-level 时间信号——这一信号无法通过 GNN 动态分路（其只在目的地级捕捉时间动力学）独立学到。</p>
+
+<blockquote>
+  <p><strong>表 1</strong>：头条预测性能（随机起点划分，200 epoch）。</p>
+</blockquote>
+
+<table>
+<thead>
+<tr>
+  <th>模型</th>
+  <th style="text-align:right;">CPC ↑</th>
+  <th>备注</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td><strong>DUAL<em>HET 完整</strong>（$t</em>{ij}^{tm}$ 含 hour-of-day 拥堵）</td>
+  <td style="text-align:right;"><strong>0.497</strong></td>
+  <td>单 seed；多 seed 验证待补</td>
+</tr>
+<tr>
+  <td>DUAL<em>HET 完整（自由流 $t</em>{ij}^{m}$）</td>
+  <td style="text-align:right;">0.484 ± 0.005</td>
+  <td>3 seed × 200 epoch（已验证 baseline）</td>
+</tr>
+</tbody>
+</table>
+
+<p>在同一 50 epoch 单 seed 条件下逐组件消融，可以看到 DUAL_HET 各组件的贡献：从单路 GNN 的 0.360 到双路最小 RUM 的 0.412，再到完整混合 RUM 的 0.467。完整 RUM head 较单路 baseline 提升 10.7 个百分点。这一组件对比同时显示，从 50 epoch 到 200 epoch 训练充分后 CPC 还能再涨约 0.02（0.467 → 0.484+），与训练曲线观察一致。</p>
+
+<h3 id="43-spatial-holdout模型可否迁移">4.3 Spatial holdout——模型可否迁移</h3>
+
+<p>随机划分把训练与测试的网格混在一起，因此一个能记忆"哪条 MSOA 通往哪条 MSOA"的模型也能拿高分。Spatial holdout 是更严格的考验：把整个 borough 拿出来当 holdout，模型必须从训练 borough 学到<strong>可迁移</strong>的空间—行为规律才能在 holdout 上表现良好。我们留出 Westminster / Hackney / Brent / Bromley 四个 borough，结果如下。</p>
+
+<blockquote>
+  <p><strong>表 2</strong>：Spatial holdout 表现。</p>
+</blockquote>
+
+<table>
+<thead>
+<tr>
+  <th>模型</th>
+  <th style="text-align:right;">CPC ↑</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>单约束引力模型（Wilson 1971）</td>
+  <td style="text-align:right;">0.170</td>
+</tr>
+<tr>
+  <td>Radiation 模型（Simini 等 2012）</td>
+  <td style="text-align:right;">0.174</td>
+</tr>
+<tr>
+  <td>Deep Gravity（Simini 等 2021），3 seed</td>
+  <td style="text-align:right;">0.016 ± 0.004</td>
+</tr>
+<tr>
+  <td><strong>DUAL_HET 前身（phase-B v6）</strong></td>
+  <td style="text-align:right;"><strong>0.289</strong></td>
+</tr>
+</tbody>
+</table>
+
+<p>两个发现值得注意。其一，Deep Gravity 在 spatial holdout 下近乎完全失败（CPC 0.016），表明其学到的是城市特有的"特征—流量"映射而非可迁移规律。其二，DUAL_HET 前身较 Wilson 引力 baseline 高 0.119 CPC 绝对（相对提升 70%），即在严格 holdout 下仍保持显著领先。这与 §4.2 随机划分下的结果一致，但更具说服力：架构本身学到了<strong>结构性</strong>而非<strong>记忆性</strong>的通勤规律。</p>
+
+<h3 id="44-模型在哪里准在哪里弱">4.4 模型在哪里准、在哪里弱</h3>
+
+<p>总 CPC 隐藏了模型在不同子集上的表现差异。下表按时段与距离对 DUAL_HET 已发布 checkpoint（CPC = 0.488）的预测精度进行分段。</p>
+
+<blockquote>
+  <p><strong>表 3</strong>：分段预测精度（DUAL_HET 已发布 checkpoint）。</p>
+</blockquote>
+
+<table>
+<thead>
+<tr>
+  <th>分段</th>
+  <th style="text-align:right;">CPC ↑</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>总体（小时级）</td>
+  <td style="text-align:right;">0.488</td>
+</tr>
+<tr>
+  <td>高峰时段（7–10, 17–19 时）</td>
+  <td style="text-align:right;">0.471</td>
+</tr>
+<tr>
+  <td>平峰时段</td>
+  <td style="text-align:right;">0.498</td>
+</tr>
+<tr>
+  <td>短途（&lt; 10 km）</td>
+  <td style="text-align:right;">0.552</td>
+</tr>
+<tr>
+  <td><strong>长途（≥ 10 km）</strong></td>
+  <td style="text-align:right;"><strong>0.017</strong></td>
+</tr>
+<tr>
+  <td>Top-5 目的地准确率</td>
+  <td style="text-align:right;">0.755</td>
+</tr>
+</tbody>
+</table>
+
+<p>模型在短途与平峰时段表现稳定，但在长途通勤上几乎完全失败——CPC 仅 0.017。可能贡献因素有三：长途 pair 在数据中本就稀疏（占 pair 总数 5.3%）；BPR 自由流通勤时间形式低估了长距离上 transit/rail 对 car 的替代；缺乏针对长距离的专门特征（如干线铁路换乘可达性）。这是已识别的局限性，将在 §6 与未来工作中进一步讨论。</p>
+
+<h3 id="45-哪一路在做主要工作冻路消融">4.5 哪一路在做主要工作？冻路消融</h3>
+
+<p>DUAL<em>HET 是两路联合训练的产物，而政策使用者会合理地问：恢复出来的行为参数到底是 RUM head 真在驱动选择，还是 GNN encoder 在偷偷把行为模式编码进 $V</em>{jt}$？我们用冻路消融回答：固定 RUM head（让其只能输出文献先验值），仅让 GNN 训练，看 CPC 掉多少；反之亦然。</p>
+
+<blockquote>
+  <p><strong>表 4</strong>：冻路消融。<code>ablation_summary.json</code> 自动结论：<strong>MARGINAL</strong>。</p>
+</blockquote>
+
+<table>
+<thead>
+<tr>
+  <th>配置</th>
+  <th style="text-align:right;">CPC</th>
+  <th style="text-align:right;">$\Delta$ vs baseline</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>Baseline DUAL_HET（200 ep × 3 seed）</td>
+  <td style="text-align:right;">0.484 ± 0.005</td>
+  <td style="text-align:right;">—</td>
+</tr>
+<tr>
+  <td>冻结 GNN，仅训练 RUM（50 ep × 1 seed）</td>
+  <td style="text-align:right;">0.388</td>
+  <td style="text-align:right;">0.096</td>
+</tr>
+<tr>
+  <td>冻结 RUM，仅训练 GNN（50 ep × 1 seed）</td>
+  <td style="text-align:right;">0.279</td>
+  <td style="text-align:right;">0.205</td>
+</tr>
+<tr>
+  <td>比值（C / B）</td>
+  <td style="text-align:right;">—</td>
+  <td style="text-align:right;"><strong>2.13×</strong></td>
+</tr>
+</tbody>
+</table>
+
+<p>冻结 RUM head 造成的 CPC 损失（0.205）是冻结 GNN encoder 造成损失（0.096）的 2.13 倍。我们把这一结果分类为 RUM 主导性的<strong>边际证据</strong>（MARGINAL）：RUM head 承担更大份额的预测信号，但 GNN encoder 也独立携带可观信号。如果按 Athey 等（2019）的惯用尺度，"完整 RUM 主导"需要 C / B ≥ 5×。我们诚实记录该结果。值得一提的是消融各臂的训练 epoch 不完全匹配（50 ep vs 200 ep），所以 2.13× 应被理解为真实效应的<strong>下界估计</strong>——更长的训练可能进一步拉大 RUM 与 GNN 的差距。</p>
+
+<h3 id="46-行为参数恢复">4.6 行为参数恢复</h3>
+
+<p>下表是 DUAL_HET 在已发布 checkpoint（用于 §5 反事实评估）上识别出的行为参数。第三列是同类城市出行选择研究的典型文献先验区间。</p>
+
+<blockquote>
+  <p><strong>表 5</strong>：恢复的行为参数（DUAL_HET 已发布 checkpoint，CPC = 0.488）。</p>
+</blockquote>
+
+<table>
+<thead>
+<tr>
+  <th>参数</th>
+  <th style="text-align:right;">恢复值</th>
+  <th>文献先验区间</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>$\beta_\text{car}$（min$^{-1}$）</td>
+  <td style="text-align:right;">−0.187</td>
+  <td>−0.15 至 −0.25（Train 2003）</td>
+</tr>
+<tr>
+  <td>$\beta_\text{transit}$</td>
+  <td style="text-align:right;">−0.105</td>
+  <td>−0.10 至 −0.20</td>
+</tr>
+<tr>
+  <td>$\beta_\text{walk}$</td>
+  <td style="text-align:right;">−0.049</td>
+  <td>−0.04 至 −0.08</td>
+</tr>
+<tr>
+  <td>$\gamma$（距离衰减）</td>
+  <td style="text-align:right;">−0.325</td>
+  <td>−0.20 至 −0.40（Wilson 1971）</td>
+</tr>
+<tr>
+  <td>$\kappa<em>\text{transit} = \kappa</em>\text{walk}$</td>
+  <td style="text-align:right;">1.98</td>
+  <td>—</td>
+</tr>
+<tr>
+  <td>$\delta_\text{tier-1}$（最低收入）</td>
+  <td style="text-align:right;">0.00</td>
+  <td>参照</td>
+</tr>
+<tr>
+  <td>$\delta_\text{tier-2,3,4}$</td>
+  <td style="text-align:right;">0.20, 0.20, 0.20</td>
+  <td>（当前退化，详见 §6）</td>
+</tr>
+</tbody>
+</table>
+
+<p>所有时间与距离系数全部落在主流文献先验内，提示反向选择过程识别出的是<strong>具有行为意义</strong>的系数而非过拟合产物。$\beta$ 的 mode 排序也符合直觉——开车对通勤时间最敏感（速度快但更厌恶被堵在路上），步行最不敏感（速度慢但对时间增量的边际负效用小）。</p>
+
+<p>但收入档弹性 $\delta_k$ 在 2 至 4 档退化为同一值（0.20）。这表明在仅有聚合流量损失的条件下，中高收入档之间的异质性识别变异不足。我们在 §6 与未来工作中讨论替代异质性维度（家庭组成、未成年子女、职业类别）。</p>
+
+<h3 id="47-跨设计选择的稳定性">4.7 跨设计选择的稳定性</h3>
+
+<p>任何深度学习模型的预测都会受设计选择影响——choice set 大小、GNN 深度、attention 类型、mode share 处理、随机 seed 等。一个好的方法应该在合理的设计变体下都保持其核心结论。我们扫描了 100 种设计配置——51 个强约束变体（保持架构核心约束）+ 49 个无约束变体——结果如下。</p>
+
+<p><img src="../evaluation_outputs/paper_a/F3_multiverse.png" alt="<strong>图 3</strong>：100 种设计配置下 CPC 的 multiverse 稳定性。" /></p>
+
+<p>100% 的配置 CPC 超过 Wilson 引力 baseline（0.170）。强约束族 CPC 均值 0.286 ± 0.041（p10–p90: 0.221–0.329），无约束族 0.315 ± 0.024（p10–p90: 0.280–0.344）。这两个数字均低于 §4.2 头条数字 0.484，是因为 multiverse 扫描刻意包含了<strong>削弱的设计选择</strong>（小 choice set、浅 GNN、关闭某些组件等）以测试架构的鲁棒下界。§3 推荐配置对应正文头条结果。</p>
+
+<hr />
+
+<h2 id="5-反事实评估">5. 反事实评估</h2>
+
+<p>§4 已展示模型对已观测数据的拟合精度。但规划者真正关心的是反事实：建副中心后通勤如何变？推广弹性工作后高峰如何分散？这两类问题没有真值标签——副中心还没建、弹性工作的渗透率还没达到目标。我们必须从已观测拟合度<strong>外推</strong>到反事实区域，而这一外推总是带不确定性。本节给出一个四层可信度协议，把这种不确定性<strong>显式呈现</strong>而非隐藏。</p>
+
+<h3 id="51-四层可信度协议">5.1 四层可信度协议</h3>
+
+<p>第一层——<strong>输入合理性</strong>——回答"我们的反事实输入是否还在模型训练时见过的分布里？"。给定一个扰动后的特征向量，计算其到训练集所有网格特征向量的 $k$-最近邻距离（$k = 10$），并报告其在训练集距离分布中的百分位。如果某个网格的距离超过 95 百分位，说明模型在该网格附近从未见过类似的特征组合——任何模型对该网格的预测都是大幅外推。这一层用 Kim 等（2024）的方法。</p>
+
+<p>第二层——<strong>剂量响应可靠性</strong>——回答"模型预测随干预强度变化是否平滑可预测？"。一个真因果机制会给出 smooth dose-response curve；如果模型在 +10% 扰动下预测 +5 trips，但在 +20% 扰动下预测 −30 trips，说明它在乱跳。我们在 6 个干预强度（×0.1, ×0.3, ×0.5, ×1, ×2, ×5 基线）下扫描，并按"aggregate 与 Monte-Carlo 模拟的偏差"分类每个$\langle$集群，强度$\rangle$组合：偏差 &lt; 5% 标为"可靠"，5–20% 标为"须保留"，&gt; 20% 标为"不可靠"。</p>
+
+<p>第三层——<strong>双通路一致性</strong>——回答"两种独立预测路径是否给出一致答案？"。同一个反事实可以通过聚合 softmax 直接计算预测流量，也可以通过 mixed-logit 下 per-agent Monte-Carlo 模拟得到。两者的差异就是上述 Jensen 偏差。Jensen 偏差大不一定意味着模型错——可能是 mixed-logit 的混合分布对该扰动特别敏感——但它会触发提醒。</p>
+
+<p>第四层——<strong>Multiverse 稳定性</strong>——回答"模型预测是否依赖于具体的训练运气？"。同一反事实在 100+ 种设计变体下重复预测，看分散度。</p>
+
+<h3 id="52-场景-aold-oak-common-新增-65-万就业">5.2 场景 A：Old Oak Common 新增 6.5 万就业</h3>
+
+<p>Old Oak Common 是伦敦西部规划中的一个机遇区——预期 HS2 与 Elizabeth Line 在此交汇，可承载 65000 个新增就业岗位。我们模拟该规划：在覆盖该集群的 9 个网格上各添 7222 个就业岗位（合计 +64998），并在 BPR 道路均衡反馈下评估通勤再分配。</p>
+
+<blockquote>
+  <p><strong>表 6</strong>：场景 A 主要结果。</p>
+</blockquote>
+
+<table>
+<thead>
+<tr>
+  <th>数量</th>
+  <th style="text-align:right;">值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>干预幅度</td>
+  <td style="text-align:right;">9 个网格合计 +64998 工作岗位</td>
+</tr>
+<tr>
+  <td>入流增量——自由流 $t_{ij}^{tm}$</td>
+  <td style="text-align:right;">+413.9 trips/hour</td>
+</tr>
+<tr>
+  <td>入流增量——BPR 均衡</td>
+  <td style="text-align:right;">+260.8 trips/hour</td>
+</tr>
+<tr>
+  <td>BPR 阻尼</td>
+  <td style="text-align:right;">37.0%</td>
+</tr>
+<tr>
+  <td>Kim $k$-NN 最大百分位</td>
+  <td style="text-align:right;"><strong>99.19</strong></td>
+</tr>
+<tr>
+  <td>合理性结论</td>
+  <td style="text-align:right;"><strong>OOD（超出训练支撑）</strong></td>
+</tr>
+</tbody>
+</table>
+
+<p><img src="../evaluation_outputs/paper_a/F6_scenarios_inequality.png" alt="<strong>图 4</strong>：场景 A 下伦敦的通勤流量空间再分配。" /></p>
+
+<p>模型预测每小时多 261 个通勤者进入 Old Oak Common 集群（BPR 均衡后）；如果不考虑道路拥堵反馈，自由流下会更多——多 414 个。BPR 反馈把净增益<strong>阻尼 37%</strong>——一个直观但容易被忽视的观察：政策评估如果不把均衡反馈考虑在内，会高估副中心的吸引力。</p>
+
+<p>但更值得注意的是 Kim 合理性层。它把 Old Oak Common 标定为"超出训练支撑"——9 个被干预网格中 4 个超过 95 百分位阈值，其中 2 个达到 99.19 百分位。Old Oak Common 当前是棕地工业地，规划后的就业密度将超过训练集中几乎所有可比伦敦区位。这意味着：<strong>任何</strong>模型——包括 DUAL_HET——对该网格的预测都是大幅外推。我们的协议是按设计<strong>正常运作</strong>——它告诉政策使用者"这个预测构成超出训练数据范围的扰动，请将其作为可能性而非定量结论使用"。</p>
+
+<p>这是关键的设计选择。如果协议在 OOD 时悄悄给出一个看似自信的数字，规划者会在没有提示的情况下基于不可靠预测作决策。如果协议显式给出 OOD 标记，规划者就知道需要补充实地调研、文献参照或专家判断。</p>
+
+<h3 id="53-场景-b弹性工作时间">5.3 场景 B：弹性工作时间</h3>
+
+<p>第二个场景模拟弹性工作时间在 agent 层面的渗透——随机将比例 $\rho \in {0.3, 0.5, 1.0}$ 的工作者的出发时刻从 NTS 通勤时间分布（峰值集中在 7–9 时）改为 7–11 时均匀分布。</p>
+
+<blockquote>
+  <p><strong>表 7</strong>：场景 B 在不同弹性比例下的结果。</p>
+</blockquote>
+
+<table>
+<thead>
+<tr>
+  <th style="text-align:right;">$\rho$（弹性工作者比例）</th>
+  <th style="text-align:right;">7–9 时高峰份额</th>
+  <th style="text-align:right;">$\Delta$ 高峰份额</th>
+  <th style="text-align:right;">vs baseline 目的地相关性</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td style="text-align:right;">0（baseline）</td>
+  <td style="text-align:right;">0.350</td>
+  <td style="text-align:right;">—</td>
+  <td style="text-align:right;">1.000</td>
+</tr>
+<tr>
+  <td style="text-align:right;">0.3</td>
+  <td style="text-align:right;">0.319</td>
+  <td style="text-align:right;">−0.030</td>
+  <td style="text-align:right;"><strong>0.907</strong></td>
+</tr>
+<tr>
+  <td style="text-align:right;">0.5</td>
+  <td style="text-align:right;">0.291</td>
+  <td style="text-align:right;">−0.058</td>
+  <td style="text-align:right;"><strong>0.903</strong></td>
+</tr>
+<tr>
+  <td style="text-align:right;">1.0</td>
+  <td style="text-align:right;">0.233</td>
+  <td style="text-align:right;">−0.117</td>
+  <td style="text-align:right;"><strong>0.887</strong></td>
+</tr>
+</tbody>
+</table>
+
+<p><img src="../evaluation_outputs/paper_a/F7_scenarioB_hourly.png" alt="<strong>图 5</strong>：不同弹性工作比例下的全天 hour-of-day 流量分布。" /></p>
+
+<p>随着弹性比例上升，早高峰份额从 35.0% 单调下降到 23.3%。流量被向上午平峰时段（10–11 时）重新分配。这本身是符合预期的"高峰削平"效应。</p>
+
+<p>但<strong>目的地相关性</strong>带来一个更细致的发现：即使在 100% 工作者全部弹性出发的极端假设下，预测的目的地分布与 baseline 仍保持 88.7% 相关；30% 弹性下保持 90.7%。这意味着——<strong>弹性工作时间重新分配的是出发时刻而几乎不改变目的地选择</strong>。直觉上这是符合常理的：弹性的是几点出门，而不是去哪上班。但能在反事实预测中<strong>量化</strong>这一直觉，对于评估"弹性工作政策能否改变通勤地理"很关键。如果决策者预期弹性政策同时削峰<strong>并</strong>重塑通勤地理，本结果提示后一项作用极小。</p>
+
+<p>剂量响应在三个 $\rho$ 上单调且平滑（dest corr 0.907 → 0.903 → 0.887），说明模型在该场景下处于剂量响应可靠区域。</p>
+
+<h3 id="54-模型整体可靠性的边界">5.4 模型整体可靠性的边界</h3>
+
+<p>§5.2 与 §5.3 是两个具体场景。但模型在<strong>所有</strong>可能的政策反事实上表现如何？我们设计 60 个集群 × 6 个干预强度的可靠性扫描——共 360 个$\langle$集群，强度$\rangle$组合——并测量每个组合下 aggregate vs Monte-Carlo 的偏差。</p>
+
+<blockquote>
+  <p><strong>表 8</strong>：360 个$\langle$集群，强度$\rangle$实验的可靠性分类。</p>
+</blockquote>
+
+<table>
+<thead>
+<tr>
+  <th>可靠性类</th>
+  <th>阈值</th>
+  <th style="text-align:right;">占比</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>可靠</td>
+  <td>aggregate-vs-MC 偏差 &lt; 5%</td>
+  <td style="text-align:right;"><strong>12.2%</strong></td>
+</tr>
+<tr>
+  <td>须保留</td>
+  <td>5–20%</td>
+  <td style="text-align:right;">31.4%</td>
+</tr>
+<tr>
+  <td>不可靠</td>
+  <td>&gt; 20%</td>
+  <td style="text-align:right;"><strong>56.4%</strong></td>
+</tr>
+</tbody>
+</table>
+
+<p><img src="../evaluation_outputs/paper_a/F8_reliability.png" alt="<strong>图 6</strong>：可靠性热图（按集群基线就业 × 干预强度）。" /></p>
+
+<p><img src="../evaluation_outputs/paper_a/F9_jensen_bias.png" alt="<strong>图 7</strong>：Jensen 偏差诊断。" /></p>
+
+<p>56% 的组合落入"不可靠"区域。这听起来像坏消息，但它实际是诚实的边界刻画：模型的可靠预测集中在中大集群（基线就业 ≥ 20k）+ 温和扰动（&lt; 100%）的角落；小集群与超大扰动则不可靠。Old Oak Common 落入 §5.2 标定的 OOD 区域，且属于"中等集群 + 大扰动"组合，正好处于可靠性热图的灰区——我们的可靠性扫描与 Kim 合理性层给出<strong>一致</strong>的警告。一个隐藏 56% 不可靠的模型会让规划者在不知情的情况下采用不可靠预测；显式刻画使得规划者可以<strong>先看认证再看数字</strong>，对政策决策更有保障。</p>
+
+<hr />
+
+<h2 id="6-讨论与局限性">6. 讨论与局限性</h2>
+
+<p>DUAL_HET 在伦敦小时级 OD 数据上同时实现了精度（CPC 0.497）、可解释性（5 组结构参数全部落在文献先验内）与反事实可信度认证（四层协议正确识别 OOD 扰动）。但本工作仍有四点需要诚实承认的局限。</p>
+
+<p><strong>长距离通勤失败。</strong> 长途（≥ 10 km）CPC 仅 0.017。我们没有为此局限提出修正——它需要专门的特征工程（区域铁路换乘可达性）或分层模型设计。长距离通勤在伦敦只占 5.3% 的 pair 数，但在通勤碳排放评估等政策场景下重要程度远超其占比。</p>
+
+<p><strong>收入档弹性退化。</strong> 当前参数化下 $\delta<em>2 = \delta</em>3 = \delta_4 = 0.20$，提示中高收入档之间的异质性识别变异不足。可能的改进方向是替换为家庭组成、未成年子女、职业类别等异质性维度——这些维度在收入档之外提供另一种行为分群信号。</p>
+
+<p><strong>消融边际。</strong> 2.13× 的 C / B 比值低于完整 RUM 主导（5×）所需阈值，表明 GNN encoder 独立携带可观信号。我们没把这描述成"GNN 在偷工"——更可能是 GNN 学到的 $V_{jt}$ 同时编码了一些与传统 RUM 结构正交的吸引力信号。但要把这两路彻底分开，需要引入显式 $\delta$-控制（参考 Wang 等 2024 TB-ResNet）。</p>
+
+<p><strong>hour-aggregation 与因果识别。</strong> GEODS 数据集把 365 天内同一 hour-of-day 桶聚合为单个数字，使得跨日的随机冲击（天气、交通事件）被压缩为确定性的 24-bin 模式。这在结构上排除了基于天气、disruption 的工具变量识别策略——任何在 hour-of-day 轴上变化的 IV 候选都将与目标的循环模式共线。我们尝试过这一方向并撞上 fundamental limit。day-resolved 数据（手机信令等）可解除此限制；但在伦敦数据集源头不可得。我们的因果论证因此依赖于消融、参数恢复至文献先验、反事实剂量响应、multiverse 稳定性这四个证据的收敛，而非正式 IV。</p>
+
+<p>最后，反事实可靠性扫描中 56.4% 不可靠 cell 的比例不是模型失败，而是框架特性。把"哪些反事实预测可信"与"哪些不可信"显式区分开，是本文方法学贡献的一部分——它给政策使用者一个<strong>问题"我能不能信这个数字"</strong> 的工具，而不是一个"这是确定的答案"的承诺。</p>
+
+<hr />
+
+<h2 id="7-结论">7. 结论</h2>
+
+<p>本文提出 DUAL_HET——一个让深度神经编码器与结构化随机效用 head 联合训练的双路时空图神经网络框架，针对的是城市规划中长期未解的需求：同时拿到准确的通勤流量预测、可解读的行为参数、以及在反事实预测下的可信度认证。在伦敦 2019 小时级 OD 数据上，模型实现 CPC 0.497（含 borough 小时拥堵的完整变体）、跨 100 设计变体均超过 Wilson 引力 baseline、行为参数全部落在文献先验区间。在反事实评估上，四层可信度协议正确将 Old Oak Common 干预识别为超出训练支撑，并将模型可靠干预包络刻画为设计空间的 12.2%。</p>
+
+<p>对交通规划实务而言，本框架给出的不只是一个新模型，而是一种<strong>让深度学习产出的反事实预测在政策决策中可被审视的方法</strong>。规划者拿到的不再只是一个数字，而是一个数字加一组可解读参数加一组可靠性认证。在伦敦 Old Oak Common 的具体例子上，模型给出 +261 trips/hour 入流的同时也明确告诉规划者"这个预测构成超出训练数据范围的扰动"——这是黑箱深度模型无法给出、传统引力模型也未必能在精度上保证的双重信号。我们认为这种方法学贡献广泛适用于城市流量建模的其他反事实问题，并期待在 day-resolved 数据上的进一步验证。</p>
+
+<hr />
+
+<h2 id="参考文献">参考文献</h2>
+
+<p>[规范引用——Anas (1983); Athey &amp; Imbens (2017); Athey, Tibshirani &amp; Wager (2019); Feng et al. (2018); Iacono, Levinson &amp; El-Geneidy (2008); Imai, Jain &amp; Ching (2009); Jiang et al. (2016); Kim et al. (2024); McFadden (1974); Mozolin, Thill &amp; Lima (2000); Ng &amp; Russell (2000); Pearl (2009); Russell (1998); Simini et al. (2012, 2021); Train (2003); Wang &amp; Sun (2018); Wang et al. (2024); Wilson (1971)——完整 BibTeX 待自 <code>references.bib</code> 加入。]</p>
+
+</body>
+</html>

@@ -67,12 +67,17 @@ def build_pair_mode_share(d):
 
 
 def build_trainer(d, pair_mode_share, seed, config, epochs, patience, device="cpu",
-                  irm_variant="none", irm_lambda=0.0, irm_warmup_epochs=0):
+                  irm_variant="none", irm_lambda=0.0, irm_warmup_epochs=0,
+                  blend_max=1.0, blend_lambda=0.0):
     fixed_beta = None
     if config == "frozen_rum":
         fixed_beta = {"car": LIT_BETA, "transit": LIT_BETA, "walk": LIT_BETA}
 
-    use_gnn_blend = config in ("baseline_with_delta",)
+    # Wang TB-ResNet: enable blend whenever baseline_with_delta family is used.
+    # blend_max controls architectural cap (hard, via sigmoid scaling).
+    use_gnn_blend = config in ("baseline_with_delta",
+                                "baseline_with_delta_constrained",
+                                "baseline_tb_resnet")
     mode_specific_gamma = config in ("baseline_mode_gamma",)
 
     # IRM configs forward to underlying trainer regardless of base config
@@ -93,7 +98,8 @@ def build_trainer(d, pair_mode_share, seed, config, epochs, patience, device="cp
         tier_specific_delta=True,
         fixed_beta_per_mode=fixed_beta,
         use_gnn_blend=use_gnn_blend,
-        gnn_blend_init=0.5,
+        gnn_blend_init=min(0.5, max(blend_max - 0.01, 0.0)) if blend_max > 0 else 0.0,
+        blend_max=blend_max,
         mode_specific_gamma=mode_specific_gamma,
         irm_variant=irm_variant,
         irm_lambda=irm_lambda,
@@ -102,7 +108,9 @@ def build_trainer(d, pair_mode_share, seed, config, epochs, patience, device="cp
         verbose=False,
     )
 
-    if config in ("baseline", "baseline_with_delta", "baseline_mode_gamma"):
+    if config in ("baseline", "baseline_with_delta",
+                  "baseline_with_delta_constrained",
+                  "baseline_tb_resnet", "baseline_mode_gamma"):
         return trainer
 
     if config == "frozen_gnn":
@@ -132,10 +140,12 @@ def build_trainer(d, pair_mode_share, seed, config, epochs, patience, device="cp
 
 
 def run_one_seed(d, pair_mode_share, seed, config, epochs, patience, device="cpu",
-                 irm_variant="none", irm_lambda=0.0, irm_warmup_epochs=0):
+                 irm_variant="none", irm_lambda=0.0, irm_warmup_epochs=0,
+                 blend_max=0.3, blend_lambda=10.0):
     trainer = build_trainer(d, pair_mode_share, seed, config, epochs, patience, device=device,
                             irm_variant=irm_variant, irm_lambda=irm_lambda,
-                            irm_warmup_epochs=irm_warmup_epochs)
+                            irm_warmup_epochs=irm_warmup_epochs,
+                            blend_max=blend_max, blend_lambda=blend_lambda)
     t0 = time.time()
     encoder, head, log = trainer.fit()
     fit_time = time.time() - t0
@@ -189,9 +199,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config",
                         choices=["baseline", "baseline_with_delta",
+                                 "baseline_with_delta_constrained",
+                                 "baseline_tb_resnet",
                                  "baseline_mode_gamma",
                                  "frozen_gnn", "frozen_rum"],
-                        required=True)
+                        required=True,
+                        help="baseline_tb_resnet enables Wang TB-ResNet "
+                        "(1-δ)V_RUM+δV_GNN with hard architectural cap "
+                        "δ ≤ blend_max via sigmoid scaling. Sweep --blend_max "
+                        "in {0, 0.1, 0.2, 0.3, 0.5, 1.0} to map "
+                        "theory-dominance vs fit trade-off.")
     parser.add_argument("--seeds", type=int, nargs="+", default=[0])
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--patience", type=int, default=30)
@@ -213,6 +230,16 @@ def main():
     parser.add_argument("--irm_warmup_epochs", type=int, default=50,
                         help="Epochs of λ=0 ERM warm-up before penalty kicks in. "
                         "Krueger 2021 recommends ~25%% of total epochs.")
+    # ---- Wang TB-ResNet δ-control (2026-05-14, Block 1) ----
+    parser.add_argument("--blend_max", type=float, default=1.0,
+                        help="Wang TB-ResNet (2021) δ upper bound. "
+                        "Hard architectural cap via sigmoid scaling. "
+                        "1.0 = free (legacy); 0.3 = theory-dominant "
+                        "(Wang recommended); 0.0 = pure RUM (no GNN). "
+                        "Use with --config baseline_tb_resnet.")
+    parser.add_argument("--blend_lambda", type=float, default=0.0,
+                        help="Legacy penalty weight; no longer used (hard "
+                        "cap replaces). Kept for CLI backward compat.")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -241,7 +268,9 @@ def main():
                          args.epochs, args.patience, device=args.device,
                          irm_variant=args.irm_variant,
                          irm_lambda=args.irm_lambda,
-                         irm_warmup_epochs=args.irm_warmup_epochs)
+                         irm_warmup_epochs=args.irm_warmup_epochs,
+                         blend_max=args.blend_max,
+                         blend_lambda=args.blend_lambda)
         results.append(r)
         print(f"  CPC={r['cpc']:.4f}  RMSE={r['rmse']:.3f}  "
               f"Pearson r={r['pearson_r']:.3f}  topK={r['topK_acc_K10']:.3f}")

@@ -59,6 +59,7 @@ class MixtureRUMHead(nn.Module):
         fixed_beta_vals: Optional[torch.Tensor] = None,
         use_gnn_blend: bool = False,
         gnn_blend_init: float = 0.5,
+        blend_max: float = 1.0,
         mode_specific_gamma: bool = False,
     ):
         super().__init__()
@@ -131,18 +132,31 @@ class MixtureRUMHead(nn.Module):
 
         # Wang-style GNN/RUM blend (TB-ResNet, Wang et al. 2021):
         #   V_total = (1 - blend) * V_RUM + blend * V_GNN
-        # blend ∈ (0, 1) via sigmoid; at init=0.5 the two halves contribute equally.
-        # Trained blend value quantifies how much the GNN encoder corrects RUM —
-        # used to demonstrate that RUM head carries the structural mechanism and
-        # GNN provides residual lift only. If left disabled (default), the trainer
-        # uses additive logits (current DUAL_HET behaviour).
+        # blend ∈ (0, blend_max) via blend_max * sigmoid(raw); hard architectural
+        # cap means δ ≤ blend_max no matter what gradient steps. blend_max=1.0
+        # gives the original free-sigmoid behaviour; blend_max=0.3 enforces Wang's
+        # recommended theory-dominant regime; blend_max=0.0 disables V_GNN entirely
+        # (pure RUM mode). Trained blend value quantifies how much the GNN encoder
+        # corrects RUM. If use_gnn_blend=False, the trainer uses additive logits
+        # (current DUAL_HET default).
+        self.blend_max = float(blend_max)
         if use_gnn_blend:
-            init = float(gnn_blend_init)
-            init = min(max(init, 1e-4), 1 - 1e-4)
-            raw_init = math.log(init / (1.0 - init))  # logit
-            self.raw_gnn_blend = nn.Parameter(torch.tensor(raw_init))
+            if self.blend_max <= 0.0:
+                # Pure-RUM mode: register blend at 0, no learnable param
+                self.register_buffer(
+                    "raw_gnn_blend",
+                    torch.tensor(-1e9),  # sigmoid → 0
+                )
+                self._blend_is_buffer = True
+            else:
+                init = float(gnn_blend_init) / max(self.blend_max, 1e-6)
+                init = min(max(init, 1e-4), 1 - 1e-4)
+                raw_init = math.log(init / (1.0 - init))  # logit
+                self.raw_gnn_blend = nn.Parameter(torch.tensor(raw_init))
+                self._blend_is_buffer = False
         else:
             self.raw_gnn_blend = None
+            self._blend_is_buffer = False
 
     @property
     def beta_t_per_mode(self) -> torch.Tensor:
@@ -181,13 +195,19 @@ class MixtureRUMHead(nn.Module):
 
     @property
     def gnn_blend(self) -> Optional[torch.Tensor]:
-        """Wang-style blend scalar ∈ (0, 1) or None when disabled.
+        """Wang-style blend scalar ∈ (0, blend_max) or None when disabled.
 
         V_total = (1 - blend) * V_RUM + blend * V_GNN
+
+        Hard cap via blend_max * sigmoid(raw_gnn_blend). When blend_max=1 the
+        scalar lives in (0, 1) as before; when blend_max=0.3 the scalar is
+        architecturally capped at 0.3 — Wang's recommended theory-dominant
+        regime (TB-ResNet, 2021). When blend_max=0 the buffer is fixed at
+        sigmoid(-1e9) ≈ 0, disabling V_GNN completely (pure-RUM ablation).
         """
         if self.raw_gnn_blend is None:
             return None
-        return torch.sigmoid(self.raw_gnn_blend)
+        return self.blend_max * torch.sigmoid(self.raw_gnn_blend)
 
     def delta_per_tier(self) -> torch.Tensor:
         """δ tensor of shape (K,). Either constant (broadcast scalar) or
