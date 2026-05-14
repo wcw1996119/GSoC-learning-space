@@ -1,0 +1,16 @@
+# AutoDL/Colab bundles — too large for git, recreatable from pack_autodl_bundle.py
+data/autodl_bundle/*.tar.gz
+data/autodl_bundle/*.zip
+
+# Trained model checkpoints
+*.pt
+*.pth
+*.ckpt
+
+# Common Python artefacts
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Logs that aren't paper-grade
+*.log
