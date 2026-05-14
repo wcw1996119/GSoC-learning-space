@@ -82,14 +82,18 @@ def main():
         # ---- v2 code (necessary deps) ----
         v2_code_pairs = [
             ("models_lib/__init__.py", None),  # may not exist
-            ("models_lib/inverse_rum/__init__.py", None),
+            ("models_lib/inverse_rum/__init__.py", None),  # replaced with empty below
             ("models_lib/inverse_rum/dual_branch_encoder.py", None),
             ("models_lib/inverse_rum/structural_gnn.py", None),
+            ("models_lib/inverse_rum/dual_branch_trainer.py", None),  # compare_four_variants imports this
             ("models_lib/inverse_rum/dual_branch_mixture_trainer.py", None),
             ("models_lib/inverse_rum/inverse_trainer.py", None),  # imports TrainingLog
             ("models_lib/inverse_rum/mixture_head.py", None),  # imported by trainer
             ("models_lib/inverse_rum/irm_penalty.py", None),  # imported by trainer
             ("models_lib/inverse_rum/flow_metrics.py", None),  # may not be needed but cheap
+            # inverse_trainer top-level imports these — must bundle or import fails:
+            ("models_lib/inverse_rum/implicit_softmax.py", None),
+            ("models_lib/inverse_rum/topk_choice.py", None),
             ("experiments/__init__.py", None),
             ("experiments/paper_a/__init__.py", None),
             ("experiments/paper_a/compare_four_variants.py", None),
@@ -99,11 +103,18 @@ def main():
             src = V2_ROOT / rel
             dst = v2_dir / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
-            if src.exists():
+            if rel.endswith("inverse_rum/__init__.py"):
+                # v2's real __init__.py eagerly imports many submodules
+                # (implicit_softmax, topk_choice, bpr_layer, accessibility, …)
+                # that this smoke doesn't need. Ship an empty __init__.py so
+                # Python treats the directory as a package without triggering
+                # those imports.
+                dst.touch()
+                print(f"  wrote empty {rel} (avoid eager imports we don't bundle)")
+            elif src.exists():
                 shutil.copy2(src, dst)
                 print(f"  copied {rel}")
             else:
-                # Create empty __init__.py if missing
                 if rel.endswith("__init__.py"):
                     dst.touch()
                     print(f"  created empty {rel}")
