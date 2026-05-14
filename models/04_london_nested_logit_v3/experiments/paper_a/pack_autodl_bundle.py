@@ -123,8 +123,14 @@ def main():
 
         # ---- v3 code ----
         v3_code_pairs = [
-            ("models_lib/inverse_rum/nested_logit_head.py", None),
+            ("models_lib/inverse_rum/nested_logit_head.py", None),     # partial nested (smoke v1, retained for ablation)
+            ("models_lib/inverse_rum/dm_nested_logit_head.py", None),  # D→M nested + borough λ
             ("experiments/paper_a/train_nested_smoke.py", None),
+            ("experiments/paper_a/train_dm_nested.py", None),
+            ("experiments/paper_a/build_mode_level_features.py", None),
+        ]
+        v3_data_pairs = [
+            ("data/processed/mode_level_features.npz", None),          # built locally, ship to AutoDL
         ]
         # __init__.py files for v3
         for rel in ("models_lib/__init__.py", "models_lib/inverse_rum/__init__.py",
@@ -139,6 +145,17 @@ def main():
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
             print(f"  copied {rel}")
+
+        print("[v3 data]")
+        for rel, _ in v3_data_pairs:
+            src = V3_ROOT / rel
+            dst = v3_dir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.exists():
+                shutil.copy2(src, dst)
+                print(f"  copied {rel} ({src.stat().st_size/1024:.1f} KB)")
+            else:
+                print(f"  WARNING: missing {rel} — run build_mode_level_features.py first")
 
         # ---- README + run script ----
         readme = bundle / "README_AUTODL.md"
