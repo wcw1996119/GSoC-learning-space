@@ -64,7 +64,9 @@ def run_cmd(client, command: str, tail_lines: int = 30):
     if tail_lines:
         lines = (out + err).splitlines()
         for line in lines[-tail_lines:]:
-            print(f"   {line}")
+            # Encode-safe print: strip chars that can't be encoded on Windows GBK terminal
+            safe = line.encode("ascii", errors="replace").decode("ascii")
+            print(f"   {safe}")
     rc = stdout.channel.recv_exit_status()
     return rc, out, err
 

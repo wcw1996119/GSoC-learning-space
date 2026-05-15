@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -26,6 +27,7 @@ from typing import Dict, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 V3_ROOT = Path(__file__).resolve().parents[2]
 V2_ROOT = V3_ROOT.parent / "03_london_full_model_v2"
@@ -64,6 +66,7 @@ def forward_cs(
     income_score_per_origin: torch.Tensor,  # (N,)
     pct_kids_per_origin: torch.Tensor,      # (N,) — % households with dependent children
     mean_cars_per_origin: torch.Tensor,     # (N,) — mean cars per household
+    income_tier_props: torch.Tensor,        # (N, K) — P(tier=k | origin i), K = n_income_tiers
     pi_m_pair: torch.Tensor,
     grid_borough_idx: torch.Tensor,
     observed_OD: torch.Tensor,
@@ -114,46 +117,84 @@ def forward_cs(
     IV_mode = log_iv                                                   # (T, N, N)
     ce_mode_per_ijt = IV_mode - ce_accum                               # (T, N, N)
 
-    # ---- V_upper (Cervero 1999 multiplicative form) ----
-    # γ_effective(i, j) = γ + δ · match_prob_raw[i, j]
-    # V_upper = γ_effective · log(M_j)_z + α · log(W_j)_z + ν · log(D_j)_z + ...
-    # Replaces the prior additive (δ · match_z) form with Cervero's gravity-modulator.
-    alpha_w = rum.alpha_wage
+    # ---- V_upper (Cervero 1999 multiplicative + optional tier-mixture) ----
+    # Single (legacy):  γ_eff = γ + δ · match;  V = γ_eff·log_M + α·log_W + ν·log_D
+    # Tier mixture: each (α_k, γ_k, ν_k, δ_k) is tier-specific (k = 0/1/2 for low/mid/high)
+    #               final P(j|i) = Σ_k π_k(i) · softmax_j(V_upper_k)
+    alpha_w = rum.alpha_wage          # scalar (legacy) or (K,) tensor (tier mixture)
     gamma_M = rum.gamma_M
     nu_D = rum.nu_D
     delta_m = rum.delta_match
 
-    gamma_effective = gamma_M + delta_m * match_prob                   # (N, N)
-    V_M = gamma_effective * log_M_j.view(1, N)                         # (N, N) per (i, j)
-    V_M_T = V_M.unsqueeze(0)                                           # (1, N, N) broadcast on T
+    if rum.use_match_gate:
+        k_gate = rum.gate_steepness
+        tau = rum.gate_threshold
+        match_signal = torch.sigmoid(k_gate * (match_prob - tau))      # (N, N) ∈ [0, 1]
+    else:
+        match_signal = match_prob                                       # raw linear
 
-    V_other = (alpha_w * log_W_j.view(1, 1, N)
-               + nu_D * log_D_j.view(1, 1, N))                         # (1, 1, N)
-
-    V_rum_dest = (V_M_T + V_other + lam_view * IV_mode)                # (T, N, N)
+    if rum.use_tier_mixture:
+        # ---- Tier mixture path: compute V_upper_k per tier, then marginalize ----
+        K = rum.n_income_tiers                                          # 3
+        # alpha_w/gamma_M/nu_D/delta_m: each (K,)
+        # build V_upper_k: (K, T, N, N)
+        V_uppers = []
+        for k in range(K):
+            gamma_eff_k = gamma_M[k] + delta_m[k] * match_signal        # (N, N)
+            V_M_k = gamma_eff_k * log_M_j.view(1, N)                    # (N, N)
+            V_other_k = (alpha_w[k] * log_W_j + nu_D[k] * log_D_j).view(1, N)  # (1, N)
+            V_rum_k = (V_M_k + V_other_k).unsqueeze(0) + lam_view * IV_mode    # (T, N, N)
+            V_uppers.append(V_rum_k)
+        V_uppers_stacked = torch.stack(V_uppers, dim=0)                  # (K, T, N, N)
+        V_rum_dest = V_uppers_stacked                                    # downstream knows tier dim
+    else:
+        # single-RUM path (original)
+        gamma_effective = gamma_M + delta_m * match_signal               # (N, N)
+        V_M = gamma_effective * log_M_j.view(1, N)                       # (N, N)
+        V_other = (alpha_w * log_W_j.view(1, 1, N)
+                   + nu_D * log_D_j.view(1, 1, N))                       # (1, 1, N)
+        V_rum_dest = (V_M.unsqueeze(0) + V_other + lam_view * IV_mode)   # (T, N, N)
 
     V_gnn = V_gnn_jt.view(T, 1, N).expand(T, N, N)                     # (T, N, N)
 
+    # Compute V_dest per tier (if tier mixture) or directly (single RUM)
     if rum.gnn_mode == "residual":
-        # Wang TB-ResNet additive residual: V_dest = V_RUM + w_NN · V_NN
         w_nn = rum.gnn_residual_scale
         if w_nn is None:
-            V_dest = V_rum_dest                                        # pure RUM
-            V_nn_scaled = torch.zeros_like(V_rum_dest)
+            V_nn_scaled = torch.zeros(T, N, N, device=V_gnn.device)
         else:
-            V_nn_scaled = w_nn * V_gnn
-            V_dest = V_rum_dest + V_nn_scaled
+            V_nn_scaled = w_nn * V_gnn                                  # (T, N, N)
+        if rum.use_tier_mixture:
+            # V_rum_dest is (K, T, N, N), add same NN to each
+            V_dest = V_rum_dest + V_nn_scaled.unsqueeze(0)              # (K, T, N, N)
+        else:
+            V_dest = V_rum_dest + V_nn_scaled                            # (T, N, N)
     else:
-        # legacy v3b/c convex form
         blend = rum.gnn_blend
         if blend is None:
-            V_dest = V_rum_dest
-            V_nn_scaled = torch.zeros_like(V_rum_dest)
+            V_nn_scaled = torch.zeros(T, N, N, device=V_gnn.device)
         else:
-            V_dest = (1.0 - blend) * V_rum_dest + blend * V_gnn
             V_nn_scaled = blend * V_gnn
+        if rum.use_tier_mixture:
+            if blend is None:
+                V_dest = V_rum_dest
+            else:
+                V_dest = (1.0 - blend) * V_rum_dest + V_nn_scaled.unsqueeze(0)
+        else:
+            if blend is None:
+                V_dest = V_rum_dest
+            else:
+                V_dest = (1.0 - blend) * V_rum_dest + V_nn_scaled
 
-    log_P_D = torch.log_softmax(V_dest, dim=-1)                        # (T, N, N)
+    # Tier-mixture: log P(j|i) = logsumexp_k(log π_k + log softmax_j(V_upper_k))
+    if rum.use_tier_mixture:
+        # V_dest shape: (K, T, N, N)
+        log_P_per_tier = F.log_softmax(V_dest, dim=-1)                  # (K, T, N, N)
+        # income_tier_props shape (N, K) → log_pi (K, 1, N, 1) broadcast on T, j-axis
+        log_pi = torch.log(income_tier_props.t().unsqueeze(1).unsqueeze(-1) + 1e-9)  # (K, 1, N, 1)
+        log_P_D = torch.logsumexp(log_pi + log_P_per_tier, dim=0)       # (T, N, N)
+    else:
+        log_P_D = torch.log_softmax(V_dest, dim=-1)                     # (T, N, N)
 
     # ---- losses ----
     mask_f = train_mask.view(1, N, 1).float()
@@ -176,11 +217,15 @@ def forward_cs(
 
     # ---- diagnostic ----
     with torch.no_grad():
+        # tier-mixture: alpha/gamma/nu/delta are (K,) tensors → store as lists
+        def _diag_val(t):
+            return t.tolist() if t.dim() > 0 else float(t)
         diagnostic = {
-            "alpha_wage": float(rum.alpha_wage),
-            "gamma_M": float(rum.gamma_M),
-            "nu_D": float(rum.nu_D),
-            "delta_match": float(rum.delta_match),
+            "use_tier_mixture": rum.use_tier_mixture,
+            "alpha_wage": _diag_val(rum.alpha_wage),
+            "gamma_M": _diag_val(rum.gamma_M),
+            "nu_D": _diag_val(rum.nu_D),
+            "delta_match": _diag_val(rum.delta_match),
             "beta_t_mean": float(rum.beta_t_per_mode.mean()),
             "beta_t_slope_mean": float(rum.beta_t_slope_per_mode.mean()),
             "asc_per_mode": rum.asc_per_mode.detach().cpu().tolist(),
@@ -231,6 +276,33 @@ def main():
     ap.add_argument("--gnn-residual-scale-init", type=float, default=0.1)
     ap.add_argument("--lambda-nn-norm", type=float, default=0.0,
                     help="L2 penalty on ‖V_NN‖² to enforce Wang Path A (δ_measured < 0.30)")
+    ap.add_argument("--use-match-gate", action="store_true",
+                    help="Decision-tree style sigmoid gate on Cervero match: "
+                         "γ_eff = γ + δ · sigmoid(k(match - τ)). "
+                         "k learns sharpness, τ learns threshold.")
+    ap.add_argument("--gate-steepness-init", type=float, default=5.0,
+                    help="Initial k (gate sharpness); softplus ≥0. Default 5.0 = moderately sharp.")
+    ap.add_argument("--gate-threshold-init", type=float, default=0.13,
+                    help="Initial τ (gate threshold in raw match_prob scale). Default 0.13 = data mean.")
+    # Wang TB-ResNet sequential training procedure
+    ap.add_argument("--train-mode", choices=["joint", "sequential"], default="joint",
+                    help="joint: train all params together (legacy); "
+                         "sequential: Wang's procedure — Phase 1 trains RUM only, "
+                         "Phase 2 freezes RUM and trains GNN with fixed --fixed-blend δ.")
+    ap.add_argument("--fixed-blend", type=float, default=None,
+                    help="Override learnable blend with fixed value (Wang δ as hyperparameter).")
+    ap.add_argument("--epochs-phase1", type=int, default=200,
+                    help="Sequential mode: epochs for Phase 1 (RUM only).")
+    ap.add_argument("--rum-checkpoint", type=str, default=None,
+                    help="Sequential mode: load Phase 1 RUM checkpoint instead of retraining.")
+    ap.add_argument("--use-tier-mixture", action="store_true",
+                    help="Income-tier latent class: each (α, γ, ν, δ_match) tier-specific × 3 tier. "
+                         "P(j|i) = Σ_k π(tier=k|i) · softmax(V_upper_k).")
+    ap.add_argument("--n-income-tiers", type=int, default=3,
+                    help="Number of income tiers for latent class mixture (default 3).")
+    ap.add_argument("--tier-init-scale", type=float, default=0.0,
+                    help="Tier mixture init perturbation. 0=symmetric (collapse-prone), "
+                         "0.5 = tier k init = base · (1 + 0.5·k). Breaks symmetry so tiers can differentiate.")
     ap.add_argument("--lambda-kl", type=float, default=1.0)
     ap.add_argument("--kl-warmup-epochs", type=int, default=15)
     ap.add_argument("--lr-theta", type=float, default=1e-3)
@@ -290,6 +362,16 @@ def main():
         mean_cars = torch.zeros(N_grid).float()
         print(f"  WARNING: pct_with_kids / mean_cars not in aux, using zero placeholders")
 
+    # Income-tier mixture: P(tier=k | origin i)
+    if "income_tier_props" in aux.files:
+        income_tier_props = torch.from_numpy(aux["income_tier_props"]).float()
+        print(f"  income_tier_props loaded: shape {tuple(income_tier_props.shape)} "
+              f"(tier-marginal: {income_tier_props.mean(dim=0).tolist()})")
+    else:
+        N_grid = match_prob.shape[0]
+        income_tier_props = torch.full((N_grid, args.n_income_tiers), 1.0 / args.n_income_tiers)
+        print(f"  WARNING: income_tier_props not in aux, using uniform")
+
     grid_borough_idx = d["grid_borough_idx"].long()
     n_boroughs = int(grid_borough_idx.max().item()) + 1
 
@@ -315,6 +397,7 @@ def main():
     income_score = income_score.to(device)
     pct_kids = pct_kids.to(device)
     mean_cars = mean_cars.to(device)
+    income_tier_props = income_tier_props.to(device)
     pi_m_pair = pair_mode_share.to(device).float()
     grid_borough_idx = grid_borough_idx.to(device)
 
@@ -331,13 +414,20 @@ def main():
         hidden_dim=32, gru_hidden=32, n_sage_layers=2, tcn_kernels=(3, 5, 7),
     ).to(device)
     rum = CerveroShenHead(
-        n_modes=M, n_boroughs=n_boroughs,
+        n_modes=M, n_boroughs=n_boroughs, n_tiers=args.n_income_tiers,
         lambda_init=args.lambda_init, lambda_eps_min=args.lambda_eps_min,
         use_gnn_blend=True, gnn_blend_init=0.5, blend_max=args.blend_max,
         gnn_mode=args.gnn_mode,
         gnn_residual_scale_init=args.gnn_residual_scale_init,
+        use_match_gate=args.use_match_gate,
+        gate_steepness_init=args.gate_steepness_init,
+        gate_threshold_init=args.gate_threshold_init,
+        use_tier_mixture=args.use_tier_mixture,
+        tier_init_scale=args.tier_init_scale,
     ).to(device)
     print(f"        GNN mode: {args.gnn_mode}  λ_nn_norm: {args.lambda_nn_norm}")
+    if args.use_match_gate:
+        print(f"        Match gate: ON (k init {args.gate_steepness_init}, τ init {args.gate_threshold_init})")
 
     print(f"\n[train] starting: seed={args.seed} epochs={args.epochs} "
           f"blend_max={args.blend_max} λ_kl={args.lambda_kl} kl_warmup={args.kl_warmup_epochs}")
@@ -351,15 +441,76 @@ def main():
         ]
     )
 
+    # ===================================================================
+    # Wang TB-ResNet sequential training (W4 §3.2 perspective 3)
+    # Phase 1: train RUM only (force blend=0, encoder frozen)
+    # Phase 2: freeze RUM, set blend=fixed_blend, train encoder only
+    # ===================================================================
+    if args.train_mode == "sequential":
+        print(f"\n[sequential] Phase 1: train RUM only ({args.epochs_phase1} epochs)")
+        # Force blend ≈ 0 (sigmoid(-15) ≈ 3e-7)
+        if rum.raw_gnn_blend is not None:
+            with torch.no_grad():
+                rum.raw_gnn_blend.fill_(-15.0)
+            rum.raw_gnn_blend.requires_grad = False
+        # Freeze encoder
+        for p in encoder.parameters():
+            p.requires_grad = False
+
     t0 = time.time()
     best_val = float("inf")
     no_improve = 0
     best_state = None
     history = []
 
-    for ep in range(args.epochs):
+    phase1_epochs = args.epochs_phase1 if args.train_mode == "sequential" else 0
+    total_epochs = (args.epochs_phase1 + args.epochs) if args.train_mode == "sequential" else args.epochs
+    phase2_started = False
+
+    for ep in range(total_epochs):
+        # Phase transition for sequential training
+        if args.train_mode == "sequential" and ep == phase1_epochs and not phase2_started:
+            phase2_started = True
+            phase1_time = time.time() - t0
+            phase1_cpc = history[-1]["cpc"] if history else 0.0
+            print(f"\n[sequential] Phase 1 done in {phase1_time:.0f}s, CPC={phase1_cpc:.4f}")
+            # Set blend to fixed value
+            if args.fixed_blend is not None and rum.raw_gnn_blend is not None:
+                fb = max(min(float(args.fixed_blend) / max(args.blend_max, 1e-6), 1-1e-4), 1e-4)
+                raw_b = math.log(fb / (1 - fb))
+                with torch.no_grad():
+                    rum.raw_gnn_blend.fill_(raw_b)
+                rum.raw_gnn_blend.requires_grad = False
+                print(f"[sequential] Phase 2: freeze RUM, train GNN at fixed blend={args.fixed_blend} ({args.epochs} epochs)")
+            else:
+                # No fixed_blend: keep blend learnable for Phase 2 only
+                if rum.raw_gnn_blend is not None:
+                    rum.raw_gnn_blend.requires_grad = True
+                print(f"[sequential] Phase 2: freeze RUM (except blend), train GNN ({args.epochs} epochs)")
+            # Freeze all RUM params except blend
+            for name, p in rum.named_parameters():
+                if "gnn_blend" not in name:
+                    p.requires_grad = False
+            # Unfreeze encoder
+            for p in encoder.parameters():
+                p.requires_grad = True
+            # Reset optimizer to only train unfrozen params (encoder + maybe blend)
+            optimizer = torch.optim.AdamW(
+                [{"params": [p for p in encoder.parameters() if p.requires_grad],
+                  "lr": args.lr_theta, "weight_decay": 1e-4},
+                 {"params": [p for p in rum.parameters() if p.requires_grad],
+                  "lr": args.lr_rum, "weight_decay": 0.0}]
+            )
+            best_val = float("inf")  # reset early stop for Phase 2
+            no_improve = 0
+
+        # ---- adjust epoch index for kl_warmup (relative to phase start) ----
+        if args.train_mode == "sequential":
+            eff_ep = ep if ep < phase1_epochs else (ep - phase1_epochs)
+        else:
+            eff_ep = ep
         if args.kl_warmup_epochs > 0:
-            kl_weight = args.lambda_kl * min(1.0, (ep + 1) / args.kl_warmup_epochs)
+            kl_weight = args.lambda_kl * min(1.0, (eff_ep + 1) / args.kl_warmup_epochs)
         else:
             kl_weight = args.lambda_kl
 
@@ -368,7 +519,8 @@ def main():
         out = forward_cs(
             encoder, rum, X_static, X_dynamic, edge_index,
             t_per_mode, mode_names, log_d_ij, match_prob, log_M_j, log_W_j, log_D_j,
-            income_score, pct_kids, mean_cars, pi_m_pair, grid_borough_idx, observed_OD, train_mask,
+            income_score, pct_kids, mean_cars, income_tier_props,
+            pi_m_pair, grid_borough_idx, observed_OD, train_mask,
         )
         loss = (out["nll_dest"]
                 + kl_weight * out["ce_mode"]
@@ -384,7 +536,8 @@ def main():
             out_e = forward_cs(
                 encoder, rum, X_static, X_dynamic, edge_index,
                 t_per_mode, mode_names, log_d_ij, match_prob, log_M_j, log_W_j, log_D_j,
-                income_score, pct_kids, mean_cars, pi_m_pair, grid_borough_idx, observed_OD, val_mask,
+                income_score, pct_kids, mean_cars, income_tier_props,
+                pi_m_pair, grid_borough_idx, observed_OD, val_mask,
             )
             val_nll = float(out_e["nll_dest"])
             val_cpc = cpc(out_e["log_P_D"], observed_OD, val_mask)
@@ -406,12 +559,17 @@ def main():
                            f"(rum/nn rms {diag['rum_rms']:.2f}/{diag['nn_rms']:.2f})")
             else:
                 gnn_str = f"δ={diag['blend']:.3f}" if diag['blend'] is not None else "δ=n/a"
+            # Handle tier-mixture (lists) vs single (floats) for display (ASCII only for Windows compat)
+            def _mean(v):
+                return sum(v) / len(v) if isinstance(v, list) else float(v)
+            a, g, n, dm = _mean(diag['alpha_wage']), _mean(diag['gamma_M']), _mean(diag['nu_D']), _mean(diag['delta_match'])
+            tier_tag = f"[T{rum.n_income_tiers}]" if diag.get('use_tier_mixture') else ""
             print(f"ep {ep:3d} | tnll {out['nll_dest'].item():.3f} | "
-                  f"vnll {val_nll:.3f} | cpc {val_cpc:.3f} | klw {kl_weight:.2f} | "
-                  f"α={diag['alpha_wage']:+.3f} γ={diag['gamma_M']:+.3f} ν={diag['nu_D']:+.3f} "
-                  f"δ_m={diag['delta_match']:+.3f} | β_t,0={diag['beta_t_mean']:+.3f} "
-                  f"β_t,1={diag['beta_t_slope_mean']:+.4f} | "
-                  f"λ_μ={diag['lambda_b_mean']:.3f} | {gnn_str}")
+                  f"vnll {val_nll:.3f} | cpc {val_cpc:.3f} | klw {kl_weight:.2f} | {tier_tag}"
+                  f"a_avg={a:+.3f} g_avg={g:+.3f} nu_avg={n:+.3f} "
+                  f"dm_avg={dm:+.3f} | bt0={diag['beta_t_mean']:+.3f} "
+                  f"bt1={diag['beta_t_slope_mean']:+.4f} | "
+                  f"lam={diag['lambda_b_mean']:.3f} | {gnn_str}")
 
         if val_nll < best_val - 1e-4:
             best_val = val_nll
@@ -422,7 +580,9 @@ def main():
             }
         else:
             no_improve += 1
-        if no_improve >= args.patience:
+        # Don't early-stop during sequential Phase 1 — must reach phase transition
+        in_phase1 = (args.train_mode == "sequential" and ep < phase1_epochs)
+        if not in_phase1 and no_improve >= args.patience:
             print(f"early stop ep {ep}")
             break
 
@@ -435,7 +595,8 @@ def main():
         out_final = forward_cs(
             encoder, rum, X_static, X_dynamic, edge_index,
             t_per_mode, mode_names, log_d_ij, match_prob, log_M_j, log_W_j, log_D_j,
-            income_score, pct_kids, mean_cars, pi_m_pair, grid_borough_idx, observed_OD, val_mask,
+            income_score, pct_kids, mean_cars, income_tier_props,
+            pi_m_pair, grid_borough_idx, observed_OD, val_mask,
         )
         final_cpc = cpc(out_final["log_P_D"], observed_OD, val_mask)
         final_diag = out_final["diagnostic"]
@@ -465,10 +626,16 @@ def main():
 
     print(f"\n[smoke] done in {elapsed:.0f}s ({len(history)} epochs)")
     print(f"  CPC            = {final_cpc:.4f}  (v2 baseline 0.485, v3a 0.534)")
-    print(f"  alpha_wage     = {final_diag['alpha_wage']:+.4f}  (W_j; ≥0 by construction)")
-    print(f"  gamma_M        = {final_diag['gamma_M']:+.4f}  (M_j; ≥0 by construction)")
-    print(f"  nu_D           = {final_diag['nu_D']:+.4f}  (D_j; ≤0 by construction)")
-    print(f"  delta_match    = {final_diag['delta_match']:+.4f}  (match_prob; ≥0 by construction)")
+    def _fmt(v, w=8):
+        if isinstance(v, list):
+            return "[" + ", ".join(f"{x:+.4f}" for x in v) + "]"
+        return f"{v:+.{w-4}f}"
+    if final_diag.get("use_tier_mixture"):
+        print(f"  TIER MIXTURE (low / mid / high income, marginal: {income_tier_props.mean(dim=0).tolist()}):")
+    print(f"  alpha_wage     = {_fmt(final_diag['alpha_wage'])}  (W_j; ≥0 by construction)")
+    print(f"  gamma_M        = {_fmt(final_diag['gamma_M'])}  (M_j; ≥0 by construction)")
+    print(f"  nu_D           = {_fmt(final_diag['nu_D'])}  (D_j; ≤0 by construction)")
+    print(f"  delta_match    = {_fmt(final_diag['delta_match'])}  (match_prob; ≥0 by construction)")
     print(f"  beta_t,0 mean  = {final_diag['beta_t_mean']:+.4f}  (t intercept; ≤0 by construction)")
     print(f"  beta_t,1 mean  = {final_diag['beta_t_slope_mean']:+.4f}  (t slope on log_d; ≤0 by construction)")
     print(f"  theta_inc      = {final_diag.get('theta_inc_per_mode')}  (per-mode income coef)")

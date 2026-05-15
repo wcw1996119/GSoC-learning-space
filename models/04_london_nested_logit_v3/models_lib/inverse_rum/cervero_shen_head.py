@@ -107,6 +107,7 @@ class CerveroShenHead(nn.Module):
         self,
         n_modes: int = 3,
         n_boroughs: int = 33,
+        n_tiers: int = 3,
         alpha_wage_init: float = 0.1,
         gamma_M_init: float = 0.5,
         nu_D_init: float = -0.1,
@@ -121,6 +122,13 @@ class CerveroShenHead(nn.Module):
         blend_max: float = 1.0,
         gnn_mode: str = "convex",  # "convex" (v3b/c legacy) | "residual" (Wang TB-ResNet)
         gnn_residual_scale_init: float = 0.1,
+        use_match_gate: bool = False,  # sigmoid gating on Cervero match (decision-tree style)
+        gate_steepness_init: float = 1.0,
+        gate_threshold_init: float = 0.15,
+        use_tier_mixture: bool = False,  # income-tier latent class (3 discrete agent types)
+        tier_init_scale: float = 0.0,    # 0 = symmetric init (collapse-prone);
+                                          # >0 = tier k gets base × (1 + k·scale), breaks symmetry
+                                          # towards lit-expected behavioral gradient
     ):
         super().__init__()
         self.n_modes = n_modes
@@ -130,22 +138,38 @@ class CerveroShenHead(nn.Module):
         self.blend_max = float(blend_max)
         self.gnn_mode = str(gnn_mode)
         assert self.gnn_mode in ("convex", "residual"), f"unknown gnn_mode={gnn_mode}"
+        self.use_match_gate = bool(use_match_gate)
+        self.use_tier_mixture = bool(use_tier_mixture)
+        self.n_income_tiers = int(n_tiers)
 
-        # α (wage) — enforced >= 0 via softplus (Cervero/Hansen/Wang behavioral prior)
-        raw_a = _inv_softplus(max(alpha_wage_init, 1e-3))
-        self.raw_alpha_wage = nn.Parameter(torch.tensor(raw_a))
+        # V_upper destination-attractor params (α, γ, ν, δ_match)
+        # If use_tier_mixture: each becomes (n_tiers,) tensor for tier-specific RUM
+        # tier_init_scale > 0: tier k gets base × (1 + k·scale) to break symmetry &
+        # encode lit-expected gradient (higher income → more selective)
+        n_t = self.n_income_tiers if self.use_tier_mixture else 1
 
-        # γ (M_j) — enforced > 0 via softplus, since jobs always positively attract
-        raw_g = _inv_softplus(max(gamma_M_init, 1e-3))
-        self.raw_gamma_M = nn.Parameter(torch.tensor(raw_g))
+        def _tier_init(base_value: float, sign: int = 1) -> torch.Tensor:
+            """Generate (n_t,) init values with lit-anchored tier gradient.
+            sign=+1 for ≥0 params (α/γ/δ), -1 for ≤0 params (ν)."""
+            target = max(abs(base_value), 1e-3)
+            if n_t == 1:
+                return torch.tensor(_inv_softplus(target))
+            # tier 0 (low) gets base, tier k gets base · (1 + k · tier_init_scale)
+            scaled = [target * (1.0 + k * tier_init_scale) for k in range(n_t)]
+            raws = [_inv_softplus(max(v, 1e-3)) for v in scaled]
+            return torch.tensor(raws, dtype=torch.float32)
 
-        # ν (D_j) — enforced < 0 via -softplus, since competition repels
-        raw_n = _inv_softplus(max(-nu_D_init, 1e-3))
-        self.raw_nu_D = nn.Parameter(torch.tensor(raw_n))
+        # α (wage) — enforced >= 0 via softplus
+        self.raw_alpha_wage = nn.Parameter(_tier_init(alpha_wage_init, +1))
 
-        # δ (match_prob) — enforced >= 0 via softplus (Cervero behavioral prior)
-        raw_d = _inv_softplus(max(delta_match_init, 1e-3))
-        self.raw_delta_match = nn.Parameter(torch.tensor(raw_d))
+        # γ (M_j) — enforced > 0 via softplus
+        self.raw_gamma_M = nn.Parameter(_tier_init(gamma_M_init, +1))
+
+        # ν (D_j) — enforced < 0 via -softplus (use abs in init)
+        self.raw_nu_D = nn.Parameter(_tier_init(-nu_D_init, -1))
+
+        # δ (match_prob) — enforced >= 0 via softplus
+        self.raw_delta_match = nn.Parameter(_tier_init(delta_match_init, +1))
 
         # β_t,0 per mode (intercept) — enforced < 0 via -softplus
         target_b = -beta_t_init
@@ -200,6 +224,19 @@ class CerveroShenHead(nn.Module):
             self.raw_gnn_residual_scale = nn.Parameter(torch.tensor(raw_w))
         else:
             self.raw_gnn_residual_scale = None
+
+        # Decision-tree-style sigmoid gate on Cervero match
+        #   γ_effective(i, j) = γ + δ · sigmoid(k · (match_raw[i,j] - τ))
+        # When k → 0: gate is flat 0.5, gamma_eff ≈ γ + 0.5·δ baseline.
+        # When k large + match > τ: gate → 1, gamma_eff → γ + δ (boost).
+        # When k large + match < τ: gate → 0, gamma_eff → γ (no boost / filtered).
+        if self.use_match_gate:
+            raw_k = _inv_softplus(max(float(gate_steepness_init), 1e-4))
+            self.raw_gate_steepness = nn.Parameter(torch.tensor(raw_k))
+            self.gate_threshold = nn.Parameter(torch.tensor(float(gate_threshold_init)))
+        else:
+            self.raw_gate_steepness = None
+            self.gate_threshold = None
 
     # =============================================================================
     # Transformed parameter properties
@@ -262,6 +299,18 @@ class CerveroShenHead(nn.Module):
             return None
         return F.softplus(self.raw_gnn_residual_scale)
 
+    @property
+    def gate_steepness(self) -> Optional[torch.Tensor]:
+        """k ≥ 0 — sigmoid gate steepness on Cervero match.
+
+        k → 0: gate is flat (no decision-tree gating, falls back to linear-ish).
+        k large: gate becomes sharp threshold function — match below τ is
+        filtered out (no γ boost), match above τ gets full δ boost.
+        """
+        if self.raw_gate_steepness is None:
+            return None
+        return F.softplus(self.raw_gate_steepness)
+
     def lambda_for_destination(self, grid_borough_idx: torch.Tensor) -> torch.Tensor:
         return self.lambda_per_borough[grid_borough_idx]
 
@@ -271,11 +320,16 @@ class CerveroShenHead(nn.Module):
 
     def snapshot(self) -> dict:
         with torch.no_grad():
+            # Handle tier mixture (tensor) vs single (scalar)
+            def _to_py(t):
+                return t.tolist() if t.dim() > 0 else float(t)
             return {
-                "alpha_wage": float(self.alpha_wage),
-                "gamma_M": float(self.gamma_M),
-                "nu_D": float(self.nu_D),
-                "delta_match": float(self.delta_match),
+                "use_tier_mixture": self.use_tier_mixture,
+                "n_income_tiers": self.n_income_tiers,
+                "alpha_wage": _to_py(self.alpha_wage),
+                "gamma_M": _to_py(self.gamma_M),
+                "nu_D": _to_py(self.nu_D),
+                "delta_match": _to_py(self.delta_match),
                 "beta_t_per_mode": self.beta_t_per_mode.tolist(),
                 "beta_t_slope_per_mode": self.beta_t_slope_per_mode.tolist(),
                 "asc_per_mode": self.asc_per_mode.tolist(),
@@ -290,4 +344,7 @@ class CerveroShenHead(nn.Module):
                 "gnn_blend": float(self.gnn_blend) if self.gnn_blend is not None else None,
                 "gnn_residual_scale": float(self.gnn_residual_scale) if self.gnn_residual_scale is not None else None,
                 "gnn_mode": self.gnn_mode,
+                "use_match_gate": self.use_match_gate,
+                "gate_steepness": float(self.gate_steepness) if self.gate_steepness is not None else None,
+                "gate_threshold": float(self.gate_threshold) if self.gate_threshold is not None else None,
             }
