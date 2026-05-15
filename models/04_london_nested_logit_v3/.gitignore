@@ -14,3 +14,15 @@ __pycache__/
 
 # Logs that aren't paper-grade
 *.log
+
+# Large processed aux files — recreatable from build_v3_aux_cervero.py
+data/processed/paperA_v3_aux_cervero.npz
+data/processed/mode_level_features.npz
+# Copy of v2 csv — recreatable by copying from v2
+data/processed/grid_static_features.csv
+
+# Raw downloaded data — recreatable from source URL
+data/raw/
+
+# Claude session metadata
+.claude/
