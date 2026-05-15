@@ -119,6 +119,8 @@ class CerveroShenHead(nn.Module):
         use_gnn_blend: bool = False,
         gnn_blend_init: float = 0.5,
         blend_max: float = 1.0,
+        gnn_mode: str = "convex",  # "convex" (v3b/c legacy) | "residual" (Wang TB-ResNet)
+        gnn_residual_scale_init: float = 0.1,
     ):
         super().__init__()
         self.n_modes = n_modes
@@ -126,6 +128,8 @@ class CerveroShenHead(nn.Module):
         self.lambda_eps_min = float(lambda_eps_min)
         self.use_gnn_blend = use_gnn_blend
         self.blend_max = float(blend_max)
+        self.gnn_mode = str(gnn_mode)
+        assert self.gnn_mode in ("convex", "residual"), f"unknown gnn_mode={gnn_mode}"
 
         # α (wage) — enforced >= 0 via softplus (Cervero/Hansen/Wang behavioral prior)
         raw_a = _inv_softplus(max(alpha_wage_init, 1e-3))
@@ -172,8 +176,8 @@ class CerveroShenHead(nn.Module):
         raw_l = _inv_sigmoid(s)
         self.raw_lambda_borough = nn.Parameter(torch.full((n_boroughs,), raw_l))
 
-        # Wang blend (optional)
-        if use_gnn_blend:
+        # Wang blend (convex mode, legacy)
+        if use_gnn_blend and self.gnn_mode == "convex":
             if self.blend_max <= 0.0:
                 self.register_buffer("raw_gnn_blend", torch.tensor(-1e9))
                 self._blend_is_buffer = True
@@ -186,6 +190,16 @@ class CerveroShenHead(nn.Module):
         else:
             self.raw_gnn_blend = None
             self._blend_is_buffer = False
+
+        # Wang TB-ResNet residual scale (additive mode):
+        #   V_dest = V_RUM + w_NN · V_GNN_raw
+        # w_NN ≥ 0 via softplus, learnable; small init (0.1) so NN starts as
+        # minor correction and grows only if data needs it.
+        if use_gnn_blend and self.gnn_mode == "residual":
+            raw_w = _inv_softplus(max(float(gnn_residual_scale_init), 1e-4))
+            self.raw_gnn_residual_scale = nn.Parameter(torch.tensor(raw_w))
+        else:
+            self.raw_gnn_residual_scale = None
 
     # =============================================================================
     # Transformed parameter properties
@@ -208,7 +222,14 @@ class CerveroShenHead(nn.Module):
 
     @property
     def delta_match(self) -> torch.Tensor:
-        """δ ≥ 0 (Cervero match attracts)."""
+        """δ ≥ 0 — Cervero 1999 multiplicative match-gravity coefficient.
+
+        Used in V_upper as: γ_effective(i, j) = γ + δ · match_prob_raw[i, j],
+        i.e. high-match destinations get an amplified jobs-count attractor.
+        This is Cervero's A_i = Σ E_j · match[i, j] / d^γ in log-utility form.
+        Match modulates the gravity coefficient instead of being a separate
+        additive term — the prior v3b spec ('+ δ·match_z') was lit-inconsistent.
+        """
         return F.softplus(self.raw_delta_match)
 
     @property
@@ -229,9 +250,17 @@ class CerveroShenHead(nn.Module):
 
     @property
     def gnn_blend(self) -> Optional[torch.Tensor]:
+        """Convex blend ∈ [0, blend_max] — legacy v3b/c mode only."""
         if self.raw_gnn_blend is None:
             return None
         return self.blend_max * torch.sigmoid(self.raw_gnn_blend)
+
+    @property
+    def gnn_residual_scale(self) -> Optional[torch.Tensor]:
+        """w_NN ≥ 0 — Wang TB-ResNet additive residual scale (V_dest = V_RUM + w·V_NN)."""
+        if self.raw_gnn_residual_scale is None:
+            return None
+        return F.softplus(self.raw_gnn_residual_scale)
 
     def lambda_for_destination(self, grid_borough_idx: torch.Tensor) -> torch.Tensor:
         return self.lambda_per_borough[grid_borough_idx]
@@ -259,4 +288,6 @@ class CerveroShenHead(nn.Module):
                 "lambda_b_min": float(self.lambda_per_borough.min()),
                 "lambda_b_max": float(self.lambda_per_borough.max()),
                 "gnn_blend": float(self.gnn_blend) if self.gnn_blend is not None else None,
+                "gnn_residual_scale": float(self.gnn_residual_scale) if self.gnn_residual_scale is not None else None,
+                "gnn_mode": self.gnn_mode,
             }

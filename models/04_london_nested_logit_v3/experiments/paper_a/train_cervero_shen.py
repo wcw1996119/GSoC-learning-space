@@ -114,31 +114,44 @@ def forward_cs(
     IV_mode = log_iv                                                   # (T, N, N)
     ce_mode_per_ijt = IV_mode - ce_accum                               # (T, N, N)
 
-    # ---- V_upper ----
+    # ---- V_upper (Cervero 1999 multiplicative form) ----
+    # γ_effective(i, j) = γ + δ · match_prob_raw[i, j]
+    # V_upper = γ_effective · log(M_j)_z + α · log(W_j)_z + ν · log(D_j)_z + ...
+    # Replaces the prior additive (δ · match_z) form with Cervero's gravity-modulator.
     alpha_w = rum.alpha_wage
     gamma_M = rum.gamma_M
     nu_D = rum.nu_D
     delta_m = rum.delta_match
 
-    # destination-level terms: (N,) → (1, 1, N)
-    V_dest_destonly = (alpha_w * log_W_j.view(1, 1, N)
-                       + gamma_M * log_M_j.view(1, 1, N)
-                       + nu_D * log_D_j.view(1, 1, N))                 # (1, 1, N)
+    gamma_effective = gamma_M + delta_m * match_prob                   # (N, N)
+    V_M = gamma_effective * log_M_j.view(1, N)                         # (N, N) per (i, j)
+    V_M_T = V_M.unsqueeze(0)                                           # (1, N, N) broadcast on T
 
-    # match_prob is (N, N) → (1, N, N)
-    V_match = delta_m * match_prob.view(1, N, N)                       # (1, N, N)
+    V_other = (alpha_w * log_W_j.view(1, 1, N)
+               + nu_D * log_D_j.view(1, 1, N))                         # (1, 1, N)
 
-    V_rum_dest = (V_dest_destonly
-                  + V_match
-                  + lam_view * IV_mode)                                # (T, N, N)
+    V_rum_dest = (V_M_T + V_other + lam_view * IV_mode)                # (T, N, N)
 
     V_gnn = V_gnn_jt.view(T, 1, N).expand(T, N, N)                     # (T, N, N)
 
-    blend = rum.gnn_blend
-    if blend is None:
-        V_dest = V_rum_dest                                            # pure RUM
+    if rum.gnn_mode == "residual":
+        # Wang TB-ResNet additive residual: V_dest = V_RUM + w_NN · V_NN
+        w_nn = rum.gnn_residual_scale
+        if w_nn is None:
+            V_dest = V_rum_dest                                        # pure RUM
+            V_nn_scaled = torch.zeros_like(V_rum_dest)
+        else:
+            V_nn_scaled = w_nn * V_gnn
+            V_dest = V_rum_dest + V_nn_scaled
     else:
-        V_dest = (1.0 - blend) * V_rum_dest + blend * V_gnn
+        # legacy v3b/c convex form
+        blend = rum.gnn_blend
+        if blend is None:
+            V_dest = V_rum_dest
+            V_nn_scaled = torch.zeros_like(V_rum_dest)
+        else:
+            V_dest = (1.0 - blend) * V_rum_dest + blend * V_gnn
+            V_nn_scaled = blend * V_gnn
 
     log_P_D = torch.log_softmax(V_dest, dim=-1)                        # (T, N, N)
 
@@ -149,6 +162,17 @@ def forward_cs(
 
     nll_dest = -(flow * log_P_D).sum() / flow_sum
     ce_mode = (flow * ce_mode_per_ijt).sum() / flow_sum
+
+    # Wang TB-ResNet δ_measured = ‖V_NN‖ / (‖V_RUM‖ + ‖V_NN‖) — norm-ratio
+    # Use RMS over (T, N, N) cells to keep scale comparable.
+    with torch.no_grad():
+        rum_rms = torch.sqrt((V_rum_dest ** 2).mean())
+        nn_rms = torch.sqrt((V_nn_scaled ** 2).mean())
+        delta_measured = (nn_rms / (rum_rms + nn_rms + 1e-9)).item()
+        nn_norm_sq_diag = (V_nn_scaled ** 2).mean().item()
+
+    # NN-norm regularization (training only): pushes ‖V_NN‖² down to enforce theory-dominance
+    nn_norm_sq = (V_nn_scaled ** 2).mean()
 
     # ---- diagnostic ----
     with torch.no_grad():
@@ -167,13 +191,19 @@ def forward_cs(
             "lambda_b_std": float(rum.lambda_per_borough.std()),
             "lambda_b_min": float(rum.lambda_per_borough.min()),
             "lambda_b_max": float(rum.lambda_per_borough.max()),
-            "blend": float(blend) if blend is not None else None,
+            "blend": float(rum.gnn_blend) if rum.gnn_blend is not None else None,
+            "gnn_residual_scale": float(rum.gnn_residual_scale) if rum.gnn_residual_scale is not None else None,
+            "gnn_mode": rum.gnn_mode,
+            "delta_measured": delta_measured,
+            "rum_rms": float(rum_rms),
+            "nn_rms": float(nn_rms),
         }
 
     return {
         "log_P_D": log_P_D,
         "nll_dest": nll_dest,
         "ce_mode": ce_mode,
+        "nn_norm_sq": nn_norm_sq,
         "diagnostic": diagnostic,
     }
 
@@ -195,6 +225,12 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--blend-max", type=float, default=1.0)
+    ap.add_argument("--gnn-mode", choices=["convex", "residual"], default="convex",
+                    help="convex: V=(1-δ)V_RUM+δ V_NN (legacy v3b/c). "
+                         "residual: V=V_RUM+w·V_NN (Wang TB-ResNet original).")
+    ap.add_argument("--gnn-residual-scale-init", type=float, default=0.1)
+    ap.add_argument("--lambda-nn-norm", type=float, default=0.0,
+                    help="L2 penalty on ‖V_NN‖² to enforce Wang Path A (δ_measured < 0.30)")
     ap.add_argument("--lambda-kl", type=float, default=1.0)
     ap.add_argument("--kl-warmup-epochs", type=int, default=15)
     ap.add_argument("--lr-theta", type=float, default=1e-3)
@@ -227,13 +263,14 @@ def main():
     # Fall back to raw if not present (older aux files).
     use_z = all(k in aux.files for k in ("log_W_z", "log_M_z", "log_D_z", "match_z", "income_z"))
     if use_z:
-        match_prob = torch.from_numpy(aux["match_z"]).float()
+        # match_prob: keep RAW [0, ~0.4] for multiplicative Cervero
+        # (γ_effective = γ + δ · match_raw in V_upper)
+        match_prob = torch.from_numpy(aux["match_prob"]).float()
         log_M_j = torch.from_numpy(aux["log_M_z"]).float()
         log_W_j = torch.from_numpy(aux["log_W_z"]).float()
         log_D_j = torch.from_numpy(aux["log_D_z"]).float()
         income_score = torch.from_numpy(aux["income_z"]).float()
-        print(f"v3 aux loaded (Z-SCORED features): all mean≈0 std≈1")
-        print(f"  raw scaling factors stored as log_W_mean/std etc. for paper reporting")
+        print(f"v3 aux loaded: log_*_z (z-scored) for additive terms, match_prob RAW for multiplicative")
     else:
         match_prob = torch.from_numpy(aux["match_prob"]).float()
         log_M_j = torch.from_numpy(aux["log_M_j"]).float()
@@ -297,7 +334,10 @@ def main():
         n_modes=M, n_boroughs=n_boroughs,
         lambda_init=args.lambda_init, lambda_eps_min=args.lambda_eps_min,
         use_gnn_blend=True, gnn_blend_init=0.5, blend_max=args.blend_max,
+        gnn_mode=args.gnn_mode,
+        gnn_residual_scale_init=args.gnn_residual_scale_init,
     ).to(device)
+    print(f"        GNN mode: {args.gnn_mode}  λ_nn_norm: {args.lambda_nn_norm}")
 
     print(f"\n[train] starting: seed={args.seed} epochs={args.epochs} "
           f"blend_max={args.blend_max} λ_kl={args.lambda_kl} kl_warmup={args.kl_warmup_epochs}")
@@ -330,7 +370,9 @@ def main():
             t_per_mode, mode_names, log_d_ij, match_prob, log_M_j, log_W_j, log_D_j,
             income_score, pct_kids, mean_cars, pi_m_pair, grid_borough_idx, observed_OD, train_mask,
         )
-        loss = out["nll_dest"] + kl_weight * out["ce_mode"]
+        loss = (out["nll_dest"]
+                + kl_weight * out["ce_mode"]
+                + args.lambda_nn_norm * out["nn_norm_sq"])
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
             list(encoder.parameters()) + list(rum.parameters()), 1.0
@@ -358,13 +400,18 @@ def main():
         })
 
         if args.verbose or ep % 5 == 0 or ep == args.epochs - 1:
-            blend_str = f"δ={diag['blend']:.3f}" if diag['blend'] is not None else "δ=n/a"
+            if diag['gnn_mode'] == 'residual':
+                gnn_str = (f"w_NN={diag['gnn_residual_scale']:.3f} "
+                           f"δ_meas={diag['delta_measured']:.3f} "
+                           f"(rum/nn rms {diag['rum_rms']:.2f}/{diag['nn_rms']:.2f})")
+            else:
+                gnn_str = f"δ={diag['blend']:.3f}" if diag['blend'] is not None else "δ=n/a"
             print(f"ep {ep:3d} | tnll {out['nll_dest'].item():.3f} | "
                   f"vnll {val_nll:.3f} | cpc {val_cpc:.3f} | klw {kl_weight:.2f} | "
                   f"α={diag['alpha_wage']:+.3f} γ={diag['gamma_M']:+.3f} ν={diag['nu_D']:+.3f} "
                   f"δ_m={diag['delta_match']:+.3f} | β_t,0={diag['beta_t_mean']:+.3f} "
                   f"β_t,1={diag['beta_t_slope_mean']:+.4f} | "
-                  f"λ_μ={diag['lambda_b_mean']:.3f} | {blend_str}")
+                  f"λ_μ={diag['lambda_b_mean']:.3f} | {gnn_str}")
 
         if val_nll < best_val - 1e-4:
             best_val = val_nll
@@ -428,8 +475,12 @@ def main():
     print(f"  theta_kids     = {final_diag.get('theta_kids_per_mode')}  (per-mode pct_kids coef)")
     print(f"  theta_cars     = {final_diag.get('theta_cars_per_mode')}  (per-mode mean_cars coef)")
     print(f"  λ_b mean/std   = {final_diag['lambda_b_mean']:.3f} / {final_diag['lambda_b_std']:.3f}")
-    if final_diag["blend"] is not None:
-        print(f"  blend (δ_GNN)  = {final_diag['blend']:.4f}  (v3a 0.437)")
+    if final_diag.get("gnn_mode") == "residual":
+        print(f"  w_NN (scale)   = {final_diag['gnn_residual_scale']:.4f}  (Wang TB-ResNet additive)")
+        print(f"  δ_measured     = {final_diag['delta_measured']:.4f}  (=‖V_NN‖/(‖V_RUM‖+‖V_NN‖); <0.30 = Path A)")
+        print(f"  RUM/NN RMS     = {final_diag['rum_rms']:.4f} / {final_diag['nn_rms']:.4f}")
+    elif final_diag["blend"] is not None:
+        print(f"  blend (δ_GNN)  = {final_diag['blend']:.4f}  (v3a 0.437, legacy convex)")
     print(f"  saved to {out_path}")
 
 
