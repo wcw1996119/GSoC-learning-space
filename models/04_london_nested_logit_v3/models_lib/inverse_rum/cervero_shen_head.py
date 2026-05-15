@@ -129,6 +129,13 @@ class CerveroShenHead(nn.Module):
         tier_init_scale: float = 0.0,    # 0 = symmetric init (collapse-prone);
                                           # >0 = tier k gets base × (1 + k·scale), breaks symmetry
                                           # towards lit-expected behavioral gradient
+        use_push_pull: bool = False,     # origin labor surplus × dest M_j interaction (push-pull gravity)
+        xi_push_pull_init: float = 0.0,  # free real init for push×pull coefficient
+        use_self_loop_boost: bool = False,  # per-(origin borough, hour) intra-zone bias
+        n_hours: int = 24,                  # T (used only if use_self_loop_boost)
+        n_busy_dest: int = 0,               # K > 0: top-K busy destinations get
+                                            # learnable per-hour boost (Option 2 — finer
+                                            # than borough-level self-loop boost)
     ):
         super().__init__()
         self.n_modes = n_modes
@@ -141,6 +148,7 @@ class CerveroShenHead(nn.Module):
         self.use_match_gate = bool(use_match_gate)
         self.use_tier_mixture = bool(use_tier_mixture)
         self.n_income_tiers = int(n_tiers)
+        self.use_push_pull = bool(use_push_pull)
 
         # V_upper destination-attractor params (α, γ, ν, δ_match)
         # If use_tier_mixture: each becomes (n_tiers,) tensor for tier-specific RUM
@@ -170,6 +178,44 @@ class CerveroShenHead(nn.Module):
 
         # δ (match_prob) — enforced >= 0 via softplus
         self.raw_delta_match = nn.Parameter(_tier_init(delta_match_init, +1))
+
+        # Push-pull cross term: V += ξ · push_i · log_M_j
+        #   push_i = log(workers reaching i) - log(jobs at i) = labor surplus indicator
+        #   Lit anchor: gravity model push-pull (Wilson 1967, Schwanen 2003)
+        #   ξ free real (sign learned from data); expected ξ > 0 if labor surplus
+        #   amplifies preference for large-M_j destinations.
+        if self.use_push_pull:
+            self.xi_push_pull = nn.Parameter(torch.tensor(float(xi_push_pull_init)))
+        else:
+            self.xi_push_pull = None
+
+        # Self-loop hour-of-day boost: per (origin borough, hour) bias for intra-zone
+        # destination choice. Captures e.g. CBD lunch-time pulse where workers go to
+        # destinations within their own borough — gravity model can't see this
+        # because γ·log(M_j) treats self-loop like any other destination.
+        # Residual diag finding: V_dest peak for CBD self-loops should be at midday
+        # (lunch) not evening rush.
+        self.use_self_loop_boost = bool(use_self_loop_boost)
+        if self.use_self_loop_boost:
+            self.self_loop_boost = nn.Parameter(torch.zeros(n_boroughs, n_hours))
+        else:
+            self.self_loop_boost = None
+
+        # Top-K busy destination boost (Option 2)
+        # Borough-level self_loop_boost can't resolve grid-level patterns within
+        # large CBD boroughs (e.g. b=32 covers 816, 770, 726). This adds a
+        # learnable per-(busy destination grid, hour) bias.
+        # Implementation: dest_to_k_idx is a (N,) buffer mapping grid → busy_idx
+        # (or -1 if not busy). busy_dest_boost has shape (K, T).
+        # V_dest[t, i, j] += busy_dest_boost[dest_to_k[j], t]  (zero for non-busy j)
+        self.n_busy_dest = int(n_busy_dest)
+        if self.n_busy_dest > 0:
+            self.busy_dest_boost = nn.Parameter(torch.zeros(self.n_busy_dest, n_hours))
+            # Will be filled by trainer via set_busy_dest_index() after data load
+            self.register_buffer("busy_dest_to_k_idx", torch.full((1,), -1, dtype=torch.long))
+        else:
+            self.busy_dest_boost = None
+            self.busy_dest_to_k_idx = None
 
         # β_t,0 per mode (intercept) — enforced < 0 via -softplus
         target_b = -beta_t_init
@@ -237,6 +283,18 @@ class CerveroShenHead(nn.Module):
         else:
             self.raw_gate_steepness = None
             self.gate_threshold = None
+
+    def set_busy_dest_index(self, dest_to_k: torch.Tensor):
+        """Called by trainer to register which grids are top-K busy destinations.
+        dest_to_k: (N,) long tensor; entry = busy_idx in [0, K) or -1 if not busy.
+        Re-allocates buffer to full N-size."""
+        assert self.n_busy_dest > 0, "n_busy_dest=0; cannot set index"
+        assert int((dest_to_k >= 0).sum()) == self.n_busy_dest, \
+            f"dest_to_k has {int((dest_to_k>=0).sum())} busy entries; expected {self.n_busy_dest}"
+        # Replace the (1,) placeholder buffer with the real (N,) one
+        device = self.busy_dest_to_k_idx.device
+        delattr(self, "busy_dest_to_k_idx")
+        self.register_buffer("busy_dest_to_k_idx", dest_to_k.to(device).long())
 
     # =============================================================================
     # Transformed parameter properties
@@ -344,6 +402,30 @@ class CerveroShenHead(nn.Module):
                 "gnn_blend": float(self.gnn_blend) if self.gnn_blend is not None else None,
                 "gnn_residual_scale": float(self.gnn_residual_scale) if self.gnn_residual_scale is not None else None,
                 "gnn_mode": self.gnn_mode,
+                "use_push_pull": self.use_push_pull,
+                "xi_push_pull": float(self.xi_push_pull) if self.xi_push_pull is not None else None,
+                "use_self_loop_boost": self.use_self_loop_boost,
+                "self_loop_boost_mean_per_hour": (
+                    self.self_loop_boost.mean(dim=0).tolist()
+                    if self.self_loop_boost is not None else None
+                ),
+                "self_loop_boost_max_per_borough": (
+                    self.self_loop_boost.max(dim=1).values.tolist()
+                    if self.self_loop_boost is not None else None
+                ),
+                "n_busy_dest": self.n_busy_dest,
+                "busy_dest_boost_mean_per_hour": (
+                    self.busy_dest_boost.mean(dim=0).tolist()
+                    if self.busy_dest_boost is not None else None
+                ),
+                "busy_dest_boost_per_dest_per_hour": (
+                    self.busy_dest_boost.tolist()
+                    if self.busy_dest_boost is not None else None
+                ),
+                "busy_dest_grid_idx": (
+                    [int(i) for i in (self.busy_dest_to_k_idx >= 0).nonzero(as_tuple=True)[0].tolist()]
+                    if self.busy_dest_to_k_idx is not None and self.busy_dest_to_k_idx.numel() > 1 else None
+                ),
                 "use_match_gate": self.use_match_gate,
                 "gate_steepness": float(self.gate_steepness) if self.gate_steepness is not None else None,
                 "gate_threshold": float(self.gate_threshold) if self.gate_threshold is not None else None,

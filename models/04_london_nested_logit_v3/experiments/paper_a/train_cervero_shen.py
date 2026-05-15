@@ -46,6 +46,15 @@ _spec.loader.exec_module(_mod)
 CerveroShenHead = _mod.CerveroShenHead
 
 from models_lib.inverse_rum.dual_branch_encoder import DualBranchEncoder
+# v3-local: GAT-based encoder (Step 3) — load by absolute path so it doesn't
+# collide with v2's already-cached models_lib.inverse_rum namespace.
+_spec_gat = importlib.util.spec_from_file_location(
+    "v3_dual_branch_gat_encoder",
+    V3_ROOT / "models_lib" / "inverse_rum" / "dual_branch_gat_encoder.py",
+)
+_mod_gat = importlib.util.module_from_spec(_spec_gat)
+_spec_gat.loader.exec_module(_mod_gat)
+DualBranchGATEncoder = _mod_gat.DualBranchGATEncoder
 from models_lib.inverse_rum.dual_branch_mixture_trainer import make_distance_aware_mode_share
 from experiments.paper_a.compare_four_variants import load_data
 
@@ -133,6 +142,50 @@ def forward_cs(
     else:
         match_signal = match_prob                                       # raw linear
 
+    # Push-pull cross term (if enabled): V += ξ · push_i · log_M_j
+    # push_i = log_D_j[i] - log_M_j[i] = labor surplus at origin i
+    # (high D_j at i = many workers reach i; low M_j at i = few jobs at i → push out)
+    if rum.use_push_pull:
+        push_origin = (log_D_j - log_M_j)                                # (N,) labor surplus at each node
+        V_push_pull = (rum.xi_push_pull
+                       * push_origin.view(1, N, 1)
+                       * log_M_j.view(1, 1, N))                          # (1, N, N) broadcast on T
+    else:
+        V_push_pull = None
+
+    # Self-loop hour-of-day boost (if enabled):
+    #   V[t, i, j] += β[b(i), t]  if i == j else 0
+    # Captures CBD lunch-time pulse — workers go to destinations within their own
+    # borough at midday, which gravity model (γ·log_M_j alone) can't see.
+    # Residual diag showed CBD self-loops have peak at midday, not evening rush.
+    if rum.use_self_loop_boost:
+        T_t = log_iv.shape[0]  # T
+        boost = rum.self_loop_boost                                       # (n_boroughs, T)
+        boost_per_node = boost[grid_borough_idx]                          # (N, T)
+        boost_per_t_per_i = boost_per_node.t()                            # (T, N)
+        eye = torch.eye(N, dtype=boost.dtype, device=boost.device).unsqueeze(0)  # (1, N, N)
+        V_self_loop = boost_per_t_per_i.unsqueeze(-1) * eye               # (T, N, N), zero off-diagonal
+    else:
+        V_self_loop = None
+
+    # Top-K busy destination boost (Option 2, finer than borough-level):
+    #   V[t, i, j] += busy_dest_boost[k(j), t]   if j in top-K busy else 0
+    # Captures grid-level CBD destination patterns within busy boroughs that
+    # borough-level self_loop_boost cannot resolve (e.g. 816→726 under-prediction).
+    if rum.n_busy_dest > 0 and rum.busy_dest_boost is not None:
+        boost_kT = rum.busy_dest_boost                                    # (K, T)
+        dest_to_k = rum.busy_dest_to_k_idx                                # (N,) in [-1, K-1]
+        is_busy = (dest_to_k >= 0)                                        # (N,) bool
+        k_clamped = dest_to_k.clamp(min=0)                                # (N,) — non-busy mapped to 0, masked later
+        # Index busy_dest_boost by destination idx
+        boost_per_j = boost_kT[k_clamped]                                 # (N, T)
+        # Zero out non-busy destinations
+        boost_per_j = boost_per_j * is_busy.float().unsqueeze(-1)         # (N, T)
+        boost_per_tj = boost_per_j.t()                                    # (T, N) — per (t, dest j)
+        V_busy_dest = boost_per_tj.unsqueeze(1)                           # (T, 1, N) broadcast on origin i
+    else:
+        V_busy_dest = None
+
     if rum.use_tier_mixture:
         # ---- Tier mixture path: compute V_upper_k per tier, then marginalize ----
         K = rum.n_income_tiers                                          # 3
@@ -144,6 +197,12 @@ def forward_cs(
             V_M_k = gamma_eff_k * log_M_j.view(1, N)                    # (N, N)
             V_other_k = (alpha_w[k] * log_W_j + nu_D[k] * log_D_j).view(1, N)  # (1, N)
             V_rum_k = (V_M_k + V_other_k).unsqueeze(0) + lam_view * IV_mode    # (T, N, N)
+            if V_push_pull is not None:
+                V_rum_k = V_rum_k + V_push_pull                          # broadcast (1, N, N) → (T, N, N)
+            if V_self_loop is not None:
+                V_rum_k = V_rum_k + V_self_loop                          # (T, N, N) self-loop boost
+            if V_busy_dest is not None:
+                V_rum_k = V_rum_k + V_busy_dest                          # (T, 1, N) broadcast on i
             V_uppers.append(V_rum_k)
         V_uppers_stacked = torch.stack(V_uppers, dim=0)                  # (K, T, N, N)
         V_rum_dest = V_uppers_stacked                                    # downstream knows tier dim
@@ -154,6 +213,12 @@ def forward_cs(
         V_other = (alpha_w * log_W_j.view(1, 1, N)
                    + nu_D * log_D_j.view(1, 1, N))                       # (1, 1, N)
         V_rum_dest = (V_M.unsqueeze(0) + V_other + lam_view * IV_mode)   # (T, N, N)
+        if V_push_pull is not None:
+            V_rum_dest = V_rum_dest + V_push_pull
+        if V_self_loop is not None:
+            V_rum_dest = V_rum_dest + V_self_loop
+        if V_busy_dest is not None:
+            V_rum_dest = V_rum_dest + V_busy_dest
 
     V_gnn = V_gnn_jt.view(T, 1, N).expand(T, N, N)                     # (T, N, N)
 
@@ -242,6 +307,8 @@ def forward_cs(
             "delta_measured": delta_measured,
             "rum_rms": float(rum_rms),
             "nn_rms": float(nn_rms),
+            "use_push_pull": rum.use_push_pull,
+            "xi_push_pull": float(rum.xi_push_pull) if rum.xi_push_pull is not None else None,
         }
 
     return {
@@ -303,6 +370,34 @@ def main():
     ap.add_argument("--tier-init-scale", type=float, default=0.0,
                     help="Tier mixture init perturbation. 0=symmetric (collapse-prone), "
                          "0.5 = tier k init = base · (1 + 0.5·k). Breaks symmetry so tiers can differentiate.")
+    ap.add_argument("--use-weather", action="store_true",
+                    help="Append weather (24,1725,6) features to X_dynamic (z-scored). "
+                         "Lets GNN see hourly weather signal for richer dynamic representation.")
+    ap.add_argument("--use-push-pull", action="store_true",
+                    help="Add push-pull cross term: V += ξ · (log_D_i - log_M_i) · log_M_j. "
+                         "Origin labor surplus × destination jobs gravity interaction.")
+    ap.add_argument("--use-self-loop-boost", action="store_true",
+                    help="Add per-(origin borough, hour) bias to V[i,i,t] self-loop. "
+                         "Captures CBD lunch-pulse where intra-borough commute peaks at midday "
+                         "instead of evening rush (residual diag finding).")
+    ap.add_argument("--self-loop-l2", type=float, default=1e-3,
+                    help="L2 regularization on self-loop boost params (33×24=792). "
+                         "Larger = more shrinkage to zero. Default 1e-3 (modest).")
+    ap.add_argument("--n-busy-dest", type=int, default=0,
+                    help="K > 0 enables top-K busy destination hour boost (grid-level, "
+                         "finer than borough self-loop). Captures CBD grid-specific "
+                         "attraction patterns. Default 0 (off). Recommended K=50.")
+    ap.add_argument("--busy-dest-l2", type=float, default=1e-3,
+                    help="L2 regularization on busy_dest_boost params (K×24).")
+    ap.add_argument("--use-gat", action="store_true",
+                    help="Replace GraphSAGE with GAT (multi-head attention) in encoder. "
+                         "Step 3 of 3-step GNN improvement plan.")
+    ap.add_argument("--gat-heads", type=int, default=4,
+                    help="Number of attention heads for GAT layers (default 4).")
+    ap.add_argument("--dump-residual-diag", action="store_true",
+                    help="After final eval, compute per-hour / per-borough / per-distance / "
+                         "per-flow-bin CPC breakdowns + top-30 over/under-predicted cells. "
+                         "Saved into result JSON to find data ceiling shape.")
     ap.add_argument("--lambda-kl", type=float, default=1.0)
     ap.add_argument("--kl-warmup-epochs", type=int, default=15)
     ap.add_argument("--lr-theta", type=float, default=1e-3)
@@ -390,6 +485,25 @@ def main():
     train_mask = d["train_mask"].to(device).bool()
     val_mask = d["val_mask"].to(device).bool()
     log_d_ij = d["log_d"].to(device).float()
+
+    # Optional: append weather (24, 1725, 6) — z-scored — to X_dynamic
+    if args.use_weather:
+        w_path = V2_ROOT / "data" / "processed" / "london_hourly_weather.npz"
+        if w_path.exists():
+            weather_raw = np.load(w_path)["weather_TNF"].astype(np.float32)   # (T, N, 6)
+            # z-score per feature across (T, N)
+            w_mean = weather_raw.mean(axis=(0, 1), keepdims=True)
+            w_std = weather_raw.std(axis=(0, 1), keepdims=True) + 1e-9
+            weather_z = (weather_raw - w_mean) / w_std
+            print(f"  weather loaded: shape={weather_raw.shape}, z-scored")
+            print(f"    feature std spread (z): {weather_z.std(axis=(0,1)).tolist()}")
+            X_dynamic = torch.cat(
+                [X_dynamic, torch.from_numpy(weather_z).to(device).float()],
+                dim=-1,
+            )
+            print(f"  X_dynamic now {tuple(X_dynamic.shape)} (was 25-dim, +6 weather = 31-dim)")
+        else:
+            print(f"  WARNING: --use-weather but {w_path} not found")
     match_prob = match_prob.to(device)
     log_M_j = log_M_j.to(device)
     log_W_j = log_W_j.to(device)
@@ -409,10 +523,18 @@ def main():
             tens = tens.unsqueeze(0).expand(T, N, N).contiguous()
         t_per_mode[m] = tens
 
-    encoder = DualBranchEncoder(
-        static_dim=X_static.shape[1], dyn_dim=X_dynamic.shape[-1],
-        hidden_dim=32, gru_hidden=32, n_sage_layers=2, tcn_kernels=(3, 5, 7),
-    ).to(device)
+    if args.use_gat:
+        encoder = DualBranchGATEncoder(
+            static_dim=X_static.shape[1], dyn_dim=X_dynamic.shape[-1],
+            hidden_dim=32, gru_hidden=32, n_gat_layers=2,
+            gat_heads=args.gat_heads, tcn_kernels=(3, 5, 7),
+        ).to(device)
+        print(f"        encoder: DualBranchGATEncoder (heads={args.gat_heads})")
+    else:
+        encoder = DualBranchEncoder(
+            static_dim=X_static.shape[1], dyn_dim=X_dynamic.shape[-1],
+            hidden_dim=32, gru_hidden=32, n_sage_layers=2, tcn_kernels=(3, 5, 7),
+        ).to(device)
     rum = CerveroShenHead(
         n_modes=M, n_boroughs=n_boroughs, n_tiers=args.n_income_tiers,
         lambda_init=args.lambda_init, lambda_eps_min=args.lambda_eps_min,
@@ -424,7 +546,26 @@ def main():
         gate_threshold_init=args.gate_threshold_init,
         use_tier_mixture=args.use_tier_mixture,
         tier_init_scale=args.tier_init_scale,
+        use_push_pull=args.use_push_pull,
+        use_self_loop_boost=args.use_self_loop_boost,
+        n_hours=24,
+        n_busy_dest=args.n_busy_dest,
     ).to(device)
+
+    # If busy-dest boost enabled: compute top-K busy destinations from training data
+    # (total observed inflow per destination), register on head as a buffer.
+    if args.n_busy_dest > 0:
+        K = args.n_busy_dest
+        with torch.no_grad():
+            # Rank destinations by train-origin inflow only (avoid val info leak).
+            train_inflow = (observed_OD * train_mask.view(1, N, 1).float()).sum(dim=(0, 1))
+            top_idx = torch.argsort(train_inflow, descending=True)[:K]    # (K,)
+            dest_to_k = torch.full((N,), -1, dtype=torch.long, device=device)
+            dest_to_k[top_idx] = torch.arange(K, device=device)
+        rum.set_busy_dest_index(dest_to_k)
+        print(f"        busy-dest boost: top-{K} destinations registered "
+              f"(train inflow range [{float(train_inflow[top_idx[-1]]):.0f}, "
+              f"{float(train_inflow[top_idx[0]]):.0f}])")
     print(f"        GNN mode: {args.gnn_mode}  λ_nn_norm: {args.lambda_nn_norm}")
     if args.use_match_gate:
         print(f"        Match gate: ON (k init {args.gate_steepness_init}, τ init {args.gate_threshold_init})")
@@ -525,6 +666,10 @@ def main():
         loss = (out["nll_dest"]
                 + kl_weight * out["ce_mode"]
                 + args.lambda_nn_norm * out["nn_norm_sq"])
+        if rum.use_self_loop_boost and args.self_loop_l2 > 0:
+            loss = loss + args.self_loop_l2 * (rum.self_loop_boost ** 2).mean()
+        if rum.n_busy_dest > 0 and args.busy_dest_l2 > 0:
+            loss = loss + args.busy_dest_l2 * (rum.busy_dest_boost ** 2).mean()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
             list(encoder.parameters()) + list(rum.parameters()), 1.0
@@ -602,6 +747,122 @@ def main():
         final_diag = out_final["diagnostic"]
         full_snapshot = rum.snapshot()
 
+        # ===================================================================
+        # Residual diagnostic — find where the model fails (CPC ceiling shape)
+        # ===================================================================
+        residual_diag = None
+        if args.dump_residual_diag:
+            print("\n[residual-diag] computing breakdowns...")
+            P_full = out_final["log_P_D"].exp()                            # (T, N, N)
+            row_sum_full = observed_OD.sum(dim=2, keepdim=True)            # (T, N, 1)
+            pred_full = P_full * row_sum_full                              # (T, N, N) — flow
+
+            def _cpc_subset(p, o):
+                num = 2.0 * torch.minimum(p, o).sum()
+                den = (p.sum() + o.sum()).clamp(min=1.0)
+                return float(num / den)
+
+            T_, N_ = P_full.shape[0], P_full.shape[1]
+
+            # Per-hour CPC (val origins only)
+            per_hour = []
+            for tt in range(T_):
+                per_hour.append(_cpc_subset(pred_full[tt, val_mask], observed_OD[tt, val_mask]))
+
+            # Per-borough CPC (val origins grouped by their borough)
+            per_borough = {}
+            for b in range(rum.n_boroughs):
+                mb = val_mask & (grid_borough_idx == b)
+                if int(mb.sum()) > 0:
+                    per_borough[int(b)] = {
+                        "cpc": _cpc_subset(pred_full[:, mb], observed_OD[:, mb]),
+                        "n_val_origins": int(mb.sum()),
+                    }
+
+            # Per-distance-bin CPC
+            n_bins = 10
+            d_min, d_max = float(log_d_ij.min()), float(log_d_ij.max())
+            edges = torch.linspace(d_min, d_max, n_bins + 1, device=device)
+            val_mask_3d = val_mask.view(1, N_, 1).expand(T_, N_, N_)
+            per_dist = []
+            for k in range(n_bins):
+                # (i, j) pairs in this distance bin
+                pair_mask = (log_d_ij >= edges[k]) & (log_d_ij < edges[k + 1])
+                # broadcast to (T, N, N) and AND with val origin mask
+                cell_mask = pair_mask.unsqueeze(0) & val_mask_3d
+                if int(cell_mask.sum()) > 0:
+                    per_dist.append({
+                        "bin": k,
+                        "log_d_low": float(edges[k]),
+                        "log_d_high": float(edges[k + 1]),
+                        "cpc": _cpc_subset(pred_full[cell_mask], observed_OD[cell_mask]),
+                        "n_cells": int(cell_mask.sum()),
+                        "obs_mean": float(observed_OD[cell_mask].mean()),
+                    })
+
+            # Per-flow-magnitude bin CPC (val cells only)
+            obs_val = observed_OD * val_mask_3d.float()
+            obs_nz = obs_val[obs_val > 0]
+            per_flow = []
+            if obs_nz.numel() > 0:
+                pcts = torch.quantile(obs_nz, torch.tensor([0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 0.99, 1.0], device=device))
+                for k in range(len(pcts) - 1):
+                    bin_mask = (obs_val >= pcts[k]) & (obs_val < pcts[k + 1])
+                    if int(bin_mask.sum()) > 0:
+                        per_flow.append({
+                            "bin": k,
+                            "flow_low": float(pcts[k]),
+                            "flow_high": float(pcts[k + 1]),
+                            "cpc": _cpc_subset(pred_full[bin_mask], observed_OD[bin_mask]),
+                            "n_cells": int(bin_mask.sum()),
+                        })
+
+            # Top-30 worst over- and under-predicted cells (val only)
+            residual = (pred_full - observed_OD) * val_mask_3d.float()    # (T, N, N)
+            over_vals, over_idx = torch.topk(residual.flatten(), k=30)     # most positive (over-pred)
+            under_vals, under_idx = torch.topk((-residual).flatten(), k=30)  # most negative (under-pred)
+            N2 = N_ * N_
+
+            def _unflat(idx):
+                tt = int(idx // N2)
+                ii = int((idx % N2) // N_)
+                jj = int(idx % N_)
+                return tt, ii, jj
+
+            def _cell_record(idx):
+                tt, ii, jj = _unflat(idx)
+                return {
+                    "t": tt, "i": ii, "j": jj,
+                    "pred": float(pred_full[tt, ii, jj]),
+                    "obs": float(observed_OD[tt, ii, jj]),
+                    "residual": float(pred_full[tt, ii, jj] - observed_OD[tt, ii, jj]),
+                    "log_d": float(log_d_ij[ii, jj]),
+                    "borough_i": int(grid_borough_idx[ii]),
+                    "borough_j": int(grid_borough_idx[jj]),
+                }
+
+            top_over = [_cell_record(i) for i in over_idx.tolist()]
+            top_under = [_cell_record(i) for i in under_idx.tolist()]
+
+            residual_diag = {
+                "per_hour_cpc": per_hour,
+                "per_borough_cpc": per_borough,
+                "per_distance_bin": per_dist,
+                "per_flow_bin": per_flow,
+                "top_over_predicted": top_over,
+                "top_under_predicted": top_under,
+                "n_val_origins": int(val_mask.sum()),
+                "T": int(T_),
+                "N": int(N_),
+            }
+            print(f"  per-hour CPC range: [{min(per_hour):.3f}, {max(per_hour):.3f}]")
+            print(f"  per-borough CPC range: [{min(b['cpc'] for b in per_borough.values()):.3f}, "
+                  f"{max(b['cpc'] for b in per_borough.values()):.3f}] ({len(per_borough)} boroughs with val origins)")
+            print(f"  per-distance-bin CPC range: [{min(d['cpc'] for d in per_dist):.3f}, "
+                  f"{max(d['cpc'] for d in per_dist):.3f}]")
+            print(f"  per-flow-bin CPC range: [{min(f['cpc'] for f in per_flow):.3f}, "
+                  f"{max(f['cpc'] for f in per_flow):.3f}]")
+
     elapsed = time.time() - t0
     result = {
         "config": "cervero_shen_smoke",
@@ -618,6 +879,7 @@ def main():
         "v2_baseline_cpc": 0.485,
         "v3a_dm_nested_cpc": 0.534,
         "history": history,
+        "residual_diag": residual_diag,
     }
     out_path = V3_ROOT / args.out
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -642,6 +904,9 @@ def main():
     print(f"  theta_kids     = {final_diag.get('theta_kids_per_mode')}  (per-mode pct_kids coef)")
     print(f"  theta_cars     = {final_diag.get('theta_cars_per_mode')}  (per-mode mean_cars coef)")
     print(f"  λ_b mean/std   = {final_diag['lambda_b_mean']:.3f} / {final_diag['lambda_b_std']:.3f}")
+    if final_diag.get("use_push_pull"):
+        print(f"  xi_push_pull   = {final_diag['xi_push_pull']:+.4f}  "
+              f"(origin labor surplus × dest M_j; expected > 0 if push amplifies pull)")
     if final_diag.get("gnn_mode") == "residual":
         print(f"  w_NN (scale)   = {final_diag['gnn_residual_scale']:.4f}  (Wang TB-ResNet additive)")
         print(f"  δ_measured     = {final_diag['delta_measured']:.4f}  (=‖V_NN‖/(‖V_RUM‖+‖V_NN‖); <0.30 = Path A)")
