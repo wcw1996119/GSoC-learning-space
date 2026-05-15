@@ -62,6 +62,8 @@ def forward_cs(
     log_W_j: torch.Tensor,           # (N,) — wage
     log_D_j: torch.Tensor,           # (N,) — Shen competition
     income_score_per_origin: torch.Tensor,  # (N,)
+    pct_kids_per_origin: torch.Tensor,      # (N,) — % households with dependent children
+    mean_cars_per_origin: torch.Tensor,     # (N,) — mean cars per household
     pi_m_pair: torch.Tensor,
     grid_borough_idx: torch.Tensor,
     observed_OD: torch.Tensor,
@@ -80,6 +82,8 @@ def forward_cs(
     beta_t_slope = rum.beta_t_slope_per_mode                           # (M,) slope on log_d, neg
     asc = rum.asc_per_mode                                             # (M,)
     theta_inc = rum.theta_inc_per_mode                                 # (M,)
+    theta_kids = rum.theta_kids_per_mode                               # (M,)
+    theta_cars = rum.theta_cars_per_mode                               # (M,)
     log_d_T = log_d_ij.unsqueeze(0)                                    # (1, N, N) broadcast
 
     log_iv = None
@@ -89,10 +93,13 @@ def forward_cs(
         t_m = t_per_mode[name]                                        # (T, N, N)
         # β_t_m(d) = β_t_m,0 + β_t_m,1 · log_d_ij  → per-pair time-disutility coeff
         beta_t_m_at_d = beta_t[m_idx] + beta_t_slope[m_idx] * log_d_T  # (1, N, N)
-        # V_lower_m(i, j, t) = β_t_m(d) · t + ASC_m + θ_inc_m · income_i
+        # V_lower_m(i, j, t) = β_t_m(d) · t + ASC_m + Σ_a θ_a_m · attr_a_i
+        agent_term = (theta_inc[m_idx] * income_score_per_origin
+                      + theta_kids[m_idx] * pct_kids_per_origin
+                      + theta_cars[m_idx] * mean_cars_per_origin).view(1, N, 1)
         V_lower_m = (beta_t_m_at_d * t_m
                      + asc[m_idx]
-                     + theta_inc[m_idx] * income_score_per_origin.view(1, N, 1))  # (T, N, N)
+                     + agent_term)                                     # (T, N, N)
         scaled = V_lower_m / lam_view                                  # (T, N, N)
         if log_iv is None:
             log_iv = scaled
@@ -154,6 +161,8 @@ def forward_cs(
             "beta_t_slope_mean": float(rum.beta_t_slope_per_mode.mean()),
             "asc_per_mode": rum.asc_per_mode.detach().cpu().tolist(),
             "theta_inc_per_mode": rum.theta_inc_per_mode.detach().cpu().tolist(),
+            "theta_kids_per_mode": rum.theta_kids_per_mode.detach().cpu().tolist(),
+            "theta_cars_per_mode": rum.theta_cars_per_mode.detach().cpu().tolist(),
             "lambda_b_mean": float(rum.lambda_per_borough.mean()),
             "lambda_b_std": float(rum.lambda_per_borough.std()),
             "lambda_b_min": float(rum.lambda_per_borough.min()),
@@ -233,6 +242,17 @@ def main():
         income_score = torch.from_numpy(aux["income_score_per_origin"]).float()
         print(f"v3 aux loaded (RAW features, no z-score): coefficients NOT directly comparable")
 
+    # Agent attributes (z-scored if present, else zero-filled placeholder)
+    if "pct_with_kids_z" in aux.files:
+        pct_kids = torch.from_numpy(aux["pct_with_kids_z"]).float()
+        mean_cars = torch.from_numpy(aux["mean_cars_z"]).float()
+        print(f"  agent attributes loaded: pct_with_kids_z, mean_cars_z (z-scored)")
+    else:
+        N_grid = match_prob.shape[0]
+        pct_kids = torch.zeros(N_grid).float()
+        mean_cars = torch.zeros(N_grid).float()
+        print(f"  WARNING: pct_with_kids / mean_cars not in aux, using zero placeholders")
+
     grid_borough_idx = d["grid_borough_idx"].long()
     n_boroughs = int(grid_borough_idx.max().item()) + 1
 
@@ -256,6 +276,8 @@ def main():
     log_W_j = log_W_j.to(device)
     log_D_j = log_D_j.to(device)
     income_score = income_score.to(device)
+    pct_kids = pct_kids.to(device)
+    mean_cars = mean_cars.to(device)
     pi_m_pair = pair_mode_share.to(device).float()
     grid_borough_idx = grid_borough_idx.to(device)
 
@@ -306,7 +328,7 @@ def main():
         out = forward_cs(
             encoder, rum, X_static, X_dynamic, edge_index,
             t_per_mode, mode_names, log_d_ij, match_prob, log_M_j, log_W_j, log_D_j,
-            income_score, pi_m_pair, grid_borough_idx, observed_OD, train_mask,
+            income_score, pct_kids, mean_cars, pi_m_pair, grid_borough_idx, observed_OD, train_mask,
         )
         loss = out["nll_dest"] + kl_weight * out["ce_mode"]
         loss.backward()
@@ -320,7 +342,7 @@ def main():
             out_e = forward_cs(
                 encoder, rum, X_static, X_dynamic, edge_index,
                 t_per_mode, mode_names, log_d_ij, match_prob, log_M_j, log_W_j, log_D_j,
-                income_score, pi_m_pair, grid_borough_idx, observed_OD, val_mask,
+                income_score, pct_kids, mean_cars, pi_m_pair, grid_borough_idx, observed_OD, val_mask,
             )
             val_nll = float(out_e["nll_dest"])
             val_cpc = cpc(out_e["log_P_D"], observed_OD, val_mask)
@@ -366,7 +388,7 @@ def main():
         out_final = forward_cs(
             encoder, rum, X_static, X_dynamic, edge_index,
             t_per_mode, mode_names, log_d_ij, match_prob, log_M_j, log_W_j, log_D_j,
-            income_score, pi_m_pair, grid_borough_idx, observed_OD, val_mask,
+            income_score, pct_kids, mean_cars, pi_m_pair, grid_borough_idx, observed_OD, val_mask,
         )
         final_cpc = cpc(out_final["log_P_D"], observed_OD, val_mask)
         final_diag = out_final["diagnostic"]
@@ -402,6 +424,9 @@ def main():
     print(f"  delta_match    = {final_diag['delta_match']:+.4f}  (match_prob; ≥0 by construction)")
     print(f"  beta_t,0 mean  = {final_diag['beta_t_mean']:+.4f}  (t intercept; ≤0 by construction)")
     print(f"  beta_t,1 mean  = {final_diag['beta_t_slope_mean']:+.4f}  (t slope on log_d; ≤0 by construction)")
+    print(f"  theta_inc      = {final_diag.get('theta_inc_per_mode')}  (per-mode income coef)")
+    print(f"  theta_kids     = {final_diag.get('theta_kids_per_mode')}  (per-mode pct_kids coef)")
+    print(f"  theta_cars     = {final_diag.get('theta_cars_per_mode')}  (per-mode mean_cars coef)")
     print(f"  λ_b mean/std   = {final_diag['lambda_b_mean']:.3f} / {final_diag['lambda_b_std']:.3f}")
     if final_diag["blend"] is not None:
         print(f"  blend (δ_GNN)  = {final_diag['blend']:.4f}  (v3a 0.437)")

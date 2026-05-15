@@ -161,6 +161,12 @@ class CerveroShenHead(nn.Module):
         # θ_inc per mode — free (income × mode interaction)
         self.theta_inc_per_mode = nn.Parameter(torch.full((n_modes,), float(theta_inc_init)))
 
+        # θ_kids per mode — free (household has dep children × mode interaction)
+        self.theta_kids_per_mode = nn.Parameter(torch.zeros(n_modes))
+
+        # θ_cars per mode — free (mean cars per household × mode interaction)
+        self.theta_cars_per_mode = nn.Parameter(torch.zeros(n_modes))
+
         # λ_b per borough — bounded
         s = (lambda_init - lambda_eps_min) / (1.0 - lambda_eps_min)
         raw_l = _inv_sigmoid(s)
@@ -245,6 +251,8 @@ class CerveroShenHead(nn.Module):
                 "beta_t_slope_per_mode": self.beta_t_slope_per_mode.tolist(),
                 "asc_per_mode": self.asc_per_mode.tolist(),
                 "theta_inc_per_mode": self.theta_inc_per_mode.tolist(),
+                "theta_kids_per_mode": self.theta_kids_per_mode.tolist(),
+                "theta_cars_per_mode": self.theta_cars_per_mode.tolist(),
                 "lambda_per_borough": self.lambda_per_borough.tolist(),
                 "lambda_b_mean": float(self.lambda_per_borough.mean()),
                 "lambda_b_std": float(self.lambda_per_borough.std()),
