@@ -1,0 +1,250 @@
+{
+  "config": {
+    "ckpt": "evaluation_outputs/paper_a/v3l_matchcut050_s1.pt",
+    "ckpt_cpc": 0.550144612789154,
+    "N_grids": 1725,
+    "N_instrumented_grids": 349,
+    "instrumented_boroughs": [
+      "Camden",
+      "City of London",
+      "Greenwich",
+      "Hackney",
+      "Hammersmith and Fulham",
+      "Islington",
+      "Kensington and Chelsea",
+      "Lambeth",
+      "Lewisham",
+      "Newham",
+      "Southwark",
+      "Tower Hamlets",
+      "Wandsworth",
+      "Westminster"
+    ]
+  },
+  "path_stats": {
+    "mean": 18.71988074373127,
+    "median": 19.0,
+    "p95": 31.0,
+    "max": 60
+  },
+  "correlations": {
+    "through_mod_vs_raw_all": {
+      "label": "model through-flow vs raw congestion (all grids)",
+      "n": 41400,
+      "pearson": 0.39961835415158736,
+      "spearman": 0.32200503556403787
+    },
+    "through_obs_vs_raw_all": {
+      "label": "obs OD through-flow vs raw congestion (all grids)",
+      "n": 41400,
+      "pearson": 0.38687553266024954,
+      "spearman": 0.29252363802940057
+    },
+    "through_mod_vs_attr_all": {
+      "label": "model through-flow vs commute-attr congestion (all grids)",
+      "n": 41400,
+      "pearson": 0.30285449085676147,
+      "spearman": 0.19719842134349347
+    },
+    "through_obs_vs_attr_all": {
+      "label": "obs OD through-flow vs commute-attr congestion (all grids)",
+      "n": 41400,
+      "pearson": 0.35863163710535695,
+      "spearman": 0.23073881232901264
+    },
+    "through_mod_vs_raw_inst": {
+      "label": "model through-flow vs raw congestion (instrumented boroughs)",
+      "n": 8376,
+      "pearson": 0.5225265626561024,
+      "spearman": 0.7759171416660163
+    },
+    "through_obs_vs_raw_inst": {
+      "label": "obs OD through-flow vs raw congestion (instrumented boroughs)",
+      "n": 8376,
+      "pearson": 0.4485810756366944,
+      "spearman": 0.7121480762414664
+    },
+    "through_mod_vs_attr_inst": {
+      "label": "model through-flow vs commute-attr congestion (instrumented) \u2190 MAIN",
+      "n": 8376,
+      "pearson": 0.42423101322697926,
+      "spearman": 0.7600502616224696
+    },
+    "through_obs_vs_attr_inst": {
+      "label": "obs OD through-flow vs commute-attr congestion (instrumented)",
+      "n": 8376,
+      "pearson": 0.4416073891043771,
+      "spearman": 0.7565842738402224
+    }
+  },
+  "per_hour_inst_attributed": [
+    {
+      "hour": 0,
+      "obs_throughflow_vs_attr_pearson": 0.35977861605121003,
+      "mod_throughflow_vs_attr_pearson": 0.3746565676463814,
+      "commute_share": 0.10138248845590264,
+      "n": 349
+    },
+    {
+      "hour": 1,
+      "obs_throughflow_vs_attr_pearson": -0.017658757929856477,
+      "mod_throughflow_vs_attr_pearson": -0.039035591734596566,
+      "commute_share": 0.12359550554854185,
+      "n": 349
+    },
+    {
+      "hour": 2,
+      "obs_throughflow_vs_attr_pearson": -0.24451786428086802,
+      "mod_throughflow_vs_attr_pearson": -0.23476643674881653,
+      "commute_share": 0.21999999978,
+      "n": 349
+    },
+    {
+      "hour": 3,
+      "obs_throughflow_vs_attr_pearson": -0.309390745344756,
+      "mod_throughflow_vs_attr_pearson": -0.3175352327386469,
+      "commute_share": 0.3606557374092985,
+      "n": 349
+    },
+    {
+      "hour": 4,
+      "obs_throughflow_vs_attr_pearson": -0.2717115698612911,
+      "mod_throughflow_vs_attr_pearson": -0.3047893578250662,
+      "commute_share": 0.31976744176750943,
+      "n": 349
+    },
+    {
+      "hour": 5,
+      "obs_throughflow_vs_attr_pearson": -0.262728187273864,
+      "mod_throughflow_vs_attr_pearson": -0.27848833934335443,
+      "commute_share": 0.3606557376753561,
+      "n": 349
+    },
+    {
+      "hour": 6,
+      "obs_throughflow_vs_attr_pearson": -0.2993892244116739,
+      "mod_throughflow_vs_attr_pearson": -0.29813468944480387,
+      "commute_share": 0.458333333317419,
+      "n": 349
+    },
+    {
+      "hour": 7,
+      "obs_throughflow_vs_attr_pearson": -0.19544964618874022,
+      "mod_throughflow_vs_attr_pearson": -0.17859798541948776,
+      "commute_share": 0.5593220338877717,
+      "n": 349
+    },
+    {
+      "hour": 8,
+      "obs_throughflow_vs_attr_pearson": -0.06602467300873922,
+      "mod_throughflow_vs_attr_pearson": -0.04571756033766221,
+      "commute_share": 0.4845814977902411,
+      "n": 349
+    },
+    {
+      "hour": 9,
+      "obs_throughflow_vs_attr_pearson": 0.30480428318809955,
+      "mod_throughflow_vs_attr_pearson": 0.3223859992199412,
+      "commute_share": 0.21999999999633335,
+      "n": 349
+    },
+    {
+      "hour": 10,
+      "obs_throughflow_vs_attr_pearson": 0.2958851868670236,
+      "mod_throughflow_vs_attr_pearson": 0.2972967775007939,
+      "commute_share": 0.09151414309331923,
+      "n": 349
+    },
+    {
+      "hour": 11,
+      "obs_throughflow_vs_attr_pearson": 0.30194717049843434,
+      "mod_throughflow_vs_attr_pearson": 0.27193203875726774,
+      "commute_share": 0.07457627118517667,
+      "n": 349
+    },
+    {
+      "hour": 12,
+      "obs_throughflow_vs_attr_pearson": 0.35778644951955896,
+      "mod_throughflow_vs_attr_pearson": 0.3534412650973023,
+      "commute_share": 0.08100147275285711,
+      "n": 349
+    },
+    {
+      "hour": 13,
+      "obs_throughflow_vs_attr_pearson": 0.35797911861232506,
+      "mod_throughflow_vs_attr_pearson": 0.35795175855295813,
+      "commute_share": 0.10138248847770534,
+      "n": 349
+    },
+    {
+      "hour": 14,
+      "obs_throughflow_vs_attr_pearson": 0.2235371510596422,
+      "mod_throughflow_vs_attr_pearson": 0.21236339428479536,
+      "commute_share": 0.10138248847770534,
+      "n": 349
+    },
+    {
+      "hour": 15,
+      "obs_throughflow_vs_attr_pearson": -0.017162615651772625,
+      "mod_throughflow_vs_attr_pearson": -0.0387317935747921,
+      "commute_share": 0.1624161073803702,
+      "n": 349
+    },
+    {
+      "hour": 16,
+      "obs_throughflow_vs_attr_pearson": -0.13168237615274858,
+      "mod_throughflow_vs_attr_pearson": -0.0996541500246731,
+      "commute_share": 0.2701754385933312,
+      "n": 349
+    },
+    {
+      "hour": 17,
+      "obs_throughflow_vs_attr_pearson": -0.13057903186567735,
+      "mod_throughflow_vs_attr_pearson": -0.11636923310636378,
+      "commute_share": 0.3142857142822606,
+      "n": 349
+    },
+    {
+      "hour": 18,
+      "obs_throughflow_vs_attr_pearson": 0.19184976832397094,
+      "mod_throughflow_vs_attr_pearson": 0.18538567061169745,
+      "commute_share": 0.2320675105452592,
+      "n": 349
+    },
+    {
+      "hour": 19,
+      "obs_throughflow_vs_attr_pearson": 0.25833828212301063,
+      "mod_throughflow_vs_attr_pearson": 0.2386102827606064,
+      "commute_share": 0.123595505615663,
+      "n": 349
+    },
+    {
+      "hour": 20,
+      "obs_throughflow_vs_attr_pearson": 0.2742261537565821,
+      "mod_throughflow_vs_attr_pearson": 0.25461875747419926,
+      "commute_share": 0.0780141843953188,
+      "n": 349
+    },
+    {
+      "hour": 21,
+      "obs_throughflow_vs_attr_pearson": 0.3403372415667933,
+      "mod_throughflow_vs_attr_pearson": 0.3203426803553872,
+      "commute_share": 0.0658682634710818,
+      "n": 349
+    },
+    {
+      "hour": 22,
+      "obs_throughflow_vs_attr_pearson": 0.4111779905817988,
+      "mod_throughflow_vs_attr_pearson": 0.39498218168734284,
+      "commute_share": 0.0699523052436426,
+      "n": 349
+    },
+    {
+      "hour": 23,
+      "obs_throughflow_vs_attr_pearson": 0.3363990477909177,
+      "mod_throughflow_vs_attr_pearson": 0.36047694156701576,
+      "commute_share": 0.10138248847147599,
+      "n": 349
+    }
+  ]
+}
