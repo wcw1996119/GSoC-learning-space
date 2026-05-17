@@ -30,7 +30,7 @@ V3_ROOT = Path(__file__).resolve().parents[2]
 V2_ROOT = V3_ROOT.parent / "03_london_full_model_v2"
 
 sys.path.insert(0, str(V3_ROOT))
-from models_lib.occupation_match import to_proportion, cervero_match_prob
+from models_lib.occupation_match import to_proportion, cervero_match_cosine
 from models_lib.competition import shen_effective_demand
 
 
@@ -73,9 +73,11 @@ def main():
     print(f"grid_industry → proportion check: row sums in [{grid_industry_prop.sum(axis=1).min():.4f}, "
           f"{grid_industry_prop.sum(axis=1).max():.4f}]")
 
-    # --- Cervero match_prob ---
-    match_prob = cervero_match_prob(soc_props, epsilon, grid_industry_raw)
-    print(f"\nCervero match_prob:")
+    # --- match_prob via cosine similarity (replaces joint-probability product) ---
+    # Rationale: cosine yields proper [0, 1] alignment range vs old product bounded
+    # by max(ε) ≈ 0.5. Anchored to Delgado-Porter-Stern 2014 + Hu&Wang 2020.
+    match_prob = cervero_match_cosine(soc_props, epsilon, grid_industry_raw)
+    print(f"\nmatch_prob (cosine similarity on SOC profile):")
     print(f"  shape={match_prob.shape}, dtype={match_prob.dtype}")
     print(f"  range: [{match_prob.min():.4f}, {match_prob.max():.4f}]")
     print(f"  mean = {match_prob.mean():.4f}, std = {match_prob.std():.4f}")

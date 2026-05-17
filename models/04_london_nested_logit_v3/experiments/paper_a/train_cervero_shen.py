@@ -178,6 +178,14 @@ def forward_cs(
     else:
         match_signal = match_prob                                       # raw linear
 
+    # Stoll-Houston (2005) coupling: log(M · match) → effective accessible jobs.
+    # When enabled, replace the weak δ_match·match·log_M interaction with the
+    # strong γ-weighted log_match term: V_M = γ · (log_M + log_match).
+    if getattr(rum, "use_stoll_match", False):
+        log_match_signal = torch.log(match_signal.clamp(min=1e-6))      # (N, N) ∈ (-13.8, 0]
+    else:
+        log_match_signal = None
+
     # Push-pull cross term (if enabled): V += ξ · push_i · log_M_j
     # push_i = log_D_j[i] - log_M_j[i] = labor surplus at origin i
     # (high D_j at i = many workers reach i; low M_j at i = few jobs at i → push out)
@@ -229,8 +237,13 @@ def forward_cs(
         # build V_upper_k: (K, T, N, N)
         V_uppers = []
         for k in range(K):
-            gamma_eff_k = gamma_M[k] + delta_m[k] * match_signal        # (N, N)
-            V_M_k = gamma_eff_k * log_M_j.view(1, N)                    # (N, N)
+            if log_match_signal is not None:
+                # Stoll-Houston: V_M = γ · (log_M + log_match)   "effective jobs"
+                V_M_k = gamma_M[k] * (log_M_j.view(1, N) + log_match_signal)  # (N, N)
+            else:
+                # Legacy: V_M = (γ + δ·match) · log_M             multiplicative interaction
+                gamma_eff_k = gamma_M[k] + delta_m[k] * match_signal        # (N, N)
+                V_M_k = gamma_eff_k * log_M_j.view(1, N)                    # (N, N)
             V_other_k = (alpha_w[k] * log_W_j + nu_D[k] * log_D_j).view(1, N)  # (1, N)
             V_rum_k = (V_M_k + V_other_k).unsqueeze(0) + lam_view * IV_mode    # (T, N, N)
             if V_push_pull is not None:
@@ -261,8 +274,11 @@ def forward_cs(
         V_rum_dest = V_uppers_stacked                                    # downstream knows tier dim
     else:
         # single-RUM path (original)
-        gamma_effective = gamma_M + delta_m * match_signal               # (N, N)
-        V_M = gamma_effective * log_M_j.view(1, N)                       # (N, N)
+        if log_match_signal is not None:
+            V_M = gamma_M * (log_M_j.view(1, N) + log_match_signal)      # (N, N)
+        else:
+            gamma_effective = gamma_M + delta_m * match_signal           # (N, N)
+            V_M = gamma_effective * log_M_j.view(1, N)                   # (N, N)
         V_other = (alpha_w * log_W_j.view(1, 1, N)
                    + nu_D * log_D_j.view(1, 1, N))                       # (1, 1, N)
         V_rum_dest = (V_M.unsqueeze(0) + V_other + lam_view * IV_mode)   # (T, N, N)
@@ -375,10 +391,17 @@ def forward_cs(
             "gravity_gamma_logM": (g_avg * log_M_j.view(1, 1, N)).expand(T, N, N),
             "wage_alpha_logW":    (a_avg * log_W_j.view(1, 1, N)).expand(T, N, N),
             "competition_nu_logD":(n_avg * log_D_j.view(1, 1, N)).expand(T, N, N),
-            "occmatch_delta_M":   (d_avg * match_signal.view(1, N, N)
-                                   * log_M_j.view(1, 1, N)).expand(T, N, N),
             "mode_choice_IV":     (lam_view * IV_mode).expand(T, N, N),
         }
+        if log_match_signal is not None:
+            # Stoll-Houston: match contributes via γ · log_match (same elasticity as gravity)
+            comp["stoll_match_gamma_logmatch"] = (
+                g_avg * log_match_signal.view(1, N, N)
+            ).expand(T, N, N)
+        else:
+            comp["occmatch_delta_M"] = (
+                d_avg * match_signal.view(1, N, N) * log_M_j.view(1, 1, N)
+            ).expand(T, N, N)
         if V_self_loop is not None:
             comp["self_loop_boost"] = V_self_loop
         if V_busy_dest is not None:
@@ -430,12 +453,18 @@ def forward_cs(
     # destination signal — attribute shares become more balanced.
     iv_var = (lam_view * IV_mode).var(dim=-1, unbiased=False).mean()
     if rum.use_tier_mixture:
-        gamma_eff_avg = gamma_M.mean() + delta_m.mean() * match_signal
-        v_gravity = (gamma_eff_avg * log_M_j.view(1, N)).expand(T, N, N)
+        if log_match_signal is not None:
+            v_gravity = (gamma_M.mean() * (log_M_j.view(1, N) + log_match_signal)).expand(T, N, N)
+        else:
+            gamma_eff_avg = gamma_M.mean() + delta_m.mean() * match_signal
+            v_gravity = (gamma_eff_avg * log_M_j.view(1, N)).expand(T, N, N)
         v_wage    = (alpha_w.mean() * log_W_j.view(1, 1, N)).expand(T, N, N)
         v_comp    = (nu_D.mean()    * log_D_j.view(1, 1, N)).expand(T, N, N)
     else:
-        v_gravity = ((gamma_M + delta_m * match_signal) * log_M_j.view(1, N)).expand(T, N, N)
+        if log_match_signal is not None:
+            v_gravity = (gamma_M * (log_M_j.view(1, N) + log_match_signal)).expand(T, N, N)
+        else:
+            v_gravity = ((gamma_M + delta_m * match_signal) * log_M_j.view(1, N)).expand(T, N, N)
         v_wage    = (alpha_w * log_W_j.view(1, 1, N)).expand(T, N, N)
         v_comp    = (nu_D    * log_D_j.view(1, 1, N)).expand(T, N, N)
     rum_dest_var = (v_gravity.var(dim=-1, unbiased=False).mean()
@@ -461,6 +490,7 @@ def forward_cs(
             "k_sharpness_per_tier": rum.k_sharpness_per_tier.detach().cpu().tolist() if rum.k_sharpness_per_tier is not None else None,
             "match_filter_thresh": float(rum.match_filter_thresh) if rum.match_filter_thresh is not None else None,
             "k_match_filter": float(rum.k_match_filter) if rum.k_match_filter is not None else None,
+            "match_thresh_floor": getattr(rum, "match_thresh_floor", 0.0),
             "theta_t_cost": float(rum.theta_t_cost) if rum.theta_t_cost is not None else None,
             "theta_d_cost": float(rum.theta_d_cost) if rum.theta_d_cost is not None else None,
             "cost_budget_per_tier": rum.cost_budget_per_tier.detach().cpu().tolist() if rum.cost_budget_per_tier is not None else None,
@@ -577,6 +607,18 @@ def main():
                          "Layer 1 occupation match + Layer 2 cost burden / income budget. "
                          "Sigmoid soft masks, log(pass) added to V_dest as log-mask. "
                          "Requires --use-tier-mixture.")
+    ap.add_argument("--use-stoll-match", action="store_true",
+                    help="Stoll-Houston (2005) 'effective jobs' coupling: replaces "
+                         "δ_match·match·log_M with γ·log(match) so occupational match "
+                         "has the same elasticity as gravity. Forces match to be a "
+                         "central destination-utility factor instead of a marginal term.")
+    ap.add_argument("--match-thresh-floor", type=float, default=0.0,
+                    help="Lower bound on match filter threshold. Default 0 = model "
+                         "learns freely (typically learns ≈0, no filtering). Set 0.30 "
+                         "to force destinations with match<0.30 to be filtered.")
+    ap.add_argument("--k-match-init", type=float, default=10.0,
+                    help="Initial sharpness of match filter sigmoid. Larger = sharper "
+                         "cutoff. Use ≥20 for near-hard cutoff behavior.")
     ap.add_argument("--use-tier-mixture", action="store_true",
                     help="Income-tier latent class: each (α, γ, ν, δ_match) tier-specific × 3 tier. "
                          "P(j|i) = Σ_k π(tier=k|i) · softmax(V_upper_k).")
@@ -768,6 +810,9 @@ def main():
         n_origins=N,
         use_tier_threshold=args.use_tier_threshold,
         use_consideration_filter=args.use_consideration_filter,
+        use_stoll_match=args.use_stoll_match,
+        match_thresh_floor=args.match_thresh_floor,
+        k_match_init=args.k_match_init,
     ).to(device)
 
     # If busy-dest boost enabled: compute top-K busy destinations from training data
@@ -1122,6 +1167,38 @@ def main():
                 "no_consideration_filter_drop": final_cpc - cpc_no_filter,
             }
             print(f"  no filter: CPC={cpc_no_filter:.4f}  drop={final_cpc - cpc_no_filter:+.4f}")
+
+            # Ablation: turn off ONLY the match-pass sub-layer (keep cost-pass)
+            print("\n[ablation] disable match-pass only (keep cost-pass)...")
+            with torch.no_grad():
+                # Recompute match_pass and cost_pass separately, see CPC if match_pass = 1
+                k_m_real = float(rum.k_match_filter)
+                t_m_real = float(rum.match_filter_thresh)
+                match_pass = torch.sigmoid(k_m_real * (match_prob - t_m_real))
+                n_pairs_below_thresh = int((match_prob < t_m_real).sum())
+                total_pairs = int(match_prob.numel())
+                mean_match_pass = float(match_pass.mean())
+                median_match_pass = float(match_pass.median())
+                p05_match_pass = float(torch.quantile(match_pass.reshape(-1), 0.05))
+                p25_match_pass = float(torch.quantile(match_pass.reshape(-1), 0.25))
+            final_diag["match_filter_stats"] = {
+                "threshold_actual": t_m_real,
+                "k_sharpness": k_m_real,
+                "pairs_below_threshold_pct": 100 * n_pairs_below_thresh / total_pairs,
+                "mean_match_pass": mean_match_pass,
+                "median_match_pass": median_match_pass,
+                "p05_match_pass": p05_match_pass,
+                "p25_match_pass": p25_match_pass,
+                "match_data_min": float(match_prob.min()),
+                "match_data_max": float(match_prob.max()),
+                "match_data_mean": float(match_prob.mean()),
+            }
+            print(f"  match threshold = {t_m_real:.4f}  (data min={float(match_prob.min()):.4f}, "
+                  f"max={float(match_prob.max()):.4f})")
+            print(f"  pairs below threshold: {n_pairs_below_thresh}/{total_pairs} "
+                  f"({100*n_pairs_below_thresh/total_pairs:.2f}%)")
+            print(f"  match_pass: mean={mean_match_pass:.3f}  median={median_match_pass:.3f}  "
+                  f"p05={p05_match_pass:.3f}  p25={p25_match_pass:.3f}")
 
         # ===================================================================
         # Sub-population CPC breakdown

@@ -67,3 +67,46 @@ def cervero_match_prob_pairwise(soc_props_i: np.ndarray,
     """Single (i, j) match probability — for diagnostics / sanity tests."""
     prop_j = grid_industry_j / max(grid_industry_j.sum(), 1.0)
     return float(soc_props_i @ epsilon @ prop_j)
+
+
+def cervero_match_cosine(soc_props: np.ndarray,
+                         epsilon: np.ndarray,
+                         grid_industry: np.ndarray) -> np.ndarray:
+    """Cosine similarity between origin SOC profile and destination's expected SOC demand.
+
+    Replaces cervero_match_prob (joint consistency probability, max bounded by
+    max(ε) ≈ 0.5) with a proper [0, 1] similarity score.
+
+    Formula:
+        expected_soc[j] = ε @ grid_industry_prop[j]    (workplace's expected SOC demand)
+        match[i, j]     = cos(soc_props[i], expected_soc[j])
+
+    Anchored to:
+      - Delgado, Porter, Stern 2014 (NBER WP 20375) — cosine on occupational
+        linkages is the standard in industry-cluster definitions.
+      - Hu & Wang 2020 — matching factor in 2SFCA accessibility (TR Part D).
+      - v2's original OccMatch design (cosine on hand-coded SOC×sector affinity)
+        — restores v2's [0, 1] property while keeping v3's empirically derived ε.
+
+    Args:
+      soc_props:     (N, 9) origin SOC proportions, row sum = 1
+      epsilon:       (9, 8) empirical P(SOC=k | SIC=l), column sum = 1
+      grid_industry: (N, 8) destination industry mix (any normalisation; we
+                            convert to row-sum=1 proportion)
+
+    Returns:
+      match: (N, N) cosine similarity in [0, 1]. Higher = better skill alignment.
+    """
+    gi_prop = to_proportion(grid_industry)
+    # Workplace j's expected SOC demand: (N, 9) = grid_industry @ ε^T
+    expected_soc = gi_prop @ epsilon.T
+
+    soc_norm = np.linalg.norm(soc_props, axis=1, keepdims=True)
+    soc_norm = np.where(soc_norm > 1e-12, soc_norm, 1.0)
+    soc_unit = soc_props / soc_norm
+
+    dest_norm = np.linalg.norm(expected_soc, axis=1, keepdims=True)
+    dest_norm = np.where(dest_norm > 1e-12, dest_norm, 1.0)
+    dest_unit = expected_soc / dest_norm
+
+    return soc_unit @ dest_unit.T   # (N, N) ∈ [0, 1]

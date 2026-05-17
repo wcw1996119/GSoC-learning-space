@@ -107,6 +107,9 @@ def reconstruct_model(ckpt: dict, device: torch.device):
         n_origins=N,
         use_tier_threshold=args.use_tier_threshold,
         use_consideration_filter=args.use_consideration_filter,
+        use_stoll_match=getattr(args, "use_stoll_match", False),
+        match_thresh_floor=getattr(args, "match_thresh_floor", 0.0),
+        k_match_init=getattr(args, "k_match_init", 10.0),
     ).to(device)
     encoder.load_state_dict(ckpt["encoder_state"])
     rum.load_state_dict(ckpt["rum_state"])

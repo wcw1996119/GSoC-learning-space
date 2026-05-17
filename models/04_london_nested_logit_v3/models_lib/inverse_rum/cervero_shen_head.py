@@ -141,6 +141,20 @@ class CerveroShenHead(nn.Module):
                                             # per-tier T_k + β_kink_k for V_lower
         use_consideration_filter: bool = False,  # Lexicographic two-layer filter:
                                             # match_pass × cost_pass via sigmoid soft masks.
+        use_stoll_match: bool = False,      # Stoll-Houston (2005) "effective jobs" coupling:
+                                            # V_M = γ · log(M · match) = γ · (log_M + log_match)
+                                            # Replaces δ_match · match · log_M (weak interaction)
+                                            # with γ-weighted log_match (strong coupling).
+                                            # Forces occupational match to have same elasticity
+                                            # as gravity, matching common-sense intuition.
+        match_thresh_floor: float = 0.0,    # Lower bound on match filter threshold.
+                                            # Without this, model learns threshold ≈ 0 (no filtering).
+                                            # Set to 0.30 to force "below 30% match = downweighted"
+                                            # behaviour. Implemented via reparameterization:
+                                            # thresh = floor + softplus(raw).
+        k_match_init: float = 10.0,         # Initial sharpness of match filter sigmoid.
+                                            # Larger = sharper cutoff. Default 10 (moderate).
+                                            # Use ≥20 for near-hard cutoff behaviour.
     ):
         super().__init__()
         self.n_modes = n_modes
@@ -151,6 +165,7 @@ class CerveroShenHead(nn.Module):
         self.gnn_mode = str(gnn_mode)
         assert self.gnn_mode in ("convex", "residual", "mult", "moe"), f"unknown gnn_mode={gnn_mode}"
         self.use_match_gate = bool(use_match_gate)
+        self.use_stoll_match = bool(use_stoll_match)
         self.use_tier_mixture = bool(use_tier_mixture)
         self.n_income_tiers = int(n_tiers)
         self.use_push_pull = bool(use_push_pull)
@@ -289,8 +304,12 @@ class CerveroShenHead(nn.Module):
             # Sharpness of cost filter sigmoid (smaller = sharper / steeper)
             self.raw_k_cost_filter = nn.Parameter(torch.tensor(_inv_softplus(3.0)))
             # Match filter (occupation match threshold + sharpness)
+            # When match_thresh_floor > 0, actual threshold = floor + softplus(raw),
+            # which forces the filter to actually cut destinations below the floor.
+            self.match_thresh_floor = float(match_thresh_floor)
+            # raw init so total ≈ floor + 0.05 (just above floor; lets model decide refinement)
             self.raw_match_filter_thresh = nn.Parameter(torch.tensor(_inv_softplus(0.05)))
-            self.raw_k_match_filter = nn.Parameter(torch.tensor(_inv_softplus(10.0)))
+            self.raw_k_match_filter = nn.Parameter(torch.tensor(_inv_softplus(float(k_match_init))))
         else:
             self.raw_theta_t_cost = None
             self.raw_theta_d_cost = None
@@ -471,7 +490,8 @@ class CerveroShenHead(nn.Module):
     @property
     def match_filter_thresh(self) -> Optional[torch.Tensor]:
         if self.raw_match_filter_thresh is None: return None
-        return F.softplus(self.raw_match_filter_thresh)
+        floor = getattr(self, "match_thresh_floor", 0.0)
+        return floor + F.softplus(self.raw_match_filter_thresh)
     @property
     def k_match_filter(self) -> Optional[torch.Tensor]:
         if self.raw_k_match_filter is None: return None
