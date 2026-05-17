@@ -101,6 +101,42 @@ def forward_cs(
     log_iv = None
     ce_accum = None
 
+    # Min commute time across modes — used by tier-threshold kink + consideration filter
+    t_min_per_pair = torch.stack([t_per_mode[m] for m in mode_names], dim=0).min(dim=0).values  # (T, N, N)
+
+    # ----- Lexicographic consideration filter (Swait 2001 / Cascetta 2001) -----
+    # Layer 1 (match): match_pass = sigmoid(k_match · (match(i,j) - thresh_match))
+    # Layer 2 (cost):  cost_pass  = sigmoid(k_cost  · (thresh_ratio_k - cost(i,j)/budget_k))
+    # log(filter_pass) added to V_dest as log-mask (j fails → V_dest → -∞).
+    if rum.use_consideration_filter:
+        # Layer 1: occupation match filter
+        match_pass = torch.sigmoid(
+            rum.k_match_filter * (match_prob - rum.match_filter_thresh)
+        )                                                                   # (N, N) ∈ [0,1]
+        log_match_pass = torch.log(match_pass.clamp(min=1e-9))              # (N, N)
+
+        # Layer 2: cost burden filter
+        # cost_per_pair = θ_t · t_min(i,j) + θ_d · log_d(i,j)
+        cost_per_pair_tn = (
+            rum.theta_t_cost * t_min_per_pair                                # (T, N, N)
+            + rum.theta_d_cost * log_d_ij.view(1, N, N)                      # broadcast
+        )                                                                   # (T, N, N)
+        # cost_ratio per tier: cost / budget_k, shape (K, T, N, N)
+        budgets = rum.cost_budget_per_tier                                  # (K,)
+        thresholds = rum.cost_thresh_per_tier                               # (K,)
+        cost_ratio = cost_per_pair_tn.unsqueeze(0) / budgets.view(-1, 1, 1, 1)
+        cost_pass_per_tier = torch.sigmoid(
+            rum.k_cost_filter * (thresholds.view(-1, 1, 1, 1) - cost_ratio)
+        )                                                                   # (K, T, N, N)
+        log_cost_pass_per_tier = torch.log(cost_pass_per_tier.clamp(min=1e-9))
+
+        # Combined log-filter-mask: (K, T, N, N) — add to V_upper_k
+        log_filter_mask_per_tier = (
+            log_match_pass.view(1, 1, N, N) + log_cost_pass_per_tier
+        )
+    else:
+        log_filter_mask_per_tier = None
+
     for m_idx, name in enumerate(mode_names):
         t_m = t_per_mode[name]                                        # (T, N, N)
         # β_t_m(d) = β_t_m,0 + β_t_m,1 · log_d_ij  → per-pair time-disutility coeff
@@ -203,6 +239,23 @@ def forward_cs(
                 V_rum_k = V_rum_k + V_self_loop                          # (T, N, N) self-loop boost
             if V_busy_dest is not None:
                 V_rum_k = V_rum_k + V_busy_dest                          # (T, 1, N) broadcast on i
+            # Tier-specific commute-time threshold kink (Bhat 1995 heterogeneous VOT)
+            # Sigmoid-smooth transition (no hard kink): disutility is gentle below T_k,
+            # accelerates smoothly around T_k with sharpness k_k.
+            #   kink(t) = β_kink_k · t · sigmoid((t - T_k) / k_k)
+            # Below T_k: sigmoid ≈ 0, almost no extra disutility.
+            # Above T_k: sigmoid → 1, extra per-minute penalty kicks in fully.
+            # Transition width controlled by k_k (small → sharp, large → gentle).
+            if rum.use_tier_threshold:
+                T_k = rum.T_threshold_per_tier[k]                        # scalar (minutes)
+                beta_kink_k = rum.beta_t_kink_per_tier[k]                # scalar ≤ 0
+                k_sharp = rum.k_sharpness_per_tier[k]                    # scalar > 0 (minutes)
+                sig = torch.sigmoid((t_min_per_pair - T_k) / k_sharp)    # (T, N, N) in [0, 1]
+                kink_k = beta_kink_k * t_min_per_pair * sig              # (T, N, N) smooth
+                V_rum_k = V_rum_k + kink_k
+            # Lexicographic consideration filter (log-mask added to V_upper_k)
+            if log_filter_mask_per_tier is not None:
+                V_rum_k = V_rum_k + log_filter_mask_per_tier[k]          # (T, N, N)
             V_uppers.append(V_rum_k)
         V_uppers_stacked = torch.stack(V_uppers, dim=0)                  # (K, T, N, N)
         V_rum_dest = V_uppers_stacked                                    # downstream knows tier dim
@@ -234,6 +287,38 @@ def forward_cs(
             V_dest = V_rum_dest + V_nn_scaled.unsqueeze(0)              # (K, T, N, N)
         else:
             V_dest = V_rum_dest + V_nn_scaled                            # (T, N, N)
+    elif rum.gnn_mode == "mult":
+        # Multiplicative gating: V_total = V_RUM · (1 + γ_mult · sigmoid(V_GNN))
+        # NN gate modulates RUM amplitude per (t, i, j) instead of adding residual.
+        g_mult = rum.gnn_mult_scale
+        if g_mult is None:
+            V_nn_scaled = torch.zeros(T, N, N, device=V_gnn.device)
+            V_dest = V_rum_dest
+        else:
+            gate = torch.sigmoid(V_gnn)                                  # (T, N, N) in [0, 1]
+            mult = 1.0 + g_mult * gate                                   # (T, N, N) in [1, 1+γ]
+            if rum.use_tier_mixture:
+                V_dest = V_rum_dest * mult.unsqueeze(0)                  # (K, T, N, N)
+            else:
+                V_dest = V_rum_dest * mult                                # (T, N, N)
+            # For attribute-share diagnostic: report (V_dest - V_rum_dest) as NN contribution
+            # — i.e., the modulation amount. Tier-mixture: use tier 0 to keep shape (T,N,N).
+            if rum.use_tier_mixture:
+                V_nn_scaled = (V_dest - V_rum_dest)[0]                   # (T, N, N)
+            else:
+                V_nn_scaled = V_dest - V_rum_dest                        # (T, N, N)
+    elif rum.gnn_mode == "moe":
+        # Per-origin Mixture-of-Experts gating:
+        # g_i ∈ [0, 1] decides this origin's reliance on RUM vs NN.
+        # V_dest[t, i, j] = (1 - g_i) · V_RUM + g_i · V_GNN
+        gate = rum.gate_per_origin                                       # (N,)
+        g = gate.view(1, N, 1)                                            # broadcast on T, j
+        if rum.use_tier_mixture:
+            V_dest = (1.0 - g.unsqueeze(0)) * V_rum_dest + g.unsqueeze(0) * V_gnn.unsqueeze(0)  # (K,T,N,N)
+            V_nn_scaled = (g * V_gnn).expand(T, N, N)                    # representative NN contribution
+        else:
+            V_dest = (1.0 - g) * V_rum_dest + g * V_gnn                   # (T, N, N)
+            V_nn_scaled = g * V_gnn
     else:
         blend = rum.gnn_blend
         if blend is None:
@@ -277,8 +362,86 @@ def forward_cs(
         delta_measured = (nn_rms / (rum_rms + nn_rms + 1e-9)).item()
         nn_norm_sq_diag = (V_nn_scaled ** 2).mean().item()
 
+        # ----- Attribute-share decomposition -----
+        # Per-attribute RMS in logit space. Variance-based share (RMS² as proxy
+        # variance under independence; not exact since terms share log_M_j etc,
+        # but standard ANOVA-style decomposition for interpretation).
+        if rum.use_tier_mixture:
+            a_avg, g_avg, n_avg, d_avg = (alpha_w.mean(), gamma_M.mean(),
+                                          nu_D.mean(), delta_m.mean())
+        else:
+            a_avg, g_avg, n_avg, d_avg = alpha_w, gamma_M, nu_D, delta_m
+        comp = {
+            "gravity_gamma_logM": (g_avg * log_M_j.view(1, 1, N)).expand(T, N, N),
+            "wage_alpha_logW":    (a_avg * log_W_j.view(1, 1, N)).expand(T, N, N),
+            "competition_nu_logD":(n_avg * log_D_j.view(1, 1, N)).expand(T, N, N),
+            "occmatch_delta_M":   (d_avg * match_signal.view(1, N, N)
+                                   * log_M_j.view(1, 1, N)).expand(T, N, N),
+            "mode_choice_IV":     (lam_view * IV_mode).expand(T, N, N),
+        }
+        if V_self_loop is not None:
+            comp["self_loop_boost"] = V_self_loop
+        if V_busy_dest is not None:
+            comp["busy_dest_boost"] = V_busy_dest.expand(T, N, N)
+        if V_push_pull is not None:
+            comp["push_pull"] = V_push_pull.expand(T, N, N)
+        comp["nn_residual"] = V_nn_scaled
+        attribute_rms = {k: float(torch.sqrt((v ** 2).mean())) for k, v in comp.items()}
+        total_var = sum(v ** 2 for v in attribute_rms.values()) + 1e-9
+        attribute_shares = {k: (v ** 2) / total_var for k, v in attribute_rms.items()}
+        # Destination-attractor-only share (excl. mode_choice_IV, which is a
+        # logsumexp summary of mode-level time cost and dominates raw variance
+        # by scale). This is the share among "what makes destination j attractive".
+        dest_keys = [k for k in attribute_rms if k != "mode_choice_IV"]
+        dest_var = sum(attribute_rms[k] ** 2 for k in dest_keys) + 1e-9
+        attribute_shares_dest = {k: (attribute_rms[k] ** 2) / dest_var for k in dest_keys}
+        # ----- Across-j variance share (TRUE destination-discriminating importance) -----
+        # Softmax over destinations is invariant to any constant offset, so only the
+        # variance of each component ACROSS j (within fixed t,i) determines prediction.
+        # Compute var(component, dim=j) then mean over (t, i). This is the metric
+        # that reflects how much each attribute actually shifts destination probabilities.
+        across_j_var = {}
+        for k, v in comp.items():
+            # v shape (T, N, N); want var over last dim, mean over (T, N)
+            across_j_var[k] = float(v.var(dim=-1, unbiased=False).mean())
+        across_j_total = sum(across_j_var.values()) + 1e-9
+        attribute_shares_across_j = {k: v / across_j_total for k, v in across_j_var.items()}
+
     # NN-norm regularization (training only): pushes ‖V_NN‖² down to enforce theory-dominance
     nn_norm_sq = (V_nn_scaled ** 2).mean()
+
+    # Orthogonality regularizer: push V_NN ⊥ V_RUM in mean-centered logit space.
+    # Encourages NN to learn signal that RUM structurally cannot express.
+    # Returned as a (differentiable) cos² similarity scalar; trainer multiplies by λ_ortho.
+    if rum.use_tier_mixture:
+        rum_flat = V_rum_dest.mean(dim=0).reshape(-1)   # mean over tiers
+    else:
+        rum_flat = V_rum_dest.reshape(-1)
+    nn_flat = V_nn_scaled.reshape(-1)
+    rum_c = rum_flat - rum_flat.mean()
+    nn_c = nn_flat - nn_flat.mean()
+    ortho_cos_sq = (rum_c @ nn_c) ** 2 / (
+        (rum_c.pow(2).sum() + 1e-9) * (nn_c.pow(2).sum() + 1e-9)
+    )
+
+    # IV-balance regularizer (DIFFERENTIABLE — uses tensors built in this fwd):
+    # Push IV_mode's share of across-j destination-discriminating variance toward target.
+    # If IV dominates (current ~97%), force it down so gravity/wage/match must carry the
+    # destination signal — attribute shares become more balanced.
+    iv_var = (lam_view * IV_mode).var(dim=-1, unbiased=False).mean()
+    if rum.use_tier_mixture:
+        gamma_eff_avg = gamma_M.mean() + delta_m.mean() * match_signal
+        v_gravity = (gamma_eff_avg * log_M_j.view(1, N)).expand(T, N, N)
+        v_wage    = (alpha_w.mean() * log_W_j.view(1, 1, N)).expand(T, N, N)
+        v_comp    = (nu_D.mean()    * log_D_j.view(1, 1, N)).expand(T, N, N)
+    else:
+        v_gravity = ((gamma_M + delta_m * match_signal) * log_M_j.view(1, N)).expand(T, N, N)
+        v_wage    = (alpha_w * log_W_j.view(1, 1, N)).expand(T, N, N)
+        v_comp    = (nu_D    * log_D_j.view(1, 1, N)).expand(T, N, N)
+    rum_dest_var = (v_gravity.var(dim=-1, unbiased=False).mean()
+                    + v_wage.var(dim=-1, unbiased=False).mean()
+                    + v_comp.var(dim=-1, unbiased=False).mean())
+    iv_share_across_j = iv_var / (iv_var + rum_dest_var + 1e-9)
 
     # ---- diagnostic ----
     with torch.no_grad():
@@ -293,6 +456,16 @@ def forward_cs(
             "delta_match": _diag_val(rum.delta_match),
             "beta_t_mean": float(rum.beta_t_per_mode.mean()),
             "beta_t_slope_mean": float(rum.beta_t_slope_per_mode.mean()),
+            "T_threshold_per_tier": rum.T_threshold_per_tier.detach().cpu().tolist() if rum.T_threshold_per_tier is not None else None,
+            "beta_t_kink_per_tier": rum.beta_t_kink_per_tier.detach().cpu().tolist() if rum.beta_t_kink_per_tier is not None else None,
+            "k_sharpness_per_tier": rum.k_sharpness_per_tier.detach().cpu().tolist() if rum.k_sharpness_per_tier is not None else None,
+            "match_filter_thresh": float(rum.match_filter_thresh) if rum.match_filter_thresh is not None else None,
+            "k_match_filter": float(rum.k_match_filter) if rum.k_match_filter is not None else None,
+            "theta_t_cost": float(rum.theta_t_cost) if rum.theta_t_cost is not None else None,
+            "theta_d_cost": float(rum.theta_d_cost) if rum.theta_d_cost is not None else None,
+            "cost_budget_per_tier": rum.cost_budget_per_tier.detach().cpu().tolist() if rum.cost_budget_per_tier is not None else None,
+            "cost_thresh_per_tier": rum.cost_thresh_per_tier.detach().cpu().tolist() if rum.cost_thresh_per_tier is not None else None,
+            "k_cost_filter": float(rum.k_cost_filter) if rum.k_cost_filter is not None else None,
             "asc_per_mode": rum.asc_per_mode.detach().cpu().tolist(),
             "theta_inc_per_mode": rum.theta_inc_per_mode.detach().cpu().tolist(),
             "theta_kids_per_mode": rum.theta_kids_per_mode.detach().cpu().tolist(),
@@ -303,12 +476,22 @@ def forward_cs(
             "lambda_b_max": float(rum.lambda_per_borough.max()),
             "blend": float(rum.gnn_blend) if rum.gnn_blend is not None else None,
             "gnn_residual_scale": float(rum.gnn_residual_scale) if rum.gnn_residual_scale is not None else None,
+            "gnn_mult_scale": float(rum.gnn_mult_scale) if rum.gnn_mult_scale is not None else None,
+            "gate_per_origin_mean": float(rum.gate_per_origin.mean()) if rum.gate_per_origin is not None else None,
+            "gate_per_origin_std": float(rum.gate_per_origin.std()) if rum.gate_per_origin is not None else None,
+            "gate_per_origin": rum.gate_per_origin.detach().cpu().tolist() if rum.gate_per_origin is not None else None,
             "gnn_mode": rum.gnn_mode,
             "delta_measured": delta_measured,
             "rum_rms": float(rum_rms),
             "nn_rms": float(nn_rms),
             "use_push_pull": rum.use_push_pull,
             "xi_push_pull": float(rum.xi_push_pull) if rum.xi_push_pull is not None else None,
+            "attribute_rms": attribute_rms,
+            "attribute_shares": attribute_shares,
+            "attribute_shares_dest": attribute_shares_dest,
+            "attribute_across_j_var": across_j_var,
+            "attribute_shares_across_j": attribute_shares_across_j,
+            "ortho_cos_sq": float(ortho_cos_sq),
         }
 
     return {
@@ -316,6 +499,8 @@ def forward_cs(
         "nll_dest": nll_dest,
         "ce_mode": ce_mode,
         "nn_norm_sq": nn_norm_sq,
+        "ortho_cos_sq": ortho_cos_sq,
+        "iv_share_across_j": iv_share_across_j,
         "diagnostic": diagnostic,
     }
 
@@ -337,12 +522,26 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--blend-max", type=float, default=1.0)
-    ap.add_argument("--gnn-mode", choices=["convex", "residual"], default="convex",
+    ap.add_argument("--gnn-mode", choices=["convex", "residual", "mult", "moe"], default="convex",
                     help="convex: V=(1-δ)V_RUM+δ V_NN (legacy v3b/c). "
-                         "residual: V=V_RUM+w·V_NN (Wang TB-ResNet original).")
+                         "residual: V=V_RUM+w·V_NN (Wang TB-ResNet original). "
+                         "mult: V=V_RUM·(1+γ·σ(V_NN)) — NN modulates RUM amplitude per (i,j,t). "
+                         "moe: V=(1-g_i)·V_RUM+g_i·V_NN with g_i ∈[0,1] per-origin learnable gate.")
     ap.add_argument("--gnn-residual-scale-init", type=float, default=0.1)
     ap.add_argument("--lambda-nn-norm", type=float, default=0.0,
                     help="L2 penalty on ‖V_NN‖² to enforce Wang Path A (δ_measured < 0.30)")
+    ap.add_argument("--lambda-ortho", type=float, default=0.0,
+                    help="Orthogonality penalty: pushes V_NN ⊥ V_RUM (cos²(NN, RUM)). "
+                         "Encourages NN to learn signal RUM structurally cannot express. "
+                         "Typical range 0.5-5.0.")
+    ap.add_argument("--lambda-iv-balance", type=float, default=0.0,
+                    help="IV-magnitude balance: push IV_mode's across-j variance share "
+                         "toward --target-iv-share. Forces gravity/wage/match to carry "
+                         "destination signal — produces interpretable attribute portfolio.")
+    ap.add_argument("--target-iv-share", type=float, default=0.5,
+                    help="Target across-j variance share for IV_mode (default 0.5 = "
+                         "IV and RUM-destination attractors carry equal destination signal). "
+                         "Used with --lambda-iv-balance > 0.")
     ap.add_argument("--use-match-gate", action="store_true",
                     help="Decision-tree style sigmoid gate on Cervero match: "
                          "γ_eff = γ + δ · sigmoid(k(match - τ)). "
@@ -359,9 +558,25 @@ def main():
     ap.add_argument("--fixed-blend", type=float, default=None,
                     help="Override learnable blend with fixed value (Wang δ as hyperparameter).")
     ap.add_argument("--epochs-phase1", type=int, default=200,
-                    help="Sequential mode: epochs for Phase 1 (RUM only).")
+                    help="Sequential mode: epochs for Phase 1 (RUM only). "
+                         "Also used for Stage 2 (RUM-again) when --n-stages 4.")
+    ap.add_argument("--n-stages", type=int, default=2, choices=[2, 4],
+                    help="Sequential boosting: 2 = Wang sequential (RUM → NN); "
+                         "4 = boosting (RUM → NN → RUM → NN). "
+                         "Stage 2 freezes encoder + residual_scale (keeps NN value), "
+                         "lets RUM retrain on top of NN baseline (identifiability test).")
     ap.add_argument("--rum-checkpoint", type=str, default=None,
                     help="Sequential mode: load Phase 1 RUM checkpoint instead of retraining.")
+    ap.add_argument("--use-tier-threshold", action="store_true",
+                    help="Tier-specific commute-time threshold (Bhat 1995): "
+                         "V_lower += β_kink_k · max(0, t_min - T_k) per income tier. "
+                         "Requires --use-tier-mixture. "
+                         "Expects T_low ~25min, T_mid ~40min, T_high ~55min after training.")
+    ap.add_argument("--use-consideration-filter", action="store_true",
+                    help="Lexicographic two-layer filter (Swait 2001 / Cascetta 2001): "
+                         "Layer 1 occupation match + Layer 2 cost burden / income budget. "
+                         "Sigmoid soft masks, log(pass) added to V_dest as log-mask. "
+                         "Requires --use-tier-mixture.")
     ap.add_argument("--use-tier-mixture", action="store_true",
                     help="Income-tier latent class: each (α, γ, ν, δ_match) tier-specific × 3 tier. "
                          "P(j|i) = Σ_k π(tier=k|i) · softmax(V_upper_k).")
@@ -550,6 +765,9 @@ def main():
         use_self_loop_boost=args.use_self_loop_boost,
         n_hours=24,
         n_busy_dest=args.n_busy_dest,
+        n_origins=N,
+        use_tier_threshold=args.use_tier_threshold,
+        use_consideration_filter=args.use_consideration_filter,
     ).to(device)
 
     # If busy-dest boost enabled: compute top-K busy destinations from training data
@@ -583,71 +801,128 @@ def main():
     )
 
     # ===================================================================
-    # Wang TB-ResNet sequential training (W4 §3.2 perspective 3)
-    # Phase 1: train RUM only (force blend=0, encoder frozen)
-    # Phase 2: freeze RUM, set blend=fixed_blend, train encoder only
+    # Sequential training (Wang TB-ResNet + boosting extension)
+    # n_stages=2 (Wang): Stage 0 RUM only → Stage 1 NN only (legacy behavior)
+    # n_stages=4 (boosting): Stage 0 RUM → Stage 1 NN → Stage 2 RUM (NN frozen)
+    #                        → Stage 3 NN (RUM frozen). Tests whether RUM in Stage 2
+    #                        can absorb part of NN residual learned in Stage 1.
+    # Even stages = "RUM-only" (freeze encoder + gnn scale);
+    # Odd stages  = "NN-only" (freeze RUM except gnn scale).
     # ===================================================================
+    SCALE_OFF = math.log(math.exp(1e-4) - 1.0)   # inv_softplus(1e-4) ≈ -9.21
+
+    def _apply_stage(stage_idx: int) -> str:
+        """Set requires_grad on encoder/rum for stage_idx. Returns human label."""
+        is_rum_stage = (stage_idx % 2 == 0)
+        if is_rum_stage:
+            # Encoder frozen
+            for p in encoder.parameters():
+                p.requires_grad = False
+            # Freeze gnn scale/blend. Stage 0: also force to ~0. Stage 2+: keep value.
+            if rum.gnn_mode == "residual" and rum.raw_gnn_residual_scale is not None:
+                if stage_idx == 0:
+                    with torch.no_grad():
+                        rum.raw_gnn_residual_scale.fill_(SCALE_OFF)
+                rum.raw_gnn_residual_scale.requires_grad = False
+            if rum.gnn_mode == "convex" and rum.raw_gnn_blend is not None:
+                if stage_idx == 0:
+                    with torch.no_grad():
+                        rum.raw_gnn_blend.fill_(-15.0)
+                rum.raw_gnn_blend.requires_grad = False
+            # Unfreeze rest of RUM
+            for name, p in rum.named_parameters():
+                if "raw_gnn_residual_scale" in name or "raw_gnn_blend" in name:
+                    continue
+                p.requires_grad = True
+            return f"Stage {stage_idx} [RUM-only]"
+        else:
+            # NN-only stage
+            for p in encoder.parameters():
+                p.requires_grad = True
+            if rum.gnn_mode == "residual" and rum.raw_gnn_residual_scale is not None:
+                # If raw is in vanishing-gradient dead zone (e.g. Stage 0's SCALE_OFF ~=-9.21,
+                # softplus'(-9.21) ~= 1e-4 kills grad flow), bump back to init so encoder
+                # can actually learn. Otherwise keep value from previous NN stage.
+                if float(rum.raw_gnn_residual_scale) < -5.0:
+                    raw_init = math.log(
+                        math.exp(max(float(args.gnn_residual_scale_init), 1e-3)) - 1.0
+                    )
+                    with torch.no_grad():
+                        rum.raw_gnn_residual_scale.fill_(raw_init)
+                rum.raw_gnn_residual_scale.requires_grad = True
+            if rum.gnn_mode == "convex" and rum.raw_gnn_blend is not None:
+                if args.fixed_blend is not None:
+                    fb = max(min(float(args.fixed_blend) / max(args.blend_max, 1e-6), 1-1e-4), 1e-4)
+                    raw_b = math.log(fb / (1 - fb))
+                    with torch.no_grad():
+                        rum.raw_gnn_blend.fill_(raw_b)
+                    rum.raw_gnn_blend.requires_grad = False
+                else:
+                    rum.raw_gnn_blend.requires_grad = True
+            # Freeze rest of RUM
+            for name, p in rum.named_parameters():
+                if "raw_gnn_residual_scale" in name or "raw_gnn_blend" in name:
+                    continue
+                p.requires_grad = False
+            return f"Stage {stage_idx} [NN-only]"
+
+    # Compute stage durations and boundaries
     if args.train_mode == "sequential":
-        print(f"\n[sequential] Phase 1: train RUM only ({args.epochs_phase1} epochs)")
-        # Force blend ≈ 0 (sigmoid(-15) ≈ 3e-7)
-        if rum.raw_gnn_blend is not None:
-            with torch.no_grad():
-                rum.raw_gnn_blend.fill_(-15.0)
-            rum.raw_gnn_blend.requires_grad = False
-        # Freeze encoder
-        for p in encoder.parameters():
-            p.requires_grad = False
+        n_stages = args.n_stages
+        stage_durations = [args.epochs_phase1 if s % 2 == 0 else args.epochs
+                           for s in range(n_stages)]
+        stage_starts = [0]
+        for d in stage_durations[:-1]:
+            stage_starts.append(stage_starts[-1] + d)
+        total_epochs = sum(stage_durations)
+        # Apply Stage 0 setup
+        label = _apply_stage(0)
+        print(f"\n[sequential] {label}: ({stage_durations[0]} epochs)  "
+              f"n_stages={n_stages} boundaries={stage_starts}")
+    else:
+        n_stages = 1
+        stage_durations = [args.epochs]
+        stage_starts = [0]
+        total_epochs = args.epochs
 
     t0 = time.time()
     best_val = float("inf")
     no_improve = 0
     best_state = None
     history = []
-
-    phase1_epochs = args.epochs_phase1 if args.train_mode == "sequential" else 0
-    total_epochs = (args.epochs_phase1 + args.epochs) if args.train_mode == "sequential" else args.epochs
-    phase2_started = False
+    current_stage = 0
+    stage_t0 = t0
 
     for ep in range(total_epochs):
-        # Phase transition for sequential training
-        if args.train_mode == "sequential" and ep == phase1_epochs and not phase2_started:
-            phase2_started = True
-            phase1_time = time.time() - t0
-            phase1_cpc = history[-1]["cpc"] if history else 0.0
-            print(f"\n[sequential] Phase 1 done in {phase1_time:.0f}s, CPC={phase1_cpc:.4f}")
-            # Set blend to fixed value
-            if args.fixed_blend is not None and rum.raw_gnn_blend is not None:
-                fb = max(min(float(args.fixed_blend) / max(args.blend_max, 1e-6), 1-1e-4), 1e-4)
-                raw_b = math.log(fb / (1 - fb))
-                with torch.no_grad():
-                    rum.raw_gnn_blend.fill_(raw_b)
-                rum.raw_gnn_blend.requires_grad = False
-                print(f"[sequential] Phase 2: freeze RUM, train GNN at fixed blend={args.fixed_blend} ({args.epochs} epochs)")
-            else:
-                # No fixed_blend: keep blend learnable for Phase 2 only
-                if rum.raw_gnn_blend is not None:
-                    rum.raw_gnn_blend.requires_grad = True
-                print(f"[sequential] Phase 2: freeze RUM (except blend), train GNN ({args.epochs} epochs)")
-            # Freeze all RUM params except blend
-            for name, p in rum.named_parameters():
-                if "gnn_blend" not in name:
-                    p.requires_grad = False
-            # Unfreeze encoder
-            for p in encoder.parameters():
-                p.requires_grad = True
-            # Reset optimizer to only train unfrozen params (encoder + maybe blend)
-            optimizer = torch.optim.AdamW(
-                [{"params": [p for p in encoder.parameters() if p.requires_grad],
-                  "lr": args.lr_theta, "weight_decay": 1e-4},
-                 {"params": [p for p in rum.parameters() if p.requires_grad],
-                  "lr": args.lr_rum, "weight_decay": 0.0}]
-            )
-            best_val = float("inf")  # reset early stop for Phase 2
-            no_improve = 0
-
-        # ---- adjust epoch index for kl_warmup (relative to phase start) ----
+        # Detect stage transition
         if args.train_mode == "sequential":
-            eff_ep = ep if ep < phase1_epochs else (ep - phase1_epochs)
+            next_stage = current_stage
+            for s_idx, start in enumerate(stage_starts):
+                if ep >= start:
+                    next_stage = s_idx
+            if next_stage != current_stage:
+                # Log previous stage summary
+                prev_cpc = history[-1]["cpc"] if history else 0.0
+                print(f"[sequential] Stage {current_stage} done in "
+                      f"{time.time()-stage_t0:.0f}s, CPC={prev_cpc:.4f}")
+                current_stage = next_stage
+                stage_t0 = time.time()
+                label = _apply_stage(current_stage)
+                print(f"[sequential] {label}: ({stage_durations[current_stage]} epochs)")
+                # Reset optimizer for new freeze set
+                optimizer = torch.optim.AdamW(
+                    [{"params": [p for p in encoder.parameters() if p.requires_grad],
+                      "lr": args.lr_theta, "weight_decay": 1e-4},
+                     {"params": [p for p in rum.parameters() if p.requires_grad],
+                      "lr": args.lr_rum, "weight_decay": 0.0}]
+                )
+                # Keep best_val/best_state across stages (same val set, comparable);
+                # only reset patience counter so each stage gets fresh chance.
+                no_improve = 0
+
+        # ---- adjust epoch index for kl_warmup (relative to current stage start) ----
+        if args.train_mode == "sequential":
+            eff_ep = ep - stage_starts[current_stage]
         else:
             eff_ep = ep
         if args.kl_warmup_epochs > 0:
@@ -665,7 +940,9 @@ def main():
         )
         loss = (out["nll_dest"]
                 + kl_weight * out["ce_mode"]
-                + args.lambda_nn_norm * out["nn_norm_sq"])
+                + args.lambda_nn_norm * out["nn_norm_sq"]
+                + args.lambda_ortho * out["ortho_cos_sq"]
+                + args.lambda_iv_balance * (out["iv_share_across_j"] - args.target_iv_share) ** 2)
         if rum.use_self_loop_boost and args.self_loop_l2 > 0:
             loss = loss + args.self_loop_l2 * (rum.self_loop_boost ** 2).mean()
         if rum.n_busy_dest > 0 and args.busy_dest_l2 > 0:
@@ -690,18 +967,27 @@ def main():
             ce_val = float(out_e["ce_mode"])
 
         history.append({
-            "ep": ep, "tnll": float(out["nll_dest"].item()),
+            "ep": ep, "stage": current_stage,
+            "tnll": float(out["nll_dest"].item()),
             "ce_train": float(out["ce_mode"].item()),
             "vnll": val_nll, "ce_val": ce_val, "cpc": val_cpc,
             "kl_weight": kl_weight, **{k: v for k, v in diag.items()
                                        if k not in ("asc_per_mode", "theta_inc_per_mode")},
         })
 
-        if args.verbose or ep % 5 == 0 or ep == args.epochs - 1:
+        if args.verbose or ep % 5 == 0 or ep == total_epochs - 1:
             if diag['gnn_mode'] == 'residual':
                 gnn_str = (f"w_NN={diag['gnn_residual_scale']:.3f} "
                            f"δ_meas={diag['delta_measured']:.3f} "
                            f"(rum/nn rms {diag['rum_rms']:.2f}/{diag['nn_rms']:.2f})")
+            elif diag['gnn_mode'] == 'mult':
+                gnn_str = (f"γ_mult={diag['gnn_mult_scale']:.3f} "
+                           f"δ_meas={diag['delta_measured']:.3f} "
+                           f"(rum/nn rms {diag['rum_rms']:.2f}/{diag['nn_rms']:.2f})")
+            elif diag['gnn_mode'] == 'moe':
+                gnn_str = (f"g_mean={diag['gate_per_origin_mean']:.3f} "
+                           f"g_std={diag['gate_per_origin_std']:.3f} "
+                           f"δ_meas={diag['delta_measured']:.3f}")
             else:
                 gnn_str = f"δ={diag['blend']:.3f}" if diag['blend'] is not None else "δ=n/a"
             # Handle tier-mixture (lists) vs single (floats) for display (ASCII only for Windows compat)
@@ -725,9 +1011,10 @@ def main():
             }
         else:
             no_improve += 1
-        # Don't early-stop during sequential Phase 1 — must reach phase transition
-        in_phase1 = (args.train_mode == "sequential" and ep < phase1_epochs)
-        if not in_phase1 and no_improve >= args.patience:
+        # Only allow early stop in the final stage (must reach all stage transitions first)
+        in_final_stage = (args.train_mode != "sequential"
+                          or current_stage == n_stages - 1)
+        if in_final_stage and no_improve >= args.patience:
             print(f"early stop ep {ep}")
             break
 
@@ -746,6 +1033,134 @@ def main():
         final_cpc = cpc(out_final["log_P_D"], observed_OD, val_mask)
         final_diag = out_final["diagnostic"]
         full_snapshot = rum.snapshot()
+
+        # ===================================================================
+        # Ablation CPC drop — TRUE attribute importance: zero out each
+        # component, measure CPC drop. This reflects prediction influence
+        # rather than raw RMS magnitude (which is scale-biased toward IV_mode).
+        # ===================================================================
+        print("\n[ablation] muting each component, measuring CPC drop...")
+        baseline_rum_state = {k: v.detach().clone() for k, v in rum.state_dict().items()}
+        # Mute strategy per param:
+        #   raw_* (softplus): set to -10 -> softplus ~ 1e-4 (effective 0)
+        #   free params (asc/theta): set to 0 (direct mute)
+        #   self_loop_boost: set to 0 (direct)
+        #   raw_gnn_blend (sigmoid): set to -15 -> sigmoid ~ 3e-7
+        MUTE_MAP = {
+            # Destination attractor decomposition
+            "gravity_gamma_logM":    ["raw_gamma_M"],
+            "wage_alpha_logW":       ["raw_alpha_wage"],
+            "competition_nu_logD":   ["raw_nu_D"],
+            "occmatch_delta_M":      ["raw_delta_match"],
+            # Mode-choice IV decomposition (per Wang's RUM family)
+            "IV_time_cost_beta_t":   ["raw_beta_t_per_mode", "raw_beta_t_slope_per_mode"],
+            "tier_threshold_kink":   ["raw_beta_t_kink_per_tier"],
+            # Note: consideration filter is a structural layer (sigmoid mask, multiplicative
+            # log effect), not simply mutable by zeroing a coef. Filter pass rates / learned
+            # thresholds are reported via diagnostic instead of via ablation drop.
+            "IV_mode_ASC":           ["asc_per_mode"],
+            "IV_income_x_mode":      ["theta_inc_per_mode"],
+            "IV_kids_x_mode":        ["theta_kids_per_mode"],
+            "IV_cars_x_mode":        ["theta_cars_per_mode"],
+            # Other
+            "self_loop_boost":       ["self_loop_boost"],
+            "nn_residual":           ["raw_gnn_residual_scale", "raw_gnn_blend"],
+        }
+        # Direct-zero params (not raw softplus)
+        ZERO_DIRECT = {"asc_per_mode", "theta_inc_per_mode", "theta_kids_per_mode",
+                       "theta_cars_per_mode", "self_loop_boost"}
+        ablation_cpc = {"baseline": final_cpc}
+        ablation_drop = {}
+        for comp_name, param_names in MUTE_MAP.items():
+            muted = {k: v.clone() for k, v in baseline_rum_state.items()}
+            any_muted = False
+            for pn in param_names:
+                if pn in muted:
+                    if pn in ZERO_DIRECT:
+                        muted[pn] = torch.zeros_like(muted[pn])
+                    elif pn == "raw_gnn_blend":
+                        muted[pn] = torch.full_like(muted[pn], -15.0)
+                    else:
+                        muted[pn] = torch.full_like(muted[pn], -10.0)
+                    any_muted = True
+            if not any_muted:
+                continue
+            rum.load_state_dict(muted)
+            out_abl = forward_cs(
+                encoder, rum, X_static, X_dynamic, edge_index,
+                t_per_mode, mode_names, log_d_ij, match_prob, log_M_j, log_W_j, log_D_j,
+                income_score, pct_kids, mean_cars, income_tier_props,
+                pi_m_pair, grid_borough_idx, observed_OD, val_mask,
+            )
+            abl_cpc = cpc(out_abl["log_P_D"], observed_OD, val_mask)
+            ablation_cpc[comp_name] = abl_cpc
+            ablation_drop[comp_name] = final_cpc - abl_cpc
+            print(f"  mute {comp_name:<24s} CPC {abl_cpc:.4f}  drop {final_cpc - abl_cpc:+.4f}")
+        # Restore best RUM
+        rum.load_state_dict(baseline_rum_state)
+        final_diag["ablation_cpc"] = ablation_cpc
+        final_diag["ablation_drop"] = ablation_drop
+
+        # ===================================================================
+        # Structural ablation — temporarily disable filter component as a whole.
+        # Reveals the TRUE contribution of (match_filter + cost_filter) combined.
+        # ===================================================================
+        if rum.use_consideration_filter:
+            print("\n[structural-ablation] disable consideration filter entirely...")
+            orig_filter_flag = rum.use_consideration_filter
+            rum.use_consideration_filter = False
+            out_no_filter = forward_cs(
+                encoder, rum, X_static, X_dynamic, edge_index,
+                t_per_mode, mode_names, log_d_ij, match_prob, log_M_j, log_W_j, log_D_j,
+                income_score, pct_kids, mean_cars, income_tier_props,
+                pi_m_pair, grid_borough_idx, observed_OD, val_mask,
+            )
+            cpc_no_filter = cpc(out_no_filter["log_P_D"], observed_OD, val_mask)
+            rum.use_consideration_filter = orig_filter_flag
+            final_diag["structural_ablation"] = {
+                "no_consideration_filter_cpc": cpc_no_filter,
+                "no_consideration_filter_drop": final_cpc - cpc_no_filter,
+            }
+            print(f"  no filter: CPC={cpc_no_filter:.4f}  drop={final_cpc - cpc_no_filter:+.4f}")
+
+        # ===================================================================
+        # Sub-population CPC breakdown
+        # Group val origins by (dominant income tier × high/low kids)
+        # Validates whether the decision-tree + heterogeneous utility captures
+        # different commuting patterns across sub-populations consistently.
+        # ===================================================================
+        print("\n[sub-pop] CPC by (income tier × kids) on val origins...")
+        dom_tier = income_tier_props.argmax(dim=1).cpu().numpy()                # (N,)
+        kids_med = float(pct_kids.median().cpu())
+        high_kids = (pct_kids > kids_med).cpu().numpy()                          # (N,) bool
+        val_np = val_mask.cpu().numpy()
+        P_full = out_final["log_P_D"].exp()                                      # (T, N, N)
+        row_sum_full = observed_OD.sum(dim=2, keepdim=True)                     # (T, N, 1)
+        pred_full = P_full * row_sum_full                                        # (T, N, N)
+
+        sub_pop_cpc = {}
+        n_tiers = income_tier_props.shape[1]
+        for ti in range(n_tiers):
+            for ki, kids_label in enumerate(("low_kids", "high_kids")):
+                kids_flag = (high_kids == bool(ki))
+                in_group = val_np & (dom_tier == ti) & kids_flag                # (N,)
+                if in_group.sum() == 0:
+                    continue
+                idx = torch.from_numpy(in_group).to(device)
+                p_sub = pred_full[:, idx]                                        # (T, n_sub, N)
+                o_sub = observed_OD[:, idx]                                      # (T, n_sub, N)
+                num = 2.0 * torch.minimum(p_sub, o_sub).sum()
+                den = (p_sub.sum() + o_sub.sum()).clamp(min=1.0)
+                cpc_group = float(num / den)
+                tier_name = ("low", "mid", "high")[ti] if ti < 3 else f"t{ti}"
+                key = f"{tier_name}_x_{kids_label}"
+                sub_pop_cpc[key] = {
+                    "cpc": cpc_group,
+                    "n_origins": int(in_group.sum()),
+                }
+                print(f"  {key:<24s} n={int(in_group.sum()):>4d}  CPC={cpc_group:.4f}")
+        final_diag["sub_population_cpc"] = sub_pop_cpc
+        final_diag["pct_kids_median"] = kids_med
 
         # ===================================================================
         # Residual diagnostic — find where the model fails (CPC ceiling shape)
@@ -872,6 +1287,10 @@ def main():
         "lambda_kl": args.lambda_kl,
         "kl_warmup_epochs": args.kl_warmup_epochs,
         "blend_max": args.blend_max,
+        "train_mode": args.train_mode,
+        "n_stages": args.n_stages if args.train_mode == "sequential" else 1,
+        "stage_durations": stage_durations if args.train_mode == "sequential" else [args.epochs],
+        "stage_starts": stage_starts if args.train_mode == "sequential" else [0],
         "fit_time_s": elapsed,
         "final_cpc": final_cpc,
         "final_diagnostic": final_diag,
@@ -885,6 +1304,25 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2)
+
+    # Persist weights so downstream scenario / counterfactual scripts can re-load
+    # the trained model without retraining. Sibling file to the JSON result.
+    ckpt_path = out_path.with_suffix(".pt")
+    ckpt_payload = {
+        "encoder_state": encoder.state_dict(),
+        "rum_state": rum.state_dict(),
+        "args": vars(args),
+        "final_cpc": float(final_cpc),
+        "n_modes": int(M),
+        "n_boroughs": int(n_boroughs),
+        "static_dim": int(X_static.shape[1]),
+        "dyn_dim": int(X_dynamic.shape[-1]),
+        "N": int(N),
+        "T": int(T),
+        "encoder_kind": "DualBranchGATEncoder" if args.use_gat else "DualBranchEncoder",
+    }
+    torch.save(ckpt_payload, ckpt_path)
+    print(f"  weights saved to {ckpt_path}")
 
     print(f"\n[smoke] done in {elapsed:.0f}s ({len(history)} epochs)")
     print(f"  CPC            = {final_cpc:.4f}  (v2 baseline 0.485, v3a 0.534)")
@@ -900,6 +1338,23 @@ def main():
     print(f"  delta_match    = {_fmt(final_diag['delta_match'])}  (match_prob; ≥0 by construction)")
     print(f"  beta_t,0 mean  = {final_diag['beta_t_mean']:+.4f}  (t intercept; ≤0 by construction)")
     print(f"  beta_t,1 mean  = {final_diag['beta_t_slope_mean']:+.4f}  (t slope on log_d; ≤0 by construction)")
+    if final_diag.get("T_threshold_per_tier"):
+        T = final_diag["T_threshold_per_tier"]
+        bk = final_diag["beta_t_kink_per_tier"]
+        ks = final_diag.get("k_sharpness_per_tier") or [0]*3
+        print(f"  T_threshold per tier (min): low={T[0]:.1f}  mid={T[1]:.1f}  high={T[2]:.1f}")
+        print(f"  β_kink     per tier        : low={bk[0]:+.4f}  mid={bk[1]:+.4f}  high={bk[2]:+.4f}")
+        print(f"  k_sharpness per tier (min) : low={ks[0]:.2f}  mid={ks[1]:.2f}  high={ks[2]:.2f}  (smaller=sharper)")
+    if final_diag.get("match_filter_thresh") is not None:
+        print(f"  ----- Consideration filter (lexicographic) -----")
+        print(f"  Layer 1 match: threshold = {final_diag['match_filter_thresh']:.4f}, "
+              f"sharpness k = {final_diag['k_match_filter']:.2f}")
+        budgets = final_diag["cost_budget_per_tier"]
+        thrs = final_diag["cost_thresh_per_tier"]
+        print(f"  Layer 2 cost:  θ_time={final_diag['theta_t_cost']:.4f}  "
+              f"θ_dist={final_diag['theta_d_cost']:.4f}  k={final_diag['k_cost_filter']:.2f}")
+        print(f"               budget per tier:  low={budgets[0]:.3f}  mid={budgets[1]:.3f}  high={budgets[2]:.3f}")
+        print(f"               ratio thresh   :  low={thrs[0]:.3f}  mid={thrs[1]:.3f}  high={thrs[2]:.3f}")
     print(f"  theta_inc      = {final_diag.get('theta_inc_per_mode')}  (per-mode income coef)")
     print(f"  theta_kids     = {final_diag.get('theta_kids_per_mode')}  (per-mode pct_kids coef)")
     print(f"  theta_cars     = {final_diag.get('theta_cars_per_mode')}  (per-mode mean_cars coef)")
@@ -911,8 +1366,35 @@ def main():
         print(f"  w_NN (scale)   = {final_diag['gnn_residual_scale']:.4f}  (Wang TB-ResNet additive)")
         print(f"  δ_measured     = {final_diag['delta_measured']:.4f}  (=‖V_NN‖/(‖V_RUM‖+‖V_NN‖); <0.30 = Path A)")
         print(f"  RUM/NN RMS     = {final_diag['rum_rms']:.4f} / {final_diag['nn_rms']:.4f}")
+    elif final_diag.get("gnn_mode") == "mult":
+        print(f"  γ_mult         = {final_diag['gnn_mult_scale']:.4f}  (multiplicative gating: V=V_RUM·(1+γ·σ(V_NN)))")
+        print(f"  δ_measured     = {final_diag['delta_measured']:.4f}  (=‖ΔV‖/(‖V_RUM‖+‖ΔV‖))")
+        print(f"  RUM/ΔV RMS     = {final_diag['rum_rms']:.4f} / {final_diag['nn_rms']:.4f}")
+    elif final_diag.get("gnn_mode") == "moe":
+        print(f"  per-origin gate g_i mean/std = {final_diag['gate_per_origin_mean']:.4f} / {final_diag['gate_per_origin_std']:.4f}")
+        print(f"  δ_measured     = {final_diag['delta_measured']:.4f}  (gated NN contribution share)")
+        print(f"  RUM/NN RMS     = {final_diag['rum_rms']:.4f} / {final_diag['nn_rms']:.4f}")
     elif final_diag["blend"] is not None:
         print(f"  blend (δ_GNN)  = {final_diag['blend']:.4f}  (v3a 0.437, legacy convex)")
+    # Attribute share table (paper interpretation)
+    if "attribute_shares" in final_diag:
+        print("  Attribute shares (variance share of total logit; mode_choice_IV dominates by scale):")
+        for k, v in sorted(final_diag["attribute_shares"].items(), key=lambda kv: -kv[1]):
+            rms = final_diag["attribute_rms"][k]
+            print(f"    {k:<24s} {v*100:5.1f}%   (RMS {rms:.3f})")
+    if "attribute_shares_dest" in final_diag:
+        print("  Destination-attractor shares (excl. mode_choice_IV — interpretable in paper):")
+        for k, v in sorted(final_diag["attribute_shares_dest"].items(), key=lambda kv: -kv[1]):
+            rms = final_diag["attribute_rms"][k]
+            print(f"    {k:<24s} {v*100:5.1f}%   (RMS {rms:.3f})")
+    if "attribute_shares_across_j" in final_diag:
+        print("  Across-j variance shares (TRUE destination-discriminating importance):")
+        for k, v in sorted(final_diag["attribute_shares_across_j"].items(), key=lambda kv: -kv[1]):
+            print(f"    {k:<24s} {v*100:5.1f}%")
+    if "ablation_drop" in final_diag:
+        print("  Ablation CPC drop (mute each component, measure CPC loss — paper-grade importance):")
+        for k, v in sorted(final_diag["ablation_drop"].items(), key=lambda kv: -kv[1]):
+            print(f"    {k:<24s} {v:+.4f}")
     print(f"  saved to {out_path}")
 
 

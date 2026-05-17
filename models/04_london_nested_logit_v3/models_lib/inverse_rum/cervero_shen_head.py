@@ -136,6 +136,11 @@ class CerveroShenHead(nn.Module):
         n_busy_dest: int = 0,               # K > 0: top-K busy destinations get
                                             # learnable per-hour boost (Option 2 — finer
                                             # than borough-level self-loop boost)
+        n_origins: int = 0,                 # for moe mode: number of origin grids (=N)
+        use_tier_threshold: bool = False,   # Bhat 1995 heterogeneous commute threshold:
+                                            # per-tier T_k + β_kink_k for V_lower
+        use_consideration_filter: bool = False,  # Lexicographic two-layer filter:
+                                            # match_pass × cost_pass via sigmoid soft masks.
     ):
         super().__init__()
         self.n_modes = n_modes
@@ -144,7 +149,7 @@ class CerveroShenHead(nn.Module):
         self.use_gnn_blend = use_gnn_blend
         self.blend_max = float(blend_max)
         self.gnn_mode = str(gnn_mode)
-        assert self.gnn_mode in ("convex", "residual"), f"unknown gnn_mode={gnn_mode}"
+        assert self.gnn_mode in ("convex", "residual", "mult", "moe"), f"unknown gnn_mode={gnn_mode}"
         self.use_match_gate = bool(use_match_gate)
         self.use_tier_mixture = bool(use_tier_mixture)
         self.n_income_tiers = int(n_tiers)
@@ -229,6 +234,72 @@ class CerveroShenHead(nn.Module):
         raw_b1 = _inv_softplus(target_b1)
         self.raw_beta_t_slope_per_mode = nn.Parameter(torch.full((n_modes,), raw_b1))
 
+        # Tier-specific commute-time threshold (Bhat 1995 / Hess 2007 heterogeneous VOT):
+        #   V_lower += β_kink_k · max(0, t - T_k)  per income tier k
+        # Captures "commute tolerance threshold": low-income commuters have a sharp
+        # disutility acceleration at ~25 min, high-income tolerate up to ~55 min.
+        # β_kink_k ≤ 0 (steeper disutility above threshold), T_k > 0 (in minutes).
+        # Both per-tier learnable. Disabled by default (use_tier_threshold=False).
+        self.use_tier_threshold = bool(use_tier_threshold)
+        if self.use_tier_threshold:
+            assert self.use_tier_mixture, "tier_threshold requires use_tier_mixture=True"
+            # T_k init: low=25, mid=40, high=55 min — lit-anchored expectations
+            T_init = [25.0, 40.0, 55.0][:self.n_income_tiers]
+            if len(T_init) < self.n_income_tiers:
+                T_init = T_init + [40.0] * (self.n_income_tiers - len(T_init))
+            self.raw_T_threshold_per_tier = nn.Parameter(
+                torch.tensor([_inv_softplus(t) for t in T_init])
+            )
+            # β_kink_k init: small negative (e.g. -0.05) — additional per-min penalty above T_k
+            self.raw_beta_t_kink_per_tier = nn.Parameter(
+                torch.full((self.n_income_tiers,), _inv_softplus(0.05))
+            )
+            # k_k (sharpness, minutes): how sharp the transition is around T_k.
+            # k → 0 = step function (hard threshold); k = 5 = soft (transition over ~5 min).
+            # Init k=5.0 min — gentle transition by default.
+            self.raw_k_sharpness_per_tier = nn.Parameter(
+                torch.full((self.n_income_tiers,), _inv_softplus(5.0))
+            )
+        else:
+            self.raw_T_threshold_per_tier = None
+            self.raw_beta_t_kink_per_tier = None
+            self.raw_k_sharpness_per_tier = None
+
+        # Lexicographic two-layer consideration filter (Swait 2001 / Cascetta 2001):
+        # Layer 1 (occupation match): destination j passes if match(i,j) >= threshold.
+        # Layer 2 (cost burden):      pass if monthly cost(i,j) / budget_tier <= ratio_tier.
+        # Both are sigmoid soft masks; log(pass) is added to V_dest as log-mask.
+        # Cost proxy: cost(i,j) = θ_t · t_min(i,j) + θ_d · log(distance(i,j))
+        # All parameters learnable; ML-clean: filter strength learned from data.
+        self.use_consideration_filter = bool(use_consideration_filter)
+        if self.use_consideration_filter:
+            assert self.use_tier_mixture, "consideration_filter requires use_tier_mixture=True"
+            # Cost proxy coefficients (shared across tiers; cost is physical, tier in budget)
+            self.raw_theta_t_cost = nn.Parameter(torch.tensor(_inv_softplus(0.05)))
+            self.raw_theta_d_cost = nn.Parameter(torch.tensor(_inv_softplus(0.10)))
+            # Monthly budget per tier (learnable, arbitrary scale — ratio matters)
+            # Init: low<mid<high (low has tight budget)
+            self.raw_cost_budget_per_tier = nn.Parameter(
+                torch.tensor([_inv_softplus(v) for v in [3.0, 5.0, 9.0][:self.n_income_tiers]])
+            )
+            # Cost ratio threshold per tier (e.g., 10% / 12% / 18% — low tier strictest)
+            self.raw_cost_thresh_per_tier = nn.Parameter(
+                torch.tensor([_inv_softplus(v) for v in [0.10, 0.12, 0.18][:self.n_income_tiers]])
+            )
+            # Sharpness of cost filter sigmoid (smaller = sharper / steeper)
+            self.raw_k_cost_filter = nn.Parameter(torch.tensor(_inv_softplus(3.0)))
+            # Match filter (occupation match threshold + sharpness)
+            self.raw_match_filter_thresh = nn.Parameter(torch.tensor(_inv_softplus(0.05)))
+            self.raw_k_match_filter = nn.Parameter(torch.tensor(_inv_softplus(10.0)))
+        else:
+            self.raw_theta_t_cost = None
+            self.raw_theta_d_cost = None
+            self.raw_cost_budget_per_tier = None
+            self.raw_cost_thresh_per_tier = None
+            self.raw_k_cost_filter = None
+            self.raw_match_filter_thresh = None
+            self.raw_k_match_filter = None
+
         # ASC per mode — free
         self.asc_per_mode = nn.Parameter(torch.zeros(n_modes))
 
@@ -270,6 +341,28 @@ class CerveroShenHead(nn.Module):
             self.raw_gnn_residual_scale = nn.Parameter(torch.tensor(raw_w))
         else:
             self.raw_gnn_residual_scale = None
+
+        # Multiplicative gating (mult mode):
+        #   V_dest = V_RUM · (1 + γ_mult · sigmoid(V_GNN_raw))
+        # NN modulates RUM amplitude per (i, j, t) rather than adding residual.
+        # γ_mult ≥ 0 via softplus (init 0.1 = up to 10 % amplitude swing).
+        if use_gnn_blend and self.gnn_mode == "mult":
+            raw_m = _inv_softplus(max(float(gnn_residual_scale_init), 1e-4))
+            self.raw_gnn_mult_scale = nn.Parameter(torch.tensor(raw_m))
+        else:
+            self.raw_gnn_mult_scale = None
+
+        # Per-origin Mixture-of-Experts gating (moe mode):
+        #   g_i = sigmoid(raw_gate_per_origin[i]) ∈ [0, 1]
+        #   V_dest[t, i, j] = (1 - g_i) · V_RUM + g_i · V_GNN
+        # Each origin learns its own preference for RUM vs NN — directly interpretable
+        # ("which origins are RUM-explainable vs NN-needed").
+        # Init at raw=0 → g=0.5 (equal mix).
+        if use_gnn_blend and self.gnn_mode == "moe":
+            assert n_origins > 0, "moe mode requires n_origins > 0"
+            self.raw_gate_per_origin = nn.Parameter(torch.zeros(n_origins))
+        else:
+            self.raw_gate_per_origin = None
 
         # Decision-tree-style sigmoid gate on Cervero match
         #   γ_effective(i, j) = γ + δ · sigmoid(k · (match_raw[i,j] - τ))
@@ -333,6 +426,58 @@ class CerveroShenHead(nn.Module):
         return -F.softplus(self.raw_beta_t_per_mode)
 
     @property
+    def T_threshold_per_tier(self) -> Optional[torch.Tensor]:
+        """T_k > 0 (in minutes), per income tier — commute-tolerance threshold."""
+        if self.raw_T_threshold_per_tier is None:
+            return None
+        return F.softplus(self.raw_T_threshold_per_tier)
+
+    @property
+    def beta_t_kink_per_tier(self) -> Optional[torch.Tensor]:
+        """β_kink_k ≤ 0 (additional per-min disutility above T_k), per income tier."""
+        if self.raw_beta_t_kink_per_tier is None:
+            return None
+        return -F.softplus(self.raw_beta_t_kink_per_tier)
+
+    @property
+    def k_sharpness_per_tier(self) -> Optional[torch.Tensor]:
+        """k_k > 0 (minutes): sharpness of sigmoid transition around T_k.
+        Small k → near-hard threshold; large k → gentle transition."""
+        if self.raw_k_sharpness_per_tier is None:
+            return None
+        return F.softplus(self.raw_k_sharpness_per_tier).clamp(min=0.5)
+
+    # ----- Lexicographic consideration filter properties -----
+    @property
+    def theta_t_cost(self) -> Optional[torch.Tensor]:
+        if self.raw_theta_t_cost is None: return None
+        return F.softplus(self.raw_theta_t_cost)
+    @property
+    def theta_d_cost(self) -> Optional[torch.Tensor]:
+        if self.raw_theta_d_cost is None: return None
+        return F.softplus(self.raw_theta_d_cost)
+    @property
+    def cost_budget_per_tier(self) -> Optional[torch.Tensor]:
+        if self.raw_cost_budget_per_tier is None: return None
+        return F.softplus(self.raw_cost_budget_per_tier)
+    @property
+    def cost_thresh_per_tier(self) -> Optional[torch.Tensor]:
+        if self.raw_cost_thresh_per_tier is None: return None
+        return F.softplus(self.raw_cost_thresh_per_tier)
+    @property
+    def k_cost_filter(self) -> Optional[torch.Tensor]:
+        if self.raw_k_cost_filter is None: return None
+        return F.softplus(self.raw_k_cost_filter).clamp(min=0.1)
+    @property
+    def match_filter_thresh(self) -> Optional[torch.Tensor]:
+        if self.raw_match_filter_thresh is None: return None
+        return F.softplus(self.raw_match_filter_thresh)
+    @property
+    def k_match_filter(self) -> Optional[torch.Tensor]:
+        if self.raw_k_match_filter is None: return None
+        return F.softplus(self.raw_k_match_filter).clamp(min=0.1)
+
+    @property
     def beta_t_slope_per_mode(self) -> torch.Tensor:
         """β_t,m,1 (slope on log_d) ≤ 0 — long-distance amplifies time disutility."""
         return -F.softplus(self.raw_beta_t_slope_per_mode)
@@ -349,6 +494,20 @@ class CerveroShenHead(nn.Module):
         if self.raw_gnn_blend is None:
             return None
         return self.blend_max * torch.sigmoid(self.raw_gnn_blend)
+
+    @property
+    def gnn_mult_scale(self) -> Optional[torch.Tensor]:
+        """γ_mult ≥ 0 (softplus) for multiplicative gating mode."""
+        if self.raw_gnn_mult_scale is None:
+            return None
+        return F.softplus(self.raw_gnn_mult_scale)
+
+    @property
+    def gate_per_origin(self) -> Optional[torch.Tensor]:
+        """g_i ∈ [0, 1] per origin for MoE mode (sigmoid of raw_gate_per_origin)."""
+        if self.raw_gate_per_origin is None:
+            return None
+        return torch.sigmoid(self.raw_gate_per_origin)
 
     @property
     def gnn_residual_scale(self) -> Optional[torch.Tensor]:
