@@ -1,0 +1,197 @@
+{
+  "overall_obs_vs_cong": {
+    "name": "Observed OD inflow vs TomTom congestion (overall)",
+    "n": 41400,
+    "pearson": 0.3120046379595715,
+    "spearman": 0.2995154746650487,
+    "x_mean": 138.851806640625,
+    "y_mean": 1.2386917227494816
+  },
+  "overall_model_vs_cong": {
+    "name": "Model-predicted inflow vs TomTom congestion (overall)",
+    "n": 41400,
+    "pearson": 0.296932606331368,
+    "spearman": 0.3030993488923004,
+    "x_mean": 138.851806640625,
+    "y_mean": 1.2386917227494816
+  },
+  "overall_model_vs_obs": {
+    "name": "Model inflow vs Observed OD inflow (sanity)",
+    "n": 41400,
+    "pearson": 0.9897012514084218,
+    "spearman": 0.9811919448437422,
+    "x_mean": 138.851806640625,
+    "y_mean": 138.851806640625
+  },
+  "per_hour": [
+    {
+      "hour": 0,
+      "obs_inflow_vs_cong_pearson": -0.16053398472490454,
+      "model_inflow_vs_cong_pearson": -0.1464896855930976,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 1,
+      "obs_inflow_vs_cong_pearson": -0.20881474624529978,
+      "model_inflow_vs_cong_pearson": -0.2035440915094023,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 2,
+      "obs_inflow_vs_cong_pearson": -0.23467503532972786,
+      "model_inflow_vs_cong_pearson": -0.21076784722872993,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 3,
+      "obs_inflow_vs_cong_pearson": -0.22210456374239596,
+      "model_inflow_vs_cong_pearson": -0.22178467672960347,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 4,
+      "obs_inflow_vs_cong_pearson": -0.18092257534485315,
+      "model_inflow_vs_cong_pearson": -0.18020049962805026,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 5,
+      "obs_inflow_vs_cong_pearson": -0.19939940887196056,
+      "model_inflow_vs_cong_pearson": -0.19094682192394233,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 6,
+      "obs_inflow_vs_cong_pearson": 0.03575170196157537,
+      "model_inflow_vs_cong_pearson": 0.03924348392329968,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 7,
+      "obs_inflow_vs_cong_pearson": 0.16538838956618987,
+      "model_inflow_vs_cong_pearson": 0.15596362557009288,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 8,
+      "obs_inflow_vs_cong_pearson": 0.23115149685728256,
+      "model_inflow_vs_cong_pearson": 0.21559622110035842,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 9,
+      "obs_inflow_vs_cong_pearson": 0.267798062956929,
+      "model_inflow_vs_cong_pearson": 0.255065640376077,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 10,
+      "obs_inflow_vs_cong_pearson": 0.22776186677985602,
+      "model_inflow_vs_cong_pearson": 0.21723683279546155,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 11,
+      "obs_inflow_vs_cong_pearson": 0.22800731071251282,
+      "model_inflow_vs_cong_pearson": 0.21682289819737924,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 12,
+      "obs_inflow_vs_cong_pearson": 0.281986211394048,
+      "model_inflow_vs_cong_pearson": 0.273083412350098,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 13,
+      "obs_inflow_vs_cong_pearson": 0.28874290374264444,
+      "model_inflow_vs_cong_pearson": 0.27363466933490715,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 14,
+      "obs_inflow_vs_cong_pearson": 0.23393370207430184,
+      "model_inflow_vs_cong_pearson": 0.2189894433911517,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 15,
+      "obs_inflow_vs_cong_pearson": 0.2093183317281659,
+      "model_inflow_vs_cong_pearson": 0.19496445358895453,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 16,
+      "obs_inflow_vs_cong_pearson": 0.21522355217120542,
+      "model_inflow_vs_cong_pearson": 0.20072330829604212,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 17,
+      "obs_inflow_vs_cong_pearson": 0.22455553243451123,
+      "model_inflow_vs_cong_pearson": 0.2101931867559641,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 18,
+      "obs_inflow_vs_cong_pearson": 0.26784774403026573,
+      "model_inflow_vs_cong_pearson": 0.25078604814339606,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 19,
+      "obs_inflow_vs_cong_pearson": 0.2668854372311009,
+      "model_inflow_vs_cong_pearson": 0.25014429123333054,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 20,
+      "obs_inflow_vs_cong_pearson": 0.2793798351638929,
+      "model_inflow_vs_cong_pearson": 0.26747309825715104,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 21,
+      "obs_inflow_vs_cong_pearson": 0.31980723111175835,
+      "model_inflow_vs_cong_pearson": 0.3083431720095768,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 22,
+      "obs_inflow_vs_cong_pearson": 0.3647620357100923,
+      "model_inflow_vs_cong_pearson": 0.3653731882014185,
+      "obs_n": 1725,
+      "model_n": 1725
+    },
+    {
+      "hour": 23,
+      "obs_inflow_vs_cong_pearson": 0.21727862123139843,
+      "model_inflow_vs_cong_pearson": 0.22858158893090394,
+      "obs_n": 1725,
+      "model_n": 1725
+    }
+  ],
+  "morning_peak_hour": 15
+}

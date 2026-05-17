@@ -1,0 +1,441 @@
+{
+  "config": {
+    "ckpt": "evaluation_outputs/paper_a/v3l_matchcut050_s0.pt",
+    "ckpt_cpc": 0.5497735142707825,
+    "n_grids_total": 1725,
+    "n_grids_instrumented": 349,
+    "n_boroughs_total": 33,
+    "n_boroughs_instrumented": 14,
+    "borough_var_threshold": 0.001,
+    "commute_annual_share": 0.22
+  },
+  "borough_diagnostic": {
+    "Barking and Dagenham": {
+      "n_grids": 36,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Barnet": {
+      "n_grids": 97,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Bexley": {
+      "n_grids": 75,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Brent": {
+      "n_grids": 41,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Bromley": {
+      "n_grids": 163,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Camden": {
+      "n_grids": 20,
+      "mean_hourly_var": 0.09154192954124431,
+      "is_real": true
+    },
+    "City of London": {
+      "n_grids": 4,
+      "mean_hourly_var": 0.11521835399361498,
+      "is_real": true
+    },
+    "Croydon": {
+      "n_grids": 100,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Ealing": {
+      "n_grids": 55,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Enfield": {
+      "n_grids": 90,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Greenwich": {
+      "n_grids": 48,
+      "mean_hourly_var": 0.052847619351145535,
+      "is_real": true
+    },
+    "Hackney": {
+      "n_grids": 19,
+      "mean_hourly_var": 0.06461370042899248,
+      "is_real": true
+    },
+    "Hammersmith and Fulham": {
+      "n_grids": 17,
+      "mean_hourly_var": 0.11801706443447385,
+      "is_real": true
+    },
+    "Haringey": {
+      "n_grids": 29,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Harrow": {
+      "n_grids": 54,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Havering": {
+      "n_grids": 134,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Hillingdon": {
+      "n_grids": 139,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Hounslow": {
+      "n_grids": 63,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Islington": {
+      "n_grids": 16,
+      "mean_hourly_var": 0.07462606972313722,
+      "is_real": true
+    },
+    "Kensington and Chelsea": {
+      "n_grids": 11,
+      "mean_hourly_var": 0.10513490088682875,
+      "is_real": true
+    },
+    "Kingston upon Thames": {
+      "n_grids": 48,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Lambeth": {
+      "n_grids": 26,
+      "mean_hourly_var": 0.054268494004662785,
+      "is_real": true
+    },
+    "Lewisham": {
+      "n_grids": 36,
+      "mean_hourly_var": 0.06209071964587534,
+      "is_real": true
+    },
+    "Merton": {
+      "n_grids": 37,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Newham": {
+      "n_grids": 38,
+      "mean_hourly_var": 0.051184894182812975,
+      "is_real": true
+    },
+    "Redbridge": {
+      "n_grids": 63,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Richmond upon Thames": {
+      "n_grids": 63,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Southwark": {
+      "n_grids": 32,
+      "mean_hourly_var": 0.060656207168179065,
+      "is_real": true
+    },
+    "Sutton": {
+      "n_grids": 47,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Tower Hamlets": {
+      "n_grids": 23,
+      "mean_hourly_var": 0.055935568406044564,
+      "is_real": true
+    },
+    "Waltham Forest": {
+      "n_grids": 42,
+      "mean_hourly_var": 0.0,
+      "is_real": false
+    },
+    "Wandsworth": {
+      "n_grids": 35,
+      "mean_hourly_var": 0.07811524436638048,
+      "is_real": true
+    },
+    "Westminster": {
+      "n_grids": 24,
+      "mean_hourly_var": 0.0751671780571911,
+      "is_real": true
+    }
+  },
+  "instrumented_boroughs": [
+    "Camden",
+    "City of London",
+    "Greenwich",
+    "Hackney",
+    "Hammersmith and Fulham",
+    "Islington",
+    "Kensington and Chelsea",
+    "Lambeth",
+    "Lewisham",
+    "Newham",
+    "Southwark",
+    "Tower Hamlets",
+    "Wandsworth",
+    "Westminster"
+  ],
+  "commute_share_per_hour": [
+    0.10138248845590264,
+    0.12359550554854185,
+    0.21999999978,
+    0.3606557374092985,
+    0.31976744176750943,
+    0.3606557376753561,
+    0.458333333317419,
+    0.5593220338877717,
+    0.4845814977902411,
+    0.21999999999633335,
+    0.09151414309331923,
+    0.07457627118517667,
+    0.08100147275285711,
+    0.10138248847770534,
+    0.10138248847770534,
+    0.1624161073803702,
+    0.2701754385933312,
+    0.3142857142822606,
+    0.2320675105452592,
+    0.123595505615663,
+    0.0780141843953188,
+    0.0658682634710818,
+    0.0699523052436426,
+    0.10138248847147599
+  ],
+  "correlations": {
+    "a_full_obs_vs_raw": {
+      "label": "(a) all grids \u00b7 obs OD inflow vs raw congestion",
+      "n": 41400,
+      "pearson": 0.3120046379595715,
+      "spearman": 0.2995154746650487
+    },
+    "a_full_mod_vs_raw": {
+      "label": "(a) all grids \u00b7 model inflow vs raw congestion",
+      "n": 41400,
+      "pearson": 0.296932606331368,
+      "spearman": 0.3030993488923004
+    },
+    "b_full_obs_vs_attr": {
+      "label": "(b) all grids \u00b7 obs OD inflow vs commute-attr congestion",
+      "n": 41400,
+      "pearson": 0.17820319748128322,
+      "spearman": 0.15215764903395915
+    },
+    "b_full_mod_vs_attr": {
+      "label": "(b) all grids \u00b7 model inflow vs commute-attr congestion",
+      "n": 41400,
+      "pearson": 0.16966223622140347,
+      "spearman": 0.15109140534189075
+    },
+    "c_inst_obs_vs_raw": {
+      "label": "(c) instrumented \u00b7 obs OD inflow vs raw congestion",
+      "n": 8376,
+      "pearson": 0.3641475833299461,
+      "spearman": 0.6903137520373442
+    },
+    "c_inst_mod_vs_raw": {
+      "label": "(c) instrumented \u00b7 model inflow vs raw congestion",
+      "n": 8376,
+      "pearson": 0.34358740629726603,
+      "spearman": 0.6976761287766103
+    },
+    "d_inst_obs_vs_attr": {
+      "label": "(d) instrumented \u00b7 obs OD inflow vs commute-attr congestion",
+      "n": 8376,
+      "pearson": 0.21736735429191198,
+      "spearman": 0.6113851195708485
+    },
+    "d_inst_mod_vs_attr": {
+      "label": "(d) instrumented \u00b7 model inflow vs commute-attr congestion \u2190 MAIN",
+      "n": 8376,
+      "pearson": 0.20499557454967385,
+      "spearman": 0.6205884433651319
+    }
+  },
+  "per_hour_instrumented_attributed": [
+    {
+      "hour": 0,
+      "obs_inst_attr_pearson": 0.31473911984706315,
+      "mod_inst_attr_pearson": 0.3010955320075659,
+      "commute_share": 0.10138248845590264,
+      "n": 349
+    },
+    {
+      "hour": 1,
+      "obs_inst_attr_pearson": -0.010599003097735657,
+      "mod_inst_attr_pearson": -0.0073029245673507884,
+      "commute_share": 0.12359550554854185,
+      "n": 349
+    },
+    {
+      "hour": 2,
+      "obs_inst_attr_pearson": -0.2203937713701314,
+      "mod_inst_attr_pearson": -0.19718003355188826,
+      "commute_share": 0.21999999978,
+      "n": 349
+    },
+    {
+      "hour": 3,
+      "obs_inst_attr_pearson": -0.25149279065361796,
+      "mod_inst_attr_pearson": -0.2448802627941034,
+      "commute_share": 0.3606557374092985,
+      "n": 349
+    },
+    {
+      "hour": 4,
+      "obs_inst_attr_pearson": -0.2854588207395068,
+      "mod_inst_attr_pearson": -0.2621520402672552,
+      "commute_share": 0.31976744176750943,
+      "n": 349
+    },
+    {
+      "hour": 5,
+      "obs_inst_attr_pearson": -0.19717698887002175,
+      "mod_inst_attr_pearson": -0.17538205044393468,
+      "commute_share": 0.3606557376753561,
+      "n": 349
+    },
+    {
+      "hour": 6,
+      "obs_inst_attr_pearson": -0.19027664443625936,
+      "mod_inst_attr_pearson": -0.16909379214638745,
+      "commute_share": 0.458333333317419,
+      "n": 349
+    },
+    {
+      "hour": 7,
+      "obs_inst_attr_pearson": -0.12786134397276214,
+      "mod_inst_attr_pearson": -0.11171529647410414,
+      "commute_share": 0.5593220338877717,
+      "n": 349
+    },
+    {
+      "hour": 8,
+      "obs_inst_attr_pearson": -0.0016833874767976055,
+      "mod_inst_attr_pearson": 0.0039242056750707745,
+      "commute_share": 0.4845814977902411,
+      "n": 349
+    },
+    {
+      "hour": 9,
+      "obs_inst_attr_pearson": 0.29101051443013387,
+      "mod_inst_attr_pearson": 0.2827095490636222,
+      "commute_share": 0.21999999999633335,
+      "n": 349
+    },
+    {
+      "hour": 10,
+      "obs_inst_attr_pearson": 0.28117844164974176,
+      "mod_inst_attr_pearson": 0.26384732922424226,
+      "commute_share": 0.09151414309331923,
+      "n": 349
+    },
+    {
+      "hour": 11,
+      "obs_inst_attr_pearson": 0.2735767360483975,
+      "mod_inst_attr_pearson": 0.270539553001479,
+      "commute_share": 0.07457627118517667,
+      "n": 349
+    },
+    {
+      "hour": 12,
+      "obs_inst_attr_pearson": 0.3275632374334431,
+      "mod_inst_attr_pearson": 0.3206276684727005,
+      "commute_share": 0.08100147275285711,
+      "n": 349
+    },
+    {
+      "hour": 13,
+      "obs_inst_attr_pearson": 0.3261461284542494,
+      "mod_inst_attr_pearson": 0.317663274952713,
+      "commute_share": 0.10138248847770534,
+      "n": 349
+    },
+    {
+      "hour": 14,
+      "obs_inst_attr_pearson": 0.2111221829483922,
+      "mod_inst_attr_pearson": 0.20818278904990933,
+      "commute_share": 0.10138248847770534,
+      "n": 349
+    },
+    {
+      "hour": 15,
+      "obs_inst_attr_pearson": 0.01630266695172988,
+      "mod_inst_attr_pearson": 0.01623142076872981,
+      "commute_share": 0.1624161073803702,
+      "n": 349
+    },
+    {
+      "hour": 16,
+      "obs_inst_attr_pearson": -0.058754337763577164,
+      "mod_inst_attr_pearson": -0.06617835074107843,
+      "commute_share": 0.2701754385933312,
+      "n": 349
+    },
+    {
+      "hour": 17,
+      "obs_inst_attr_pearson": -0.06415970045996354,
+      "mod_inst_attr_pearson": -0.0795866199390918,
+      "commute_share": 0.3142857142822606,
+      "n": 349
+    },
+    {
+      "hour": 18,
+      "obs_inst_attr_pearson": 0.160419667040144,
+      "mod_inst_attr_pearson": 0.14176665954185522,
+      "commute_share": 0.2320675105452592,
+      "n": 349
+    },
+    {
+      "hour": 19,
+      "obs_inst_attr_pearson": 0.19304213314067348,
+      "mod_inst_attr_pearson": 0.18787853388407227,
+      "commute_share": 0.123595505615663,
+      "n": 349
+    },
+    {
+      "hour": 20,
+      "obs_inst_attr_pearson": 0.19958617239322024,
+      "mod_inst_attr_pearson": 0.19442842809979088,
+      "commute_share": 0.0780141843953188,
+      "n": 349
+    },
+    {
+      "hour": 21,
+      "obs_inst_attr_pearson": 0.25760166274738017,
+      "mod_inst_attr_pearson": 0.2553527776559968,
+      "commute_share": 0.0658682634710818,
+      "n": 349
+    },
+    {
+      "hour": 22,
+      "obs_inst_attr_pearson": 0.31023588041375094,
+      "mod_inst_attr_pearson": 0.3184730052825335,
+      "commute_share": 0.0699523052436426,
+      "n": 349
+    },
+    {
+      "hour": 23,
+      "obs_inst_attr_pearson": 0.2828146915766647,
+      "mod_inst_attr_pearson": 0.28646611956866025,
+      "commute_share": 0.10138248847147599,
+      "n": 349
+    }
+  ]
+}
