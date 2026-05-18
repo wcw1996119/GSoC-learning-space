@@ -110,3 +110,45 @@ def cervero_match_cosine(soc_props: np.ndarray,
     dest_unit = expected_soc / dest_norm
 
     return soc_unit @ dest_unit.T   # (N, N) ∈ [0, 1]
+
+
+def per_soc_demand_share(soc_props: np.ndarray,
+                          epsilon: np.ndarray,
+                          grid_industry: np.ndarray) -> np.ndarray:
+    """Per-SOC destination demand share — individual-level match for ABM agents.
+
+    For each destination j and worker SOC=k, returns the share of jobs at j that
+    demand SOC=k workers (given j's industry mix). This is the *individual*
+    counterpart to the aggregate place-level match: an ABM agent with SOC=k
+    looking at destination j sees demand_share[j, k] as "what fraction of j's
+    jobs are for me".
+
+    Formula:
+        expected_soc[j, k] = Σ_c industry_prop[j, c] · ε[k, c]
+        demand_share[j, k] = expected_soc[j, k] / Σ_{k'} expected_soc[j, k']
+
+    Args:
+      soc_props:     (N, 9) origin SOC proportions — unused here but kept in
+                              signature for parallelism with cervero_match_*.
+                              Used downstream as mixture weight: P(SOC=k | origin=i).
+      epsilon:       (9, 8) empirical P(SOC=k | SIC=c), column sum = 1
+      grid_industry: (N, 8) destination industry mix; any normalisation accepted
+
+    Returns:
+      demand_share: (N, 9) entries in [0, 1]; rows sum to 1.
+                            Indexed as demand_share[destination j, worker SOC k].
+
+    Anchored to:
+      - Stoll MA, Houston G (2005) "Spatial mismatch and occupational match" —
+        Stoll's "effective jobs accessible to skill group k" formulation.
+      - Schwanen T et al (2003) "Travel behaviour and the urban form" —
+        individual-level occupational sorting in commute patterns.
+
+    Beijing portability: same ε formula, replace grid_industry with POI mix.
+    """
+    del soc_props  # signature consistency; not used here
+    gi_prop = to_proportion(grid_industry)
+    expected_soc = gi_prop @ epsilon.T          # (N, 9)
+    row_sum = expected_soc.sum(axis=1, keepdims=True)
+    row_sum = np.where(row_sum > 1e-12, row_sum, 1.0)
+    return expected_soc / row_sum               # (N, 9), rows sum to 1

@@ -155,6 +155,15 @@ class CerveroShenHead(nn.Module):
         k_match_init: float = 10.0,         # Initial sharpness of match filter sigmoid.
                                             # Larger = sharper cutoff. Default 10 (moderate).
                                             # Use ≥20 for near-hard cutoff behaviour.
+        use_soc_mixture: bool = False,      # Per-SOC individual-level match (ABM-friendly).
+                                            # When True, each origin's workers are decomposed
+                                            # into 9 SOC sub-populations; each sub-pop sees
+                                            # its own per-SOC destination demand share
+                                            # (replaces the place-aggregate cosine match).
+                                            # Mutually exclusive with use_stoll_match and
+                                            # use_consideration_filter (match floor).
+                                            # ABM downstream gets P(j | agent.SOC, i, t) directly.
+        n_soc: int = 9,                     # Number of SOC categories (default 9 for ONS SOC2020 maj).
     ):
         super().__init__()
         self.n_modes = n_modes
@@ -169,6 +178,13 @@ class CerveroShenHead(nn.Module):
         self.use_tier_mixture = bool(use_tier_mixture)
         self.n_income_tiers = int(n_tiers)
         self.use_push_pull = bool(use_push_pull)
+        self.use_soc_mixture = bool(use_soc_mixture)
+        self.n_soc = int(n_soc)
+        if self.use_soc_mixture:
+            assert not self.use_stoll_match, \
+                "soc_mixture replaces aggregate Stoll log_match; disable use_stoll_match"
+            assert not self.use_match_gate, \
+                "soc_mixture replaces match_gate (place-aggregate match)"
 
         # V_upper destination-attractor params (α, γ, ν, δ_match)
         # If use_tier_mixture: each becomes (n_tiers,) tensor for tier-specific RUM
@@ -605,6 +621,8 @@ class CerveroShenHead(nn.Module):
                     [int(i) for i in (self.busy_dest_to_k_idx >= 0).nonzero(as_tuple=True)[0].tolist()]
                     if self.busy_dest_to_k_idx is not None and self.busy_dest_to_k_idx.numel() > 1 else None
                 ),
+                "use_soc_mixture": self.use_soc_mixture,
+                "n_soc": self.n_soc if self.use_soc_mixture else None,
                 "use_match_gate": self.use_match_gate,
                 "gate_steepness": float(self.gate_steepness) if self.gate_steepness is not None else None,
                 "gate_threshold": float(self.gate_threshold) if self.gate_threshold is not None else None,

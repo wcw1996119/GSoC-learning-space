@@ -80,6 +80,8 @@ def forward_cs(
     grid_borough_idx: torch.Tensor,
     observed_OD: torch.Tensor,
     train_mask: torch.Tensor,
+    soc_props_per_origin: Optional[torch.Tensor] = None,    # (N, 9)
+    per_soc_demand_share_j: Optional[torch.Tensor] = None,  # (N, 9), row-sum 1
 ):
     V_gnn_jt = encoder(X_static, X_dynamic, edge_index)              # (T, N)
     T, N = V_gnn_jt.shape
@@ -237,7 +239,10 @@ def forward_cs(
         # build V_upper_k: (K, T, N, N)
         V_uppers = []
         for k in range(K):
-            if log_match_signal is not None:
+            if rum.use_soc_mixture:
+                # Pure gravity at tier-level; per-SOC log_match added after V_dest is built.
+                V_M_k = gamma_M[k] * log_M_j.view(1, N)                     # (N, N)
+            elif log_match_signal is not None:
                 # Stoll-Houston: V_M = γ · (log_M + log_match)   "effective jobs"
                 V_M_k = gamma_M[k] * (log_M_j.view(1, N) + log_match_signal)  # (N, N)
             else:
@@ -353,7 +358,44 @@ def forward_cs(
                 V_dest = (1.0 - blend) * V_rum_dest + V_nn_scaled
 
     # Tier-mixture: log P(j|i) = logsumexp_k(log π_k + log softmax_j(V_upper_k))
-    if rum.use_tier_mixture:
+    if rum.use_tier_mixture and rum.use_soc_mixture:
+        # ----- SOC × tier joint mixture (ABM-friendly individual match) -----
+        # For each tier k and SOC s, add γ_M[k] · log(demand_share[j, s]) to V_dest[k]
+        # and softmax over j. Aggregate: P(j|i,t) = Σ_{k,s} π_k(i) · ψ_s(i) · softmax_ks(j)
+        # Memory: loop k × t with gradient checkpointing per inner step so saved
+        # activations stay bounded by one (S, N, N) tile (~107 MB at 1725 grid).
+        assert per_soc_demand_share_j is not None and soc_props_per_origin is not None, \
+            "use_soc_mixture requires per_soc_demand_share_j and soc_props_per_origin"
+        from torch.utils.checkpoint import checkpoint as _ckpt
+        S = rum.n_soc                                                    # 9
+        T_t = V_dest.shape[1] if V_dest.dim() == 4 else V_dest.shape[0]
+        log_demand_share_T = torch.log(per_soc_demand_share_j.clamp(min=1e-6)).t().contiguous()  # (S, N)
+        log_pi = torch.log(income_tier_props.t() + 1e-9)                 # (K, N)
+        log_psi = torch.log(soc_props_per_origin.t() + 1e-9)             # (S, N)
+
+        def _ks_step(V_kt, V_match_s, log_w):
+            # V_kt (N, N), V_match_s (S, N), log_w (S, N, 1)
+            V_kt_s = V_kt.unsqueeze(0) + V_match_s.unsqueeze(1)          # (S, N, N)
+            log_P = F.log_softmax(V_kt_s, dim=-1)                        # (S, N, N)
+            return torch.logsumexp(log_w + log_P, dim=0)                 # (N, N)
+
+        use_ckpt = V_dest.requires_grad   # checkpoint only when grads needed (val pass skips)
+        log_P_D_slices = []
+        for k in range(K):
+            V_match_s_for_k = gamma_M[k] * log_demand_share_T            # (S, N)
+            log_w_k_s_per_i = log_pi[k].view(1, N, 1) + log_psi.view(S, N, 1)  # (S, N, 1)
+            log_P_t_slices_k = []
+            for t in range(T_t):
+                if use_ckpt:
+                    log_P_kt = _ckpt(_ks_step, V_dest[k, t], V_match_s_for_k,
+                                     log_w_k_s_per_i, use_reentrant=False)
+                else:
+                    log_P_kt = _ks_step(V_dest[k, t], V_match_s_for_k, log_w_k_s_per_i)
+                log_P_t_slices_k.append(log_P_kt)
+            log_P_D_slices.append(torch.stack(log_P_t_slices_k, dim=0))   # (T, N, N) for tier k
+        log_P_D = torch.stack(log_P_D_slices, dim=0)                      # (K, T, N, N)
+        log_P_D = torch.logsumexp(log_P_D, dim=0)                         # (T, N, N)
+    elif rum.use_tier_mixture:
         # V_dest shape: (K, T, N, N)
         log_P_per_tier = F.log_softmax(V_dest, dim=-1)                  # (K, T, N, N)
         # income_tier_props shape (N, K) → log_pi (K, 1, N, 1) broadcast on T, j-axis
@@ -523,6 +565,18 @@ def forward_cs(
             "attribute_shares_across_j": attribute_shares_across_j,
             "ortho_cos_sq": float(ortho_cos_sq),
         }
+        if rum.use_soc_mixture and per_soc_demand_share_j is not None:
+            ds = per_soc_demand_share_j                                 # (N, S)
+            # Range per SOC, swing in log-units (= γ-weighted contribution to V_dest)
+            log_ds = torch.log(ds.clamp(min=1e-6))                      # (N, S)
+            log_swing_per_soc = (log_ds.max(dim=0).values - log_ds.min(dim=0).values).tolist()  # (S,)
+            gamma_weighted_swing = [(float(rum.gamma_M.mean()) * v) for v in log_swing_per_soc]
+            diagnostic["per_soc_demand_share_per_soc_p05_p95"] = [
+                [float(torch.quantile(ds[:, s], 0.05)),
+                 float(torch.quantile(ds[:, s], 0.95))] for s in range(rum.n_soc)
+            ]
+            diagnostic["per_soc_log_demand_swing"] = log_swing_per_soc
+            diagnostic["per_soc_gamma_weighted_swing"] = gamma_weighted_swing
 
     return {
         "log_P_D": log_P_D,
@@ -616,6 +670,12 @@ def main():
                     help="Lower bound on match filter threshold. Default 0 = model "
                          "learns freely (typically learns ≈0, no filtering). Set 0.30 "
                          "to force destinations with match<0.30 to be filtered.")
+    ap.add_argument("--use-soc-mixture", action="store_true",
+                    help="Per-SOC individual-level match (ABM-friendly). Replaces aggregate "
+                         "cosine-match in V_dest with mixture over 9 SOC sub-populations, "
+                         "each seeing its own demand_share[j, k] at destinations. "
+                         "Requires --use-tier-mixture; incompatible with --use-stoll-match, "
+                         "--use-match-gate, and --use-consideration-filter (in first MVP).")
     ap.add_argument("--k-match-init", type=float, default=10.0,
                     help="Initial sharpness of match filter sigmoid. Larger = sharper "
                          "cutoff. Use ≥20 for near-hard cutoff behavior.")
@@ -724,6 +784,32 @@ def main():
         income_tier_props = torch.full((N_grid, args.n_income_tiers), 1.0 / args.n_income_tiers)
         print(f"  WARNING: income_tier_props not in aux, using uniform")
 
+    # SOC mixture: per-SOC demand share at each destination + origin SOC composition.
+    # Required by --use-soc-mixture; loaded unconditionally so diagnostics can run.
+    if "soc_props" in aux.files and "grid_industry_prop" in aux.files and "epsilon" in aux.files:
+        # Load v3's occupation_match via absolute path (avoid v2 shadowing on sys.path).
+        _om_spec = importlib.util.spec_from_file_location(
+            "v3_occ_match", V3_ROOT / "models_lib" / "occupation_match.py"
+        )
+        _om_mod = importlib.util.module_from_spec(_om_spec)
+        _om_spec.loader.exec_module(_om_mod)
+        _per_soc_demand_share = _om_mod.per_soc_demand_share
+        soc_props_np = aux["soc_props"]                  # (N, 9)
+        grid_ind_np = aux["grid_industry_prop"]          # (N, 8)
+        eps_np = aux["epsilon"]                          # (9, 8)
+        demand_share_np = _per_soc_demand_share(soc_props_np, eps_np, grid_ind_np)   # (N, 9)
+        soc_props_per_origin = torch.from_numpy(soc_props_np).float()
+        per_soc_demand_share_j = torch.from_numpy(demand_share_np).float()
+        print(f"  per-SOC: soc_props {tuple(soc_props_per_origin.shape)}, "
+              f"demand_share_j {tuple(per_soc_demand_share_j.shape)}; "
+              f"demand_share range [{per_soc_demand_share_j.min():.3f}, {per_soc_demand_share_j.max():.3f}], "
+              f"mean per SOC = {per_soc_demand_share_j.mean(0).tolist()}")
+    else:
+        soc_props_per_origin = None
+        per_soc_demand_share_j = None
+        if args.use_soc_mixture:
+            raise RuntimeError("--use-soc-mixture requires soc_props + grid_industry_prop + epsilon in aux")
+
     grid_borough_idx = d["grid_borough_idx"].long()
     n_boroughs = int(grid_borough_idx.max().item()) + 1
 
@@ -769,6 +855,9 @@ def main():
     pct_kids = pct_kids.to(device)
     mean_cars = mean_cars.to(device)
     income_tier_props = income_tier_props.to(device)
+    if soc_props_per_origin is not None:
+        soc_props_per_origin = soc_props_per_origin.to(device)
+        per_soc_demand_share_j = per_soc_demand_share_j.to(device)
     pi_m_pair = pair_mode_share.to(device).float()
     grid_borough_idx = grid_borough_idx.to(device)
 
@@ -813,6 +902,8 @@ def main():
         use_stoll_match=args.use_stoll_match,
         match_thresh_floor=args.match_thresh_floor,
         k_match_init=args.k_match_init,
+        use_soc_mixture=args.use_soc_mixture,
+        n_soc=9,
     ).to(device)
 
     # If busy-dest boost enabled: compute top-K busy destinations from training data
@@ -982,6 +1073,8 @@ def main():
             t_per_mode, mode_names, log_d_ij, match_prob, log_M_j, log_W_j, log_D_j,
             income_score, pct_kids, mean_cars, income_tier_props,
             pi_m_pair, grid_borough_idx, observed_OD, train_mask,
+            soc_props_per_origin=soc_props_per_origin,
+            per_soc_demand_share_j=per_soc_demand_share_j,
         )
         loss = (out["nll_dest"]
                 + kl_weight * out["ce_mode"]
@@ -1005,6 +1098,8 @@ def main():
                 t_per_mode, mode_names, log_d_ij, match_prob, log_M_j, log_W_j, log_D_j,
                 income_score, pct_kids, mean_cars, income_tier_props,
                 pi_m_pair, grid_borough_idx, observed_OD, val_mask,
+                soc_props_per_origin=soc_props_per_origin,
+                per_soc_demand_share_j=per_soc_demand_share_j,
             )
             val_nll = float(out_e["nll_dest"])
             val_cpc = cpc(out_e["log_P_D"], observed_OD, val_mask)
@@ -1074,6 +1169,8 @@ def main():
             t_per_mode, mode_names, log_d_ij, match_prob, log_M_j, log_W_j, log_D_j,
             income_score, pct_kids, mean_cars, income_tier_props,
             pi_m_pair, grid_borough_idx, observed_OD, val_mask,
+            soc_props_per_origin=soc_props_per_origin,
+            per_soc_demand_share_j=per_soc_demand_share_j,
         )
         final_cpc = cpc(out_final["log_P_D"], observed_OD, val_mask)
         final_diag = out_final["diagnostic"]
@@ -1136,6 +1233,8 @@ def main():
                 t_per_mode, mode_names, log_d_ij, match_prob, log_M_j, log_W_j, log_D_j,
                 income_score, pct_kids, mean_cars, income_tier_props,
                 pi_m_pair, grid_borough_idx, observed_OD, val_mask,
+                soc_props_per_origin=soc_props_per_origin,
+                per_soc_demand_share_j=per_soc_demand_share_j,
             )
             abl_cpc = cpc(out_abl["log_P_D"], observed_OD, val_mask)
             ablation_cpc[comp_name] = abl_cpc
@@ -1159,6 +1258,8 @@ def main():
                 t_per_mode, mode_names, log_d_ij, match_prob, log_M_j, log_W_j, log_D_j,
                 income_score, pct_kids, mean_cars, income_tier_props,
                 pi_m_pair, grid_borough_idx, observed_OD, val_mask,
+                soc_props_per_origin=soc_props_per_origin,
+                per_soc_demand_share_j=per_soc_demand_share_j,
             )
             cpc_no_filter = cpc(out_no_filter["log_P_D"], observed_OD, val_mask)
             rum.use_consideration_filter = orig_filter_flag
