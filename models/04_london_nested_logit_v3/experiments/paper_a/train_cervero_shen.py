@@ -83,8 +83,17 @@ def forward_cs(
     soc_props_per_origin: Optional[torch.Tensor] = None,    # (N, 9)
     per_soc_demand_share_j: Optional[torch.Tensor] = None,  # (N, 9), row-sum 1
 ):
-    V_gnn_jt = encoder(X_static, X_dynamic, edge_index)              # (T, N)
-    T, N = V_gnn_jt.shape
+    _V_gnn_raw = encoder(X_static, X_dynamic, edge_index)
+    # Encoder may return (T, N) [legacy per-grid] or (T, N, N) [pair-aware NN]
+    pair_aware_nn = (_V_gnn_raw.dim() == 3)
+    if pair_aware_nn:
+        T, N, _ = _V_gnn_raw.shape
+        V_gnn_jt = None                    # not used in pair-aware mode
+        V_gnn_pair = _V_gnn_raw            # (T, N, N) ready
+    else:
+        T, N = _V_gnn_raw.shape
+        V_gnn_jt = _V_gnn_raw              # (T, N) legacy
+        V_gnn_pair = None
     M = rum.n_modes
 
     # ---- precompute per-destination λ_{b(j)} ----
@@ -233,50 +242,151 @@ def forward_cs(
         V_busy_dest = None
 
     if rum.use_tier_mixture:
-        # ---- Tier mixture path: compute V_upper_k per tier, then marginalize ----
-        K = rum.n_income_tiers                                          # 3
-        # alpha_w/gamma_M/nu_D/delta_m: each (K,)
-        # build V_upper_k: (K, T, N, N)
-        V_uppers = []
-        for k in range(K):
-            if rum.use_soc_mixture:
-                # Pure gravity at tier-level; per-SOC log_match added after V_dest is built.
-                V_M_k = gamma_M[k] * log_M_j.view(1, N)                     # (N, N)
-            elif log_match_signal is not None:
-                # Stoll-Houston: V_M = γ · (log_M + log_match)   "effective jobs"
-                V_M_k = gamma_M[k] * (log_M_j.view(1, N) + log_match_signal)  # (N, N)
+        # ---- Latent-class mixture: K = n_classes (27 if SOC×tier; else 3) ----
+        # Each class c has its own complete utility-function parameter set.
+        # Per-class V_rum_c is computed and immediately combined with NN + softmaxed
+        # to produce a per-class log_P contribution; we accumulate via logaddexp
+        # rather than stacking, to keep peak memory at ~one (T, N, N) tensor.
+        K = rum.n_classes
+        if rum.use_soc_mixture:
+            S = rum.n_soc
+            assert per_soc_demand_share_j is not None and soc_props_per_origin is not None, \
+                "use_soc_mixture requires per_soc_demand_share_j and soc_props_per_origin"
+            log_demand_share = torch.log(per_soc_demand_share_j.clamp(min=1e-6))  # (N, S)
+            K_tier = rum.n_income_tiers
+            joint = (
+                income_tier_props.view(N, K_tier, 1) * soc_props_per_origin.view(N, 1, S)
+            ).reshape(N, K)                                                  # (N, K)
+            log_joint_per_class = torch.log(joint.t() + 1e-9)                # (K, N)
+            # Stoll-Houston coupling on aggregate cosine match — same as baseline.
+            # γ_M[c] couples to BOTH log_M_j AND log_cosine_match[i, j] so the
+            # OD-pair-specific signal is preserved (option B+ vs option B).
+            log_cosine_match = torch.log(match_signal.clamp(min=1e-6))       # (N, N)
+        else:
+            log_joint_per_class = torch.log(income_tier_props.t() + 1e-9)    # (K, N)
+
+        # Precompute NN scale once (class-independent) — used both inside the
+        # class loop for V_dest_c and for downstream diagnostics.
+        # Pair-aware NN: V_gnn is (T, N, N) directly. Legacy: broadcast (T, N) → (T, N, N).
+        if pair_aware_nn:
+            V_gnn = V_gnn_pair
+        else:
+            V_gnn = V_gnn_jt.view(T, 1, N).expand(T, N, N)
+        if rum.gnn_mode == "residual":
+            w_nn = rum.gnn_residual_scale
+            V_nn_scaled = (torch.zeros(T, N, N, device=V_gnn.device)
+                           if w_nn is None else w_nn * V_gnn)
+            _gnn_mult = None
+            _gnn_g = None
+            _gnn_blend = None
+        elif rum.gnn_mode == "mult":
+            g_mult = rum.gnn_mult_scale
+            if g_mult is None:
+                _gnn_mult = None
+                V_nn_scaled = torch.zeros(T, N, N, device=V_gnn.device)
             else:
-                # Legacy: V_M = (γ + δ·match) · log_M             multiplicative interaction
-                gamma_eff_k = gamma_M[k] + delta_m[k] * match_signal        # (N, N)
-                V_M_k = gamma_eff_k * log_M_j.view(1, N)                    # (N, N)
-            V_other_k = (alpha_w[k] * log_W_j + nu_D[k] * log_D_j).view(1, N)  # (1, N)
-            V_rum_k = (V_M_k + V_other_k).unsqueeze(0) + lam_view * IV_mode    # (T, N, N)
+                _gnn_mult = 1.0 + g_mult * torch.sigmoid(V_gnn)
+                V_nn_scaled = (_gnn_mult - 1.0)
+            _gnn_g = None
+            _gnn_blend = None
+        elif rum.gnn_mode == "moe":
+            _gnn_g = rum.gate_per_origin.view(1, N, 1)
+            V_nn_scaled = _gnn_g * V_gnn
+            _gnn_mult = None
+            _gnn_blend = None
+        else:  # convex
+            _gnn_blend = rum.gnn_blend
+            V_nn_scaled = (torch.zeros(T, N, N, device=V_gnn.device)
+                           if _gnn_blend is None else _gnn_blend * V_gnn)
+            _gnn_mult = None
+            _gnn_g = None
+
+        from torch.utils.checkpoint import checkpoint as _ckpt
+        use_ckpt = rum.training or any(p.requires_grad for p in rum.parameters())
+
+        # Pre-extract per-class kink params as tensors (small) so checkpoint can take them.
+        # The actual (T, N, N) kink_term is computed inside the checkpoint to avoid saving 27 of them.
+        if rum.use_tier_threshold:
+            T_thresholds = rum.T_threshold_per_tier                          # (K,)
+            beta_kinks = rum.beta_t_kink_per_tier                            # (K,)
+            k_sharps = rum.k_sharpness_per_tier                              # (K,)
+        # log_filter_mask_per_tier is None in soc-mix mode (mutex), so skip filter add.
+
+        def _class_logp_step(V_M_c, V_other_c, log_pi_c_row,
+                              T_c, beta_kink_c, k_sharp_c, has_kink_t):
+            # All (T, N, N) intermediates created here are NOT retained for backward.
+            V_rum_c = (V_M_c + V_other_c).unsqueeze(0) + lam_view * IV_mode
             if V_push_pull is not None:
-                V_rum_k = V_rum_k + V_push_pull                          # broadcast (1, N, N) → (T, N, N)
+                V_rum_c = V_rum_c + V_push_pull
             if V_self_loop is not None:
-                V_rum_k = V_rum_k + V_self_loop                          # (T, N, N) self-loop boost
+                V_rum_c = V_rum_c + V_self_loop
             if V_busy_dest is not None:
-                V_rum_k = V_rum_k + V_busy_dest                          # (T, 1, N) broadcast on i
-            # Tier-specific commute-time threshold kink (Bhat 1995 heterogeneous VOT)
-            # Sigmoid-smooth transition (no hard kink): disutility is gentle below T_k,
-            # accelerates smoothly around T_k with sharpness k_k.
-            #   kink(t) = β_kink_k · t · sigmoid((t - T_k) / k_k)
-            # Below T_k: sigmoid ≈ 0, almost no extra disutility.
-            # Above T_k: sigmoid → 1, extra per-minute penalty kicks in fully.
-            # Transition width controlled by k_k (small → sharp, large → gentle).
-            if rum.use_tier_threshold:
-                T_k = rum.T_threshold_per_tier[k]                        # scalar (minutes)
-                beta_kink_k = rum.beta_t_kink_per_tier[k]                # scalar ≤ 0
-                k_sharp = rum.k_sharpness_per_tier[k]                    # scalar > 0 (minutes)
-                sig = torch.sigmoid((t_min_per_pair - T_k) / k_sharp)    # (T, N, N) in [0, 1]
-                kink_k = beta_kink_k * t_min_per_pair * sig              # (T, N, N) smooth
-                V_rum_k = V_rum_k + kink_k
-            # Lexicographic consideration filter (log-mask added to V_upper_k)
-            if log_filter_mask_per_tier is not None:
-                V_rum_k = V_rum_k + log_filter_mask_per_tier[k]          # (T, N, N)
-            V_uppers.append(V_rum_k)
-        V_uppers_stacked = torch.stack(V_uppers, dim=0)                  # (K, T, N, N)
-        V_rum_dest = V_uppers_stacked                                    # downstream knows tier dim
+                V_rum_c = V_rum_c + V_busy_dest
+            if has_kink_t:
+                sig = torch.sigmoid((t_min_per_pair - T_c) / k_sharp_c)
+                V_rum_c = V_rum_c + beta_kink_c * t_min_per_pair * sig
+            if rum.gnn_mode == "residual":
+                V_dest_c = V_rum_c + V_nn_scaled
+            elif rum.gnn_mode == "mult":
+                V_dest_c = V_rum_c if _gnn_mult is None else V_rum_c * _gnn_mult
+            elif rum.gnn_mode == "moe":
+                V_dest_c = (1.0 - _gnn_g) * V_rum_c + _gnn_g * V_gnn
+            else:
+                V_dest_c = (V_rum_c if _gnn_blend is None
+                            else (1.0 - _gnn_blend) * V_rum_c + V_nn_scaled)
+            log_P_c = F.log_softmax(V_dest_c, dim=-1)
+            return log_pi_c_row.view(1, N, 1) + log_P_c
+
+        log_P_accum = None
+        V_rum_dest_avg = torch.zeros(T, N, N, device=V_gnn.device)
+        has_kink = rum.use_tier_threshold
+        for c in range(K):
+            # Structured-heterogeneity lookup:
+            #   tier_idx selects tier-only params (α_W, ν_D, T, β_kink, k_sharp)
+            #   soc_idx selects SOC-only params (δ_match)
+            #   c selects tier×SOC params (γ_M)
+            if rum.use_soc_mixture:
+                tier_idx = c // S
+                soc_idx = c % S
+                log_dshare_for_c = log_demand_share[:, soc_idx]              # (N,)
+                # Stoll coupling on cosine match + per-SOC refinement
+                V_M_c = (gamma_M[c] * (log_M_j.view(1, N) + log_cosine_match)
+                         + delta_m[soc_idx] * log_dshare_for_c.view(1, N))   # (N, N)
+            else:
+                tier_idx = c                                                  # plain tier mixture
+                if log_match_signal is not None:
+                    V_M_c = gamma_M[c] * (log_M_j.view(1, N) + log_match_signal)
+                else:
+                    gamma_eff_c = gamma_M[c] + delta_m[c] * match_signal
+                    V_M_c = gamma_eff_c * log_M_j.view(1, N)
+            V_other_c = (alpha_w[tier_idx] * log_W_j
+                         + nu_D[tier_idx] * log_D_j).view(1, N)
+            T_c = T_thresholds[tier_idx] if has_kink else log_M_j.new_zeros(())
+            bk_c = beta_kinks[tier_idx] if has_kink else log_M_j.new_zeros(())
+            ks_c = k_sharps[tier_idx] if has_kink else log_M_j.new_ones(())
+            if use_ckpt:
+                weighted_c = _ckpt(_class_logp_step,
+                                   V_M_c, V_other_c, log_joint_per_class[c],
+                                   T_c, bk_c, ks_c, has_kink,
+                                   use_reentrant=False)
+            else:
+                weighted_c = _class_logp_step(V_M_c, V_other_c,
+                                              log_joint_per_class[c],
+                                              T_c, bk_c, ks_c, has_kink)
+            log_P_accum = (weighted_c if log_P_accum is None
+                           else torch.logaddexp(log_P_accum, weighted_c))
+            # Detached diagnostic accumulator
+            with torch.no_grad():
+                V_rum_c_diag = (V_M_c + V_other_c).unsqueeze(0) + lam_view * IV_mode
+                if V_push_pull is not None: V_rum_c_diag = V_rum_c_diag + V_push_pull
+                if V_self_loop is not None: V_rum_c_diag = V_rum_c_diag + V_self_loop
+                if V_busy_dest is not None: V_rum_c_diag = V_rum_c_diag + V_busy_dest
+                if has_kink:
+                    sig_d = torch.sigmoid((t_min_per_pair - T_c) / ks_c)
+                    V_rum_c_diag = V_rum_c_diag + bk_c * t_min_per_pair * sig_d
+                V_rum_dest_avg = V_rum_dest_avg + V_rum_c_diag / K
+        log_P_D = log_P_accum
+        V_rum_dest = V_rum_dest_avg
     else:
         # single-RUM path (original)
         if log_match_signal is not None:
@@ -294,115 +404,40 @@ def forward_cs(
         if V_busy_dest is not None:
             V_rum_dest = V_rum_dest + V_busy_dest
 
-    V_gnn = V_gnn_jt.view(T, 1, N).expand(T, N, N)                     # (T, N, N)
-
-    # Compute V_dest per tier (if tier mixture) or directly (single RUM)
-    if rum.gnn_mode == "residual":
-        w_nn = rum.gnn_residual_scale
-        if w_nn is None:
-            V_nn_scaled = torch.zeros(T, N, N, device=V_gnn.device)
+    # Single-RUM path: compute V_gnn + V_dest + log_P_D.
+    # (Tier-mixture path already computed log_P_D and V_rum_dest_avg / V_nn_scaled inside the per-class loop.)
+    if not rum.use_tier_mixture:
+        if pair_aware_nn:
+            V_gnn = V_gnn_pair
         else:
-            V_nn_scaled = w_nn * V_gnn                                  # (T, N, N)
-        if rum.use_tier_mixture:
-            # V_rum_dest is (K, T, N, N), add same NN to each
-            V_dest = V_rum_dest + V_nn_scaled.unsqueeze(0)              # (K, T, N, N)
-        else:
-            V_dest = V_rum_dest + V_nn_scaled                            # (T, N, N)
-    elif rum.gnn_mode == "mult":
-        # Multiplicative gating: V_total = V_RUM · (1 + γ_mult · sigmoid(V_GNN))
-        # NN gate modulates RUM amplitude per (t, i, j) instead of adding residual.
-        g_mult = rum.gnn_mult_scale
-        if g_mult is None:
-            V_nn_scaled = torch.zeros(T, N, N, device=V_gnn.device)
-            V_dest = V_rum_dest
-        else:
-            gate = torch.sigmoid(V_gnn)                                  # (T, N, N) in [0, 1]
-            mult = 1.0 + g_mult * gate                                   # (T, N, N) in [1, 1+γ]
-            if rum.use_tier_mixture:
-                V_dest = V_rum_dest * mult.unsqueeze(0)                  # (K, T, N, N)
+            V_gnn = V_gnn_jt.view(T, 1, N).expand(T, N, N)               # (T, N, N)
+        if rum.gnn_mode == "residual":
+            w_nn = rum.gnn_residual_scale
+            V_nn_scaled = (torch.zeros(T, N, N, device=V_gnn.device)
+                           if w_nn is None else w_nn * V_gnn)
+            V_dest = V_rum_dest + V_nn_scaled
+        elif rum.gnn_mode == "mult":
+            g_mult = rum.gnn_mult_scale
+            if g_mult is None:
+                V_nn_scaled = torch.zeros(T, N, N, device=V_gnn.device)
+                V_dest = V_rum_dest
             else:
-                V_dest = V_rum_dest * mult                                # (T, N, N)
-            # For attribute-share diagnostic: report (V_dest - V_rum_dest) as NN contribution
-            # — i.e., the modulation amount. Tier-mixture: use tier 0 to keep shape (T,N,N).
-            if rum.use_tier_mixture:
-                V_nn_scaled = (V_dest - V_rum_dest)[0]                   # (T, N, N)
-            else:
-                V_nn_scaled = V_dest - V_rum_dest                        # (T, N, N)
-    elif rum.gnn_mode == "moe":
-        # Per-origin Mixture-of-Experts gating:
-        # g_i ∈ [0, 1] decides this origin's reliance on RUM vs NN.
-        # V_dest[t, i, j] = (1 - g_i) · V_RUM + g_i · V_GNN
-        gate = rum.gate_per_origin                                       # (N,)
-        g = gate.view(1, N, 1)                                            # broadcast on T, j
-        if rum.use_tier_mixture:
-            V_dest = (1.0 - g.unsqueeze(0)) * V_rum_dest + g.unsqueeze(0) * V_gnn.unsqueeze(0)  # (K,T,N,N)
-            V_nn_scaled = (g * V_gnn).expand(T, N, N)                    # representative NN contribution
-        else:
-            V_dest = (1.0 - g) * V_rum_dest + g * V_gnn                   # (T, N, N)
+                gate = torch.sigmoid(V_gnn)
+                mult = 1.0 + g_mult * gate
+                V_dest = V_rum_dest * mult
+                V_nn_scaled = V_dest - V_rum_dest
+        elif rum.gnn_mode == "moe":
+            gate = rum.gate_per_origin
+            g = gate.view(1, N, 1)
+            V_dest = (1.0 - g) * V_rum_dest + g * V_gnn
             V_nn_scaled = g * V_gnn
-    else:
-        blend = rum.gnn_blend
-        if blend is None:
-            V_nn_scaled = torch.zeros(T, N, N, device=V_gnn.device)
-        else:
-            V_nn_scaled = blend * V_gnn
-        if rum.use_tier_mixture:
-            if blend is None:
-                V_dest = V_rum_dest
-            else:
-                V_dest = (1.0 - blend) * V_rum_dest + V_nn_scaled.unsqueeze(0)
-        else:
-            if blend is None:
-                V_dest = V_rum_dest
-            else:
-                V_dest = (1.0 - blend) * V_rum_dest + V_nn_scaled
-
-    # Tier-mixture: log P(j|i) = logsumexp_k(log π_k + log softmax_j(V_upper_k))
-    if rum.use_tier_mixture and rum.use_soc_mixture:
-        # ----- SOC × tier joint mixture (ABM-friendly individual match) -----
-        # For each tier k and SOC s, add γ_M[k] · log(demand_share[j, s]) to V_dest[k]
-        # and softmax over j. Aggregate: P(j|i,t) = Σ_{k,s} π_k(i) · ψ_s(i) · softmax_ks(j)
-        # Memory: loop k × t with gradient checkpointing per inner step so saved
-        # activations stay bounded by one (S, N, N) tile (~107 MB at 1725 grid).
-        assert per_soc_demand_share_j is not None and soc_props_per_origin is not None, \
-            "use_soc_mixture requires per_soc_demand_share_j and soc_props_per_origin"
-        from torch.utils.checkpoint import checkpoint as _ckpt
-        S = rum.n_soc                                                    # 9
-        T_t = V_dest.shape[1] if V_dest.dim() == 4 else V_dest.shape[0]
-        log_demand_share_T = torch.log(per_soc_demand_share_j.clamp(min=1e-6)).t().contiguous()  # (S, N)
-        log_pi = torch.log(income_tier_props.t() + 1e-9)                 # (K, N)
-        log_psi = torch.log(soc_props_per_origin.t() + 1e-9)             # (S, N)
-
-        def _ks_step(V_kt, V_match_s, log_w):
-            # V_kt (N, N), V_match_s (S, N), log_w (S, N, 1)
-            V_kt_s = V_kt.unsqueeze(0) + V_match_s.unsqueeze(1)          # (S, N, N)
-            log_P = F.log_softmax(V_kt_s, dim=-1)                        # (S, N, N)
-            return torch.logsumexp(log_w + log_P, dim=0)                 # (N, N)
-
-        use_ckpt = V_dest.requires_grad   # checkpoint only when grads needed (val pass skips)
-        log_P_D_slices = []
-        for k in range(K):
-            V_match_s_for_k = gamma_M[k] * log_demand_share_T            # (S, N)
-            log_w_k_s_per_i = log_pi[k].view(1, N, 1) + log_psi.view(S, N, 1)  # (S, N, 1)
-            log_P_t_slices_k = []
-            for t in range(T_t):
-                if use_ckpt:
-                    log_P_kt = _ckpt(_ks_step, V_dest[k, t], V_match_s_for_k,
-                                     log_w_k_s_per_i, use_reentrant=False)
-                else:
-                    log_P_kt = _ks_step(V_dest[k, t], V_match_s_for_k, log_w_k_s_per_i)
-                log_P_t_slices_k.append(log_P_kt)
-            log_P_D_slices.append(torch.stack(log_P_t_slices_k, dim=0))   # (T, N, N) for tier k
-        log_P_D = torch.stack(log_P_D_slices, dim=0)                      # (K, T, N, N)
-        log_P_D = torch.logsumexp(log_P_D, dim=0)                         # (T, N, N)
-    elif rum.use_tier_mixture:
-        # V_dest shape: (K, T, N, N)
-        log_P_per_tier = F.log_softmax(V_dest, dim=-1)                  # (K, T, N, N)
-        # income_tier_props shape (N, K) → log_pi (K, 1, N, 1) broadcast on T, j-axis
-        log_pi = torch.log(income_tier_props.t().unsqueeze(1).unsqueeze(-1) + 1e-9)  # (K, 1, N, 1)
-        log_P_D = torch.logsumexp(log_pi + log_P_per_tier, dim=0)       # (T, N, N)
-    else:
-        log_P_D = torch.log_softmax(V_dest, dim=-1)                     # (T, N, N)
+        else:  # convex
+            blend = rum.gnn_blend
+            V_nn_scaled = (torch.zeros(T, N, N, device=V_gnn.device)
+                           if blend is None else blend * V_gnn)
+            V_dest = (V_rum_dest if blend is None
+                      else (1.0 - blend) * V_rum_dest + V_nn_scaled)
+        log_P_D = torch.log_softmax(V_dest, dim=-1)                      # (T, N, N)
 
     # ---- losses ----
     mask_f = train_mask.view(1, N, 1).float()
@@ -439,6 +474,13 @@ def forward_cs(
             # Stoll-Houston: match contributes via γ · log_match (same elasticity as gravity)
             comp["stoll_match_gamma_logmatch"] = (
                 g_avg * log_match_signal.view(1, N, N)
+            ).expand(T, N, N)
+        elif rum.use_soc_mixture:
+            # Per-SOC log_demand_share: origin-weighted expectation across SOCs.
+            # avg_log_dshare[i, j] = Σ_s soc_props[i, s] · log demand_share[j, s]
+            avg_log_dshare = soc_props_per_origin @ log_demand_share.t()        # (N, N)
+            comp["soc_match_delta_logdshare"] = (
+                d_avg * avg_log_dshare.view(1, N, N)
             ).expand(T, N, N)
         else:
             comp["occmatch_delta_M"] = (
@@ -478,10 +520,9 @@ def forward_cs(
     # Orthogonality regularizer: push V_NN ⊥ V_RUM in mean-centered logit space.
     # Encourages NN to learn signal that RUM structurally cannot express.
     # Returned as a (differentiable) cos² similarity scalar; trainer multiplies by λ_ortho.
-    if rum.use_tier_mixture:
-        rum_flat = V_rum_dest.mean(dim=0).reshape(-1)   # mean over tiers
-    else:
-        rum_flat = V_rum_dest.reshape(-1)
+    # V_rum_dest is always (T, N, N) — tier-mixture path now stores class-averaged
+    # representative in V_rum_dest (per-class accumulated then divided by K).
+    rum_flat = V_rum_dest.reshape(-1)
     nn_flat = V_nn_scaled.reshape(-1)
     rum_c = rum_flat - rum_flat.mean()
     nn_c = nn_flat - nn_flat.mean()
@@ -495,7 +536,11 @@ def forward_cs(
     # destination signal — attribute shares become more balanced.
     iv_var = (lam_view * IV_mode).var(dim=-1, unbiased=False).mean()
     if rum.use_tier_mixture:
-        if log_match_signal is not None:
+        if rum.use_soc_mixture:
+            # Per-SOC log_demand_share enters per class; aggregate elasticity for
+            # this regularizer = γ_M · log_M_j (drop per-SOC term, it's class-specific)
+            v_gravity = (gamma_M.mean() * log_M_j.view(1, N)).expand(T, N, N)
+        elif log_match_signal is not None:
             v_gravity = (gamma_M.mean() * (log_M_j.view(1, N) + log_match_signal)).expand(T, N, N)
         else:
             gamma_eff_avg = gamma_M.mean() + delta_m.mean() * match_signal
@@ -521,6 +566,7 @@ def forward_cs(
             return t.tolist() if t.dim() > 0 else float(t)
         diagnostic = {
             "use_tier_mixture": rum.use_tier_mixture,
+            "use_soc_mixture": rum.use_soc_mixture,
             "alpha_wage": _diag_val(rum.alpha_wage),
             "gamma_M": _diag_val(rum.gamma_M),
             "nu_D": _diag_val(rum.nu_D),
@@ -706,6 +752,16 @@ def main():
                          "attraction patterns. Default 0 (off). Recommended K=50.")
     ap.add_argument("--busy-dest-l2", type=float, default=1e-3,
                     help="L2 regularization on busy_dest_boost params (K×24).")
+    ap.add_argument("--use-pair-nn", action="store_true",
+                    help="Replace per-grid NN (T, N) with pair-aware NN (T, N, N). "
+                         "Lets V_NN learn OD-pair specific patterns (e.g. unusually "
+                         "high commute on a given Barking→Canary Wharf pair) that the "
+                         "per-grid NN cannot express. Strongly recommended when "
+                         "use_soc_mixture is on and γ_M is gradient-starved.")
+    ap.add_argument("--pair-rank", type=int, default=8,
+                    help="Bilinear rank for PairResidualNN (default 8).")
+    ap.add_argument("--pair-hidden", type=int, default=32,
+                    help="MLP hidden dim inside PairResidualNN (default 32).")
     ap.add_argument("--use-gat", action="store_true",
                     help="Replace GraphSAGE with GAT (multi-head attention) in encoder. "
                          "Step 3 of 3-step GNN improvement plan.")
@@ -869,7 +925,20 @@ def main():
             tens = tens.unsqueeze(0).expand(T, N, N).contiguous()
         t_per_mode[m] = tens
 
-    if args.use_gat:
+    if args.use_pair_nn:
+        # Pair-aware NN: outputs (T, N, N) directly — origin × destination bilinear
+        _pair_spec = importlib.util.spec_from_file_location(
+            "v3_pair_nn", V3_ROOT / "models_lib" / "inverse_rum" / "pair_residual_nn.py"
+        )
+        _pair_mod = importlib.util.module_from_spec(_pair_spec)
+        _pair_spec.loader.exec_module(_pair_mod)
+        encoder = _pair_mod.PairResidualNN(
+            static_dim=X_static.shape[1], dyn_dim=X_dynamic.shape[-1],
+            hidden_dim=args.pair_hidden, pair_rank=args.pair_rank,
+        ).to(device)
+        print(f"        encoder: PairResidualNN (pair_rank={args.pair_rank}, "
+              f"hidden={args.pair_hidden}) → V_NN shape (T, N, N)")
+    elif args.use_gat:
         encoder = DualBranchGATEncoder(
             static_dim=X_static.shape[1], dyn_dim=X_dynamic.shape[-1],
             hidden_dim=32, gru_hidden=32, n_gat_layers=2,

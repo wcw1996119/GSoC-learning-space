@@ -185,35 +185,61 @@ class CerveroShenHead(nn.Module):
                 "soc_mixture replaces aggregate Stoll log_match; disable use_stoll_match"
             assert not self.use_match_gate, \
                 "soc_mixture replaces match_gate (place-aggregate match)"
+            assert self.use_tier_mixture, \
+                "soc_mixture currently requires tier_mixture (joint class indexing)"
 
-        # V_upper destination-attractor params (α, γ, ν, δ_match)
-        # If use_tier_mixture: each becomes (n_tiers,) tensor for tier-specific RUM
-        # tier_init_scale > 0: tier k gets base × (1 + k·scale) to break symmetry &
-        # encode lit-expected gradient (higher income → more selective)
-        n_t = self.n_income_tiers if self.use_tier_mixture else 1
+        # ----- Latent class structure -----
+        # If use_soc_mixture: n_classes = n_tiers × n_soc, fully cross-classified
+        #   (Bhat 1997 / Bhat-Castelar 2002 / Wong et al 2018 latent class DCM).
+        #   Each class has its own complete utility-function parameter set; each
+        #   ABM agent of class c uses parameter[c] directly at inference time.
+        # If use_tier_mixture only: n_classes = n_tiers (income tier only).
+        # Else: n_classes = 1 (single-class RUM).
+        if self.use_soc_mixture:
+            self.n_classes = self.n_income_tiers * self.n_soc
+        elif self.use_tier_mixture:
+            self.n_classes = self.n_income_tiers
+        else:
+            self.n_classes = 1
 
-        def _tier_init(base_value: float, sign: int = 1) -> torch.Tensor:
-            """Generate (n_t,) init values with lit-anchored tier gradient.
-            sign=+1 for ≥0 params (α/γ/δ), -1 for ≤0 params (ν)."""
+        # V_upper destination-attractor params — Bhat 1997 / Train 2009 structured
+        # heterogeneity. Each parameter has a "role" determining its shape:
+        #   - tier-only (n_tiers=3): α_W (wage), ν_D (competition), T_threshold,
+        #     β_kink, k_sharpness, cost_budget, cost_thresh — income-driven
+        #   - SOC-only (n_soc=9):   δ_match — occupation-driven
+        #   - tier×SOC (n_classes=27): γ_M — both income and occupation matter
+        # This keeps the "each class has its own utility function" property
+        # (since different classes have different params via γ_M and δ_match)
+        # while avoiding over-parameterization on params with no SOC gradient.
+        # tier_init_scale > 0 breaks symmetry so optimizer differentiates from epoch 0.
+        if self.use_soc_mixture:
+            size_alpha_W = self.n_income_tiers      # tier-only (3)
+            size_gamma_M = self.n_classes           # tier × SOC (27)
+            size_nu_D = self.n_income_tiers         # tier-only (3)
+            size_delta_match = self.n_soc           # SOC-only (9)
+        elif self.use_tier_mixture:
+            size_alpha_W = size_gamma_M = size_nu_D = size_delta_match = self.n_income_tiers
+        else:
+            size_alpha_W = size_gamma_M = size_nu_D = size_delta_match = 1
+
+        def _shaped_init(base_value: float, size: int) -> torch.Tensor:
             target = max(abs(base_value), 1e-3)
-            if n_t == 1:
+            if size == 1:
                 return torch.tensor(_inv_softplus(target))
-            # tier 0 (low) gets base, tier k gets base · (1 + k · tier_init_scale)
-            scaled = [target * (1.0 + k * tier_init_scale) for k in range(n_t)]
-            raws = [_inv_softplus(max(v, 1e-3)) for v in scaled]
-            return torch.tensor(raws, dtype=torch.float32)
+            scaled = [target * (1.0 + k * tier_init_scale) for k in range(size)]
+            return torch.tensor([_inv_softplus(max(v, 1e-3)) for v in scaled], dtype=torch.float32)
 
         # α (wage) — enforced >= 0 via softplus
-        self.raw_alpha_wage = nn.Parameter(_tier_init(alpha_wage_init, +1))
+        self.raw_alpha_wage = nn.Parameter(_shaped_init(alpha_wage_init, size_alpha_W))
 
         # γ (M_j) — enforced > 0 via softplus
-        self.raw_gamma_M = nn.Parameter(_tier_init(gamma_M_init, +1))
+        self.raw_gamma_M = nn.Parameter(_shaped_init(gamma_M_init, size_gamma_M))
 
         # ν (D_j) — enforced < 0 via -softplus (use abs in init)
-        self.raw_nu_D = nn.Parameter(_tier_init(-nu_D_init, -1))
+        self.raw_nu_D = nn.Parameter(_shaped_init(-nu_D_init, size_nu_D))
 
         # δ (match_prob) — enforced >= 0 via softplus
-        self.raw_delta_match = nn.Parameter(_tier_init(delta_match_init, +1))
+        self.raw_delta_match = nn.Parameter(_shaped_init(delta_match_init, size_delta_match))
 
         # Push-pull cross term: V += ξ · push_i · log_M_j
         #   push_i = log(workers reaching i) - log(jobs at i) = labor surplus indicator
@@ -274,20 +300,17 @@ class CerveroShenHead(nn.Module):
         self.use_tier_threshold = bool(use_tier_threshold)
         if self.use_tier_threshold:
             assert self.use_tier_mixture, "tier_threshold requires use_tier_mixture=True"
-            # T_k init: low=25, mid=40, high=55 min — lit-anchored expectations
+            # Tier-only heterogeneity: T_threshold/β_kink/k_sharpness depend on income,
+            # not SOC (no SOC-specific gradient signal from commute time t(i,j)).
             T_init = [25.0, 40.0, 55.0][:self.n_income_tiers]
             if len(T_init) < self.n_income_tiers:
                 T_init = T_init + [40.0] * (self.n_income_tiers - len(T_init))
             self.raw_T_threshold_per_tier = nn.Parameter(
                 torch.tensor([_inv_softplus(t) for t in T_init])
             )
-            # β_kink_k init: small negative (e.g. -0.05) — additional per-min penalty above T_k
             self.raw_beta_t_kink_per_tier = nn.Parameter(
                 torch.full((self.n_income_tiers,), _inv_softplus(0.05))
             )
-            # k_k (sharpness, minutes): how sharp the transition is around T_k.
-            # k → 0 = step function (hard threshold); k = 5 = soft (transition over ~5 min).
-            # Init k=5.0 min — gentle transition by default.
             self.raw_k_sharpness_per_tier = nn.Parameter(
                 torch.full((self.n_income_tiers,), _inv_softplus(5.0))
             )
@@ -305,17 +328,26 @@ class CerveroShenHead(nn.Module):
         self.use_consideration_filter = bool(use_consideration_filter)
         if self.use_consideration_filter:
             assert self.use_tier_mixture, "consideration_filter requires use_tier_mixture=True"
+            assert not self.use_soc_mixture, (
+                "consideration_filter uses cosine match — incompatible with use_soc_mixture "
+                "(per-SOC log_demand_share already supplies match signal)"
+            )
             # Cost proxy coefficients (shared across tiers; cost is physical, tier in budget)
             self.raw_theta_t_cost = nn.Parameter(torch.tensor(_inv_softplus(0.05)))
             self.raw_theta_d_cost = nn.Parameter(torch.tensor(_inv_softplus(0.10)))
-            # Monthly budget per tier (learnable, arbitrary scale — ratio matters)
-            # Init: low<mid<high (low has tight budget)
+            # Monthly budget per class (learnable, arbitrary scale — ratio matters)
+            # Init: tier-anchored low<mid<high; replicated across SOC dim when use_soc_mixture
+            _budget_tier = [3.0, 5.0, 9.0][:self.n_income_tiers]
+            _thresh_tier = [0.10, 0.12, 0.18][:self.n_income_tiers]
+            if self.use_soc_mixture:
+                _budget_tier = [v for v in _budget_tier for _ in range(self.n_soc)]
+                _thresh_tier = [v for v in _thresh_tier for _ in range(self.n_soc)]
             self.raw_cost_budget_per_tier = nn.Parameter(
-                torch.tensor([_inv_softplus(v) for v in [3.0, 5.0, 9.0][:self.n_income_tiers]])
+                torch.tensor([_inv_softplus(v) for v in _budget_tier])
             )
-            # Cost ratio threshold per tier (e.g., 10% / 12% / 18% — low tier strictest)
+            # Cost ratio threshold per class (e.g., 10% / 12% / 18% — low tier strictest)
             self.raw_cost_thresh_per_tier = nn.Parameter(
-                torch.tensor([_inv_softplus(v) for v in [0.10, 0.12, 0.18][:self.n_income_tiers]])
+                torch.tensor([_inv_softplus(v) for v in _thresh_tier])
             )
             # Sharpness of cost filter sigmoid (smaller = sharper / steeper)
             self.raw_k_cost_filter = nn.Parameter(torch.tensor(_inv_softplus(3.0)))
@@ -623,6 +655,7 @@ class CerveroShenHead(nn.Module):
                 ),
                 "use_soc_mixture": self.use_soc_mixture,
                 "n_soc": self.n_soc if self.use_soc_mixture else None,
+                "n_classes": self.n_classes,
                 "use_match_gate": self.use_match_gate,
                 "gate_steepness": float(self.gate_steepness) if self.gate_steepness is not None else None,
                 "gate_threshold": float(self.gate_threshold) if self.gate_threshold is not None else None,
