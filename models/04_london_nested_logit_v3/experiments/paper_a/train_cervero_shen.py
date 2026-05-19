@@ -133,6 +133,18 @@ def forward_cs(
         )                                                                   # (K_tier, T, N, N)
         log_cost_pass_per_tier = torch.log(cost_pass_per_tier.clamp(min=1e-9))
 
+        # ----- L3 time gate (Stage 2 soft decision tree) -----
+        # Multiplicative routing: p_pass_time = σ(k_time · (T_max[tier] - t_min(i, j)))
+        # log_sigmoid numerically stable for very negative arguments (log(0) safe).
+        # Merged into log_cost_pass_per_tier so per-class loop uniformly reads cost_term_c.
+        if getattr(rum, "use_time_gate", False):
+            T_max = rum.T_max_per_tier               # (K_tier,) > 0
+            k_time = rum.k_time_gate                 # scalar > 0
+            # t_min_per_pair is (T, N, N)
+            time_diff = T_max.view(-1, 1, 1, 1) - t_min_per_pair.unsqueeze(0)  # (K_tier, T, N, N)
+            log_pass_time = F.logsigmoid(k_time * time_diff)                   # (K_tier, T, N, N)
+            log_cost_pass_per_tier = log_cost_pass_per_tier + log_pass_time
+
         # Layer 1: occupation match filter
         if rum.use_soc_mixture:
             if getattr(rum, "frozen_log_match_mask_per_soc", None) is not None:
@@ -806,6 +818,21 @@ def main():
     ap.add_argument("--k-match-init", type=float, default=10.0,
                     help="Initial sharpness of match filter sigmoid. Larger = sharper "
                          "cutoff. Use ≥20 for near-hard cutoff behavior.")
+    ap.add_argument("--use-time-gate", action="store_true",
+                    help="Stage 2 L3 commute-time hard gate: log σ(k_time · (T_max[tier] - t_min(i,j))) "
+                         "added to V_dest as multiplicative routing. Upgrades the soft Bhat 1995 "
+                         "kink in V_lower to an explicit lexicographic gate layer. "
+                         "Requires --use-tier-mixture --use-consideration-filter.")
+    ap.add_argument("--T-max-low",  type=float, default=60.0,
+                    help="L3 time gate T_max (min) for low income tier. Default 60.")
+    ap.add_argument("--T-max-mid",  type=float, default=90.0,
+                    help="L3 time gate T_max (min) for mid income tier. Default 90.")
+    ap.add_argument("--T-max-high", type=float, default=120.0,
+                    help="L3 time gate T_max (min) for high income tier. Default 120.")
+    ap.add_argument("--k-time-gate-init", type=float, default=0.2,
+                    help="Initial sharpness of L3 time gate. Default 0.2 (≈ per-minute resolution).")
+    ap.add_argument("--k-time-gate-min", type=float, default=0.1,
+                    help="Lower bound on L3 time gate sharpness. Default 0.1.")
     ap.add_argument("--k-match-min-per-soc", type=float, default=0.1,
                     help="Lower bound on per-SOC sharpness k_s. Default 0.1 = no bound "
                          "(back-compat). Set ≥ 20 for soft-lexicographic: forces sharp "
@@ -1101,6 +1128,10 @@ def main():
         use_soc_mixture=args.use_soc_mixture,
         n_soc=9,
         k_match_min_per_soc=args.k_match_min_per_soc,
+        use_time_gate=args.use_time_gate,
+        T_max_per_tier_init=(args.T_max_low, args.T_max_mid, args.T_max_high),
+        k_time_gate_init=args.k_time_gate_init,
+        k_time_gate_min=args.k_time_gate_min,
         use_frozen_match_mask=args.use_frozen_match_mask,
     ).to(device)
 

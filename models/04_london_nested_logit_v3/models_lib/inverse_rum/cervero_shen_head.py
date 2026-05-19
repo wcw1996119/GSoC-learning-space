@@ -164,6 +164,14 @@ class CerveroShenHead(nn.Module):
                                             # use_consideration_filter (match floor).
                                             # ABM downstream gets P(j | agent.SOC, i, t) directly.
         n_soc: int = 9,                     # Number of SOC categories (default 9 for ONS SOC2020 maj).
+        use_time_gate: bool = False,         # L3 commute-time hard gate (Frosst-Hinton-style):
+                                              # log_pass_time = log σ(k_time · (T_max[tier] - t_min(i,j)))
+                                              # Multiplicative routing — j passes only if t_min < T_max.
+                                              # Stage 2 lexicographic upgrade from soft Bhat 1995 kink.
+                                              # Requires use_tier_mixture=True.
+        T_max_per_tier_init: tuple = (60.0, 90.0, 120.0),  # T_max in minutes for low/mid/high tier
+        k_time_gate_init: float = 0.2,       # initial sharpness (per-minute resolution)
+        k_time_gate_min: float = 0.1,        # lower bound on k_time (force sharpness)
         k_match_min_per_soc: float = 0.1,    # Lower bound on per-SOC sharpness k_s.
                                               # Default 0.1 = no real bound (back-compat).
                                               # Set to 20+ for "soft lexicographic" — forces
@@ -195,6 +203,27 @@ class CerveroShenHead(nn.Module):
         self.use_push_pull = bool(use_push_pull)
         self.use_soc_mixture = bool(use_soc_mixture)
         self.n_soc = int(n_soc)
+        # L3 commute-time hard gate (Stage 2 soft decision tree)
+        self.use_time_gate = bool(use_time_gate)
+        if self.use_time_gate:
+            assert self.use_tier_mixture, "use_time_gate requires use_tier_mixture=True"
+            assert bool(use_consideration_filter), \
+                "use_time_gate requires use_consideration_filter=True (piggybacks on cost-pass path)"
+            T_init = list(T_max_per_tier_init)[:self.n_income_tiers]
+            if len(T_init) < self.n_income_tiers:
+                T_init = T_init + [90.0] * (self.n_income_tiers - len(T_init))
+            self.raw_T_max_per_tier = nn.Parameter(
+                torch.tensor([_inv_softplus(t) for t in T_init])
+            )
+            self.raw_k_time_gate = nn.Parameter(
+                torch.tensor(_inv_softplus(float(k_time_gate_init)))
+            )
+            self.k_time_gate_min = float(k_time_gate_min)
+        else:
+            self.raw_T_max_per_tier = None
+            self.raw_k_time_gate = None
+            self.k_time_gate_min = 0.1
+
         # Soft-lexicographic structural prior: k_s lower bound + τ_s floor (set later).
         self.k_match_min_per_soc = float(k_match_min_per_soc)
         # tau_match_floor_per_soc buffer will be filled by trainer via
@@ -649,6 +678,19 @@ class CerveroShenHead(nn.Module):
         return F.softplus(self.raw_k_match_filter_per_soc).clamp(min=k_min)
 
     @property
+    def T_max_per_tier(self) -> Optional[torch.Tensor]:
+        """T_max[tier] > 0 (minutes), commute time hard upper bound per income tier.
+        L3 gate: p_pass_time = σ(k_time · (T_max[tier] - t_min(i, j)))."""
+        if self.raw_T_max_per_tier is None: return None
+        return F.softplus(self.raw_T_max_per_tier)
+
+    @property
+    def k_time_gate(self) -> Optional[torch.Tensor]:
+        """k_time ≥ k_time_gate_min, sharpness of L3 time gate sigmoid."""
+        if self.raw_k_time_gate is None: return None
+        return F.softplus(self.raw_k_time_gate).clamp(min=self.k_time_gate_min)
+
+    @property
     def beta_t_slope_per_mode(self) -> torch.Tensor:
         """β_t,m,1 (slope on log_d) ≤ 0 — long-distance amplifies time disutility."""
         return -F.softplus(self.raw_beta_t_slope_per_mode)
@@ -762,6 +804,11 @@ class CerveroShenHead(nn.Module):
                 "use_match_gate": self.use_match_gate,
                 "gate_steepness": float(self.gate_steepness) if self.gate_steepness is not None else None,
                 "gate_threshold": float(self.gate_threshold) if self.gate_threshold is not None else None,
+                "use_time_gate": self.use_time_gate,
+                "T_max_per_tier": (self.T_max_per_tier.tolist()
+                                    if self.T_max_per_tier is not None else None),
+                "k_time_gate": (float(self.k_time_gate)
+                                 if self.k_time_gate is not None else None),
                 "use_frozen_match_mask": self.use_frozen_match_mask,
                 "frozen_match_mask_set_size_per_soc": (
                     [int((self.frozen_log_match_mask_per_soc[s] > -1e6).sum())
