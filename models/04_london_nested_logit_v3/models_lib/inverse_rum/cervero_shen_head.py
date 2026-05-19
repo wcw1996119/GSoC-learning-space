@@ -328,36 +328,49 @@ class CerveroShenHead(nn.Module):
         self.use_consideration_filter = bool(use_consideration_filter)
         if self.use_consideration_filter:
             assert self.use_tier_mixture, "consideration_filter requires use_tier_mixture=True"
-            assert not self.use_soc_mixture, (
-                "consideration_filter uses cosine match — incompatible with use_soc_mixture "
-                "(per-SOC log_demand_share already supplies match signal)"
-            )
+            # Note: when combined with use_soc_mixture, the cosine-match filter
+            # acts as a binary consideration-set cut while per-SOC log_demand_share
+            # provides continuous within-set differentiation. They are not redundant.
             # Cost proxy coefficients (shared across tiers; cost is physical, tier in budget)
             self.raw_theta_t_cost = nn.Parameter(torch.tensor(_inv_softplus(0.05)))
             self.raw_theta_d_cost = nn.Parameter(torch.tensor(_inv_softplus(0.10)))
-            # Monthly budget per class (learnable, arbitrary scale — ratio matters)
-            # Init: tier-anchored low<mid<high; replicated across SOC dim when use_soc_mixture
+            # Monthly budget per tier (3 values, income-driven)
+            # Init: tier-anchored low<mid<high. Cost budget is universally per-tier
+            # — SOC doesn't change household income/affordability ceilings.
             _budget_tier = [3.0, 5.0, 9.0][:self.n_income_tiers]
             _thresh_tier = [0.10, 0.12, 0.18][:self.n_income_tiers]
-            if self.use_soc_mixture:
-                _budget_tier = [v for v in _budget_tier for _ in range(self.n_soc)]
-                _thresh_tier = [v for v in _thresh_tier for _ in range(self.n_soc)]
             self.raw_cost_budget_per_tier = nn.Parameter(
                 torch.tensor([_inv_softplus(v) for v in _budget_tier])
             )
-            # Cost ratio threshold per class (e.g., 10% / 12% / 18% — low tier strictest)
+            # Cost ratio threshold per tier (10% / 12% / 18% — low tier strictest)
             self.raw_cost_thresh_per_tier = nn.Parameter(
                 torch.tensor([_inv_softplus(v) for v in _thresh_tier])
             )
             # Sharpness of cost filter sigmoid (smaller = sharper / steeper)
             self.raw_k_cost_filter = nn.Parameter(torch.tensor(_inv_softplus(3.0)))
-            # Match filter (occupation match threshold + sharpness)
-            # When match_thresh_floor > 0, actual threshold = floor + softplus(raw),
-            # which forces the filter to actually cut destinations below the floor.
+            # Match filter (occupation match threshold + sharpness):
+            #   - When use_soc_mixture: PER-SOC threshold τ_s, k_s on demand_share[j, s]
+            #     (binary cut on per-occupation destination demand share).
+            #     No floor needed — sharp SOCs (operators, sales, trades) self-discover
+            #     non-trivial cuts; bland SOCs (managers, admin) self-discover τ ≈ 0.
+            #   - Else (legacy): single scalar on cosine_match[i, j], optional floor.
             self.match_thresh_floor = float(match_thresh_floor)
-            # raw init so total ≈ floor + 0.05 (just above floor; lets model decide refinement)
-            self.raw_match_filter_thresh = nn.Parameter(torch.tensor(_inv_softplus(0.05)))
-            self.raw_k_match_filter = nn.Parameter(torch.tensor(_inv_softplus(float(k_match_init))))
+            if self.use_soc_mixture:
+                # Per-SOC: (n_soc,) thresholds + sharpness. Init τ small so model
+                # initially "passes all" and learns to cut where data demands.
+                self.raw_match_filter_thresh_per_soc = nn.Parameter(
+                    torch.full((self.n_soc,), _inv_softplus(0.05))
+                )
+                self.raw_k_match_filter_per_soc = nn.Parameter(
+                    torch.full((self.n_soc,), _inv_softplus(float(k_match_init)))
+                )
+                self.raw_match_filter_thresh = None
+                self.raw_k_match_filter = None
+            else:
+                self.raw_match_filter_thresh = nn.Parameter(torch.tensor(_inv_softplus(0.05)))
+                self.raw_k_match_filter = nn.Parameter(torch.tensor(_inv_softplus(float(k_match_init))))
+                self.raw_match_filter_thresh_per_soc = None
+                self.raw_k_match_filter_per_soc = None
         else:
             self.raw_theta_t_cost = None
             self.raw_theta_d_cost = None
@@ -366,6 +379,8 @@ class CerveroShenHead(nn.Module):
             self.raw_k_cost_filter = None
             self.raw_match_filter_thresh = None
             self.raw_k_match_filter = None
+            self.raw_match_filter_thresh_per_soc = None
+            self.raw_k_match_filter_per_soc = None
 
         # ASC per mode — free
         self.asc_per_mode = nn.Parameter(torch.zeros(n_modes))
@@ -544,6 +559,16 @@ class CerveroShenHead(nn.Module):
     def k_match_filter(self) -> Optional[torch.Tensor]:
         if self.raw_k_match_filter is None: return None
         return F.softplus(self.raw_k_match_filter).clamp(min=0.1)
+    @property
+    def match_filter_thresh_per_soc(self) -> Optional[torch.Tensor]:
+        """Per-SOC match threshold τ_s, applied to demand_share[j, s].
+        No floor — model self-discovers heterogeneous cuts."""
+        if self.raw_match_filter_thresh_per_soc is None: return None
+        return F.softplus(self.raw_match_filter_thresh_per_soc)
+    @property
+    def k_match_filter_per_soc(self) -> Optional[torch.Tensor]:
+        if self.raw_k_match_filter_per_soc is None: return None
+        return F.softplus(self.raw_k_match_filter_per_soc).clamp(min=0.1)
 
     @property
     def beta_t_slope_per_mode(self) -> torch.Tensor:

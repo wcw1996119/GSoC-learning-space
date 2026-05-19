@@ -120,33 +120,43 @@ def forward_cs(
     # Layer 2 (cost):  cost_pass  = sigmoid(k_cost  · (thresh_ratio_k - cost(i,j)/budget_k))
     # log(filter_pass) added to V_dest as log-mask (j fails → V_dest → -∞).
     if rum.use_consideration_filter:
-        # Layer 1: occupation match filter
-        match_pass = torch.sigmoid(
-            rum.k_match_filter * (match_prob - rum.match_filter_thresh)
-        )                                                                   # (N, N) ∈ [0,1]
-        log_match_pass = torch.log(match_pass.clamp(min=1e-9))              # (N, N)
-
-        # Layer 2: cost burden filter
-        # cost_per_pair = θ_t · t_min(i,j) + θ_d · log_d(i,j)
+        # Layer 2: cost burden filter (always per-tier; SOC doesn't change income/budget)
         cost_per_pair_tn = (
-            rum.theta_t_cost * t_min_per_pair                                # (T, N, N)
-            + rum.theta_d_cost * log_d_ij.view(1, N, N)                      # broadcast
+            rum.theta_t_cost * t_min_per_pair
+            + rum.theta_d_cost * log_d_ij.view(1, N, N)
         )                                                                   # (T, N, N)
-        # cost_ratio per tier: cost / budget_k, shape (K, T, N, N)
-        budgets = rum.cost_budget_per_tier                                  # (K,)
-        thresholds = rum.cost_thresh_per_tier                               # (K,)
+        budgets = rum.cost_budget_per_tier                                  # (K_tier,)
+        thresholds = rum.cost_thresh_per_tier                               # (K_tier,)
         cost_ratio = cost_per_pair_tn.unsqueeze(0) / budgets.view(-1, 1, 1, 1)
         cost_pass_per_tier = torch.sigmoid(
             rum.k_cost_filter * (thresholds.view(-1, 1, 1, 1) - cost_ratio)
-        )                                                                   # (K, T, N, N)
+        )                                                                   # (K_tier, T, N, N)
         log_cost_pass_per_tier = torch.log(cost_pass_per_tier.clamp(min=1e-9))
 
-        # Combined log-filter-mask: (K, T, N, N) — add to V_upper_k
-        log_filter_mask_per_tier = (
-            log_match_pass.view(1, 1, N, N) + log_cost_pass_per_tier
-        )
+        # Layer 1: occupation match filter
+        if rum.use_soc_mixture:
+            # Per-SOC: τ_s and k_s applied to demand_share[j, s] (no manual floor).
+            # log_match_pass_per_soc[s, j] = log σ(k_s · (demand_share[j, s] - τ_s))
+            tau_per_soc = rum.match_filter_thresh_per_soc.view(rum.n_soc, 1)   # (S, 1)
+            k_per_soc = rum.k_match_filter_per_soc.view(rum.n_soc, 1)          # (S, 1)
+            ds_T = per_soc_demand_share_j.t()                                  # (S, N)
+            match_pass_per_soc = torch.sigmoid(k_per_soc * (ds_T - tau_per_soc))
+            log_match_pass_per_soc = torch.log(match_pass_per_soc.clamp(min=1e-9))  # (S, N)
+            log_filter_mask_per_tier = None                                    # assembled in loop
+        else:
+            # Legacy: scalar τ on cosine_match[i, j], optional floor
+            match_pass = torch.sigmoid(
+                rum.k_match_filter * (match_prob - rum.match_filter_thresh)
+            )                                                                  # (N, N)
+            log_match_pass = torch.log(match_pass.clamp(min=1e-9))             # (N, N)
+            log_filter_mask_per_tier = (
+                log_match_pass.view(1, 1, N, N) + log_cost_pass_per_tier
+            )                                                                  # (K_tier, T, N, N)
+            log_match_pass_per_soc = None
     else:
         log_filter_mask_per_tier = None
+        log_match_pass_per_soc = None
+        log_cost_pass_per_tier = None
 
     for m_idx, name in enumerate(mode_names):
         t_m = t_per_mode[name]                                        # (T, N, N)
@@ -310,10 +320,12 @@ def forward_cs(
             T_thresholds = rum.T_threshold_per_tier                          # (K,)
             beta_kinks = rum.beta_t_kink_per_tier                            # (K,)
             k_sharps = rum.k_sharpness_per_tier                              # (K,)
-        # log_filter_mask_per_tier is None in soc-mix mode (mutex), so skip filter add.
+        # Consideration filter (Swait 2001 / Cascetta 2001): when enabled,
+        # log_filter_mask_per_tier has shape (n_tiers, T, N, N) — same across SOCs.
 
         def _class_logp_step(V_M_c, V_other_c, log_pi_c_row,
-                              T_c, beta_kink_c, k_sharp_c, has_kink_t):
+                              T_c, beta_kink_c, k_sharp_c, has_kink_t,
+                              filter_term, match_term_per_soc, cost_term_per_tier):
             # All (T, N, N) intermediates created here are NOT retained for backward.
             V_rum_c = (V_M_c + V_other_c).unsqueeze(0) + lam_view * IV_mode
             if V_push_pull is not None:
@@ -325,6 +337,14 @@ def forward_cs(
             if has_kink_t:
                 sig = torch.sigmoid((t_min_per_pair - T_c) / k_sharp_c)
                 V_rum_c = V_rum_c + beta_kink_c * t_min_per_pair * sig
+            if filter_term is not None:
+                V_rum_c = V_rum_c + filter_term
+            elif match_term_per_soc is not None:
+                # Per-SOC mode: combine match (N,) + cost (T, N, N) INSIDE checkpoint
+                # so the (T, N, N) combined tensor isn't retained for backward.
+                V_rum_c = (V_rum_c
+                          + match_term_per_soc.view(1, 1, N)
+                          + cost_term_per_tier)
             if rum.gnn_mode == "residual":
                 V_dest_c = V_rum_c + V_nn_scaled
             elif rum.gnn_mode == "mult":
@@ -364,15 +384,34 @@ def forward_cs(
             T_c = T_thresholds[tier_idx] if has_kink else log_M_j.new_zeros(())
             bk_c = beta_kinks[tier_idx] if has_kink else log_M_j.new_zeros(())
             ks_c = k_sharps[tier_idx] if has_kink else log_M_j.new_ones(())
+            # Consideration filter assembly:
+            #   - Per-SOC mode: pass match (N,) and cost (T, N, N) SEPARATELY so the
+            #     combined (T, N, N) tensor only lives inside the checkpointed function
+            #     and is not retained for backward (saves 27 × 286 MB).
+            #   - Legacy mode: filter_term_c = log_filter_mask_per_tier[tier]
+            if log_match_pass_per_soc is not None:
+                filter_term_c = None
+                match_term_c = log_match_pass_per_soc[soc_idx]          # (N,) — tiny
+                cost_term_c = log_cost_pass_per_tier[tier_idx]          # (T, N, N) — 3 unique shared
+            elif log_filter_mask_per_tier is not None:
+                filter_term_c = log_filter_mask_per_tier[tier_idx]
+                match_term_c = None
+                cost_term_c = None
+            else:
+                filter_term_c = None
+                match_term_c = None
+                cost_term_c = None
             if use_ckpt:
                 weighted_c = _ckpt(_class_logp_step,
                                    V_M_c, V_other_c, log_joint_per_class[c],
                                    T_c, bk_c, ks_c, has_kink,
+                                   filter_term_c, match_term_c, cost_term_c,
                                    use_reentrant=False)
             else:
                 weighted_c = _class_logp_step(V_M_c, V_other_c,
                                               log_joint_per_class[c],
-                                              T_c, bk_c, ks_c, has_kink)
+                                              T_c, bk_c, ks_c, has_kink,
+                                              filter_term_c, match_term_c, cost_term_c)
             log_P_accum = (weighted_c if log_P_accum is None
                            else torch.logaddexp(log_P_accum, weighted_c))
             # Detached diagnostic accumulator
@@ -384,6 +423,11 @@ def forward_cs(
                 if has_kink:
                     sig_d = torch.sigmoid((t_min_per_pair - T_c) / ks_c)
                     V_rum_c_diag = V_rum_c_diag + bk_c * t_min_per_pair * sig_d
+                if filter_term_c is not None:
+                    V_rum_c_diag = V_rum_c_diag + filter_term_c
+                elif match_term_c is not None:
+                    V_rum_c_diag = (V_rum_c_diag + match_term_c.view(1, 1, N)
+                                    + cost_term_c)
                 V_rum_dest_avg = V_rum_dest_avg + V_rum_c_diag / K
         log_P_D = log_P_accum
         V_rum_dest = V_rum_dest_avg
@@ -476,8 +520,13 @@ def forward_cs(
                 g_avg * log_match_signal.view(1, N, N)
             ).expand(T, N, N)
         elif rum.use_soc_mixture:
-            # Per-SOC log_demand_share: origin-weighted expectation across SOCs.
-            # avg_log_dshare[i, j] = Σ_s soc_props[i, s] · log demand_share[j, s]
+            # SOC-mixture path uses TWO match channels:
+            #   (1) γ_M[c] · log cosine_match[i, j]  — OD-pair via γ_M coupling (Stoll, strong)
+            #   (2) δ_match[soc(c)] · log demand_share[j, soc(c)]  — per-SOC additive (weak)
+            # Track BOTH so attribute_shares show the real match contribution.
+            comp["stoll_match_gamma_logcosine"] = (
+                g_avg * log_cosine_match.view(1, N, N)
+            ).expand(T, N, N)
             avg_log_dshare = soc_props_per_origin @ log_demand_share.t()        # (N, N)
             comp["soc_match_delta_logdshare"] = (
                 d_avg * avg_log_dshare.view(1, N, N)
@@ -530,6 +579,22 @@ def forward_cs(
         (rum_c.pow(2).sum() + 1e-9) * (nn_c.pow(2).sum() + 1e-9)
     )
 
+    # FEATURE-LEVEL orthogonality: V_NN_pair (T,N,N) must be orthogonal to
+    # log_cosine_match (N,N). Memory-efficient: compute on time-averaged V_NN
+    # in (N,N) space rather than expanding cosine_match to (T,N,N).
+    # cosine_match is time-invariant; only V_NN's t-average can correlate with it.
+    if rum.use_soc_mixture:
+        V_nn_t_avg = V_nn_scaled.mean(dim=0)                         # (N, N) - 12 MB
+        match_flat_NN = log_cosine_match.reshape(-1)                 # (N×N,)
+        nn_flat_NN = V_nn_t_avg.reshape(-1)                          # (N×N,)
+        match_c2 = match_flat_NN - match_flat_NN.mean()
+        nn_c2 = nn_flat_NN - nn_flat_NN.mean()
+        match_ortho_cos_sq = (match_c2 @ nn_c2) ** 2 / (
+            (match_c2.pow(2).sum() + 1e-9) * (nn_c2.pow(2).sum() + 1e-9)
+        )
+    else:
+        match_ortho_cos_sq = torch.tensor(0.0, device=V_rum_dest.device)
+
     # IV-balance regularizer (DIFFERENTIABLE — uses tensors built in this fwd):
     # Push IV_mode's share of across-j destination-discriminating variance toward target.
     # If IV dominates (current ~97%), force it down so gravity/wage/match must carry the
@@ -578,6 +643,10 @@ def forward_cs(
             "k_sharpness_per_tier": rum.k_sharpness_per_tier.detach().cpu().tolist() if rum.k_sharpness_per_tier is not None else None,
             "match_filter_thresh": float(rum.match_filter_thresh) if rum.match_filter_thresh is not None else None,
             "k_match_filter": float(rum.k_match_filter) if rum.k_match_filter is not None else None,
+            "match_filter_thresh_per_soc": (rum.match_filter_thresh_per_soc.detach().cpu().tolist()
+                                            if rum.match_filter_thresh_per_soc is not None else None),
+            "k_match_filter_per_soc": (rum.k_match_filter_per_soc.detach().cpu().tolist()
+                                       if rum.k_match_filter_per_soc is not None else None),
             "match_thresh_floor": getattr(rum, "match_thresh_floor", 0.0),
             "theta_t_cost": float(rum.theta_t_cost) if rum.theta_t_cost is not None else None,
             "theta_d_cost": float(rum.theta_d_cost) if rum.theta_d_cost is not None else None,
@@ -610,6 +679,7 @@ def forward_cs(
             "attribute_across_j_var": across_j_var,
             "attribute_shares_across_j": attribute_shares_across_j,
             "ortho_cos_sq": float(ortho_cos_sq),
+            "match_ortho_cos_sq": float(match_ortho_cos_sq),
         }
         if rum.use_soc_mixture and per_soc_demand_share_j is not None:
             ds = per_soc_demand_share_j                                 # (N, S)
@@ -630,6 +700,7 @@ def forward_cs(
         "ce_mode": ce_mode,
         "nn_norm_sq": nn_norm_sq,
         "ortho_cos_sq": ortho_cos_sq,
+        "match_ortho_cos_sq": match_ortho_cos_sq,
         "iv_share_across_j": iv_share_across_j,
         "diagnostic": diagnostic,
     }
@@ -661,9 +732,14 @@ def main():
     ap.add_argument("--lambda-nn-norm", type=float, default=0.0,
                     help="L2 penalty on ‖V_NN‖² to enforce Wang Path A (δ_measured < 0.30)")
     ap.add_argument("--lambda-ortho", type=float, default=0.0,
-                    help="Orthogonality penalty: pushes V_NN ⊥ V_RUM (cos²(NN, RUM)). "
+                    help="Aggregate orthogonality penalty: cos²(V_NN, V_RUM aggregate). "
                          "Encourages NN to learn signal RUM structurally cannot express. "
                          "Typical range 0.5-5.0.")
+    ap.add_argument("--lambda-match-ortho", type=float, default=0.0,
+                    help="Feature-level orthogonality: cos²(V_NN, log_cosine_match expanded). "
+                         "Forces NN to NOT learn the cosine-match pattern, isolating match's "
+                         "contribution through the RUM channel only (Bhat-style identification). "
+                         "Typical 10-50 if you want match cleanly identified.")
     ap.add_argument("--lambda-iv-balance", type=float, default=0.0,
                     help="IV-magnitude balance: push IV_mode's across-j variance share "
                          "toward --target-iv-share. Forces gravity/wage/match to carry "
@@ -1149,6 +1225,7 @@ def main():
                 + kl_weight * out["ce_mode"]
                 + args.lambda_nn_norm * out["nn_norm_sq"]
                 + args.lambda_ortho * out["ortho_cos_sq"]
+                + args.lambda_match_ortho * out["match_ortho_cos_sq"]
                 + args.lambda_iv_balance * (out["iv_share_across_j"] - args.target_iv_share) ** 2)
         if rum.use_self_loop_boost and args.self_loop_l2 > 0:
             loss = loss + args.self_loop_l2 * (rum.self_loop_boost ** 2).mean()
@@ -1341,34 +1418,134 @@ def main():
             # Ablation: turn off ONLY the match-pass sub-layer (keep cost-pass)
             print("\n[ablation] disable match-pass only (keep cost-pass)...")
             with torch.no_grad():
-                # Recompute match_pass and cost_pass separately, see CPC if match_pass = 1
-                k_m_real = float(rum.k_match_filter)
-                t_m_real = float(rum.match_filter_thresh)
-                match_pass = torch.sigmoid(k_m_real * (match_prob - t_m_real))
-                n_pairs_below_thresh = int((match_prob < t_m_real).sum())
-                total_pairs = int(match_prob.numel())
-                mean_match_pass = float(match_pass.mean())
-                median_match_pass = float(match_pass.median())
-                p05_match_pass = float(torch.quantile(match_pass.reshape(-1), 0.05))
-                p25_match_pass = float(torch.quantile(match_pass.reshape(-1), 0.25))
-            final_diag["match_filter_stats"] = {
-                "threshold_actual": t_m_real,
-                "k_sharpness": k_m_real,
-                "pairs_below_threshold_pct": 100 * n_pairs_below_thresh / total_pairs,
-                "mean_match_pass": mean_match_pass,
-                "median_match_pass": median_match_pass,
-                "p05_match_pass": p05_match_pass,
-                "p25_match_pass": p25_match_pass,
-                "match_data_min": float(match_prob.min()),
-                "match_data_max": float(match_prob.max()),
-                "match_data_mean": float(match_prob.mean()),
-            }
-            print(f"  match threshold = {t_m_real:.4f}  (data min={float(match_prob.min()):.4f}, "
-                  f"max={float(match_prob.max()):.4f})")
-            print(f"  pairs below threshold: {n_pairs_below_thresh}/{total_pairs} "
-                  f"({100*n_pairs_below_thresh/total_pairs:.2f}%)")
-            print(f"  match_pass: mean={mean_match_pass:.3f}  median={median_match_pass:.3f}  "
-                  f"p05={p05_match_pass:.3f}  p25={p25_match_pass:.3f}")
+                if rum.use_soc_mixture:
+                    # Per-SOC mode: 9 thresholds operate on demand_share[j, s]
+                    tau_per_soc = rum.match_filter_thresh_per_soc.detach().cpu().tolist()
+                    k_per_soc = rum.k_match_filter_per_soc.detach().cpu().tolist()
+                    ds_np = per_soc_demand_share_j.detach().cpu().numpy()    # (N, S)
+                    import numpy as _np
+                    pass_per_soc = []
+                    for s in range(rum.n_soc):
+                        mp_s = 1.0 / (1.0 + _np.exp(-k_per_soc[s] * (ds_np[:, s] - tau_per_soc[s])))
+                        below = float(_np.mean(ds_np[:, s] < tau_per_soc[s]))
+                        pass_per_soc.append({
+                            "soc": s,
+                            "tau": tau_per_soc[s],
+                            "k_sharpness": k_per_soc[s],
+                            "frac_below_thresh": below,
+                            "mean_pass": float(mp_s.mean()),
+                            "demand_share_p05": float(_np.quantile(ds_np[:, s], 0.05)),
+                            "demand_share_p95": float(_np.quantile(ds_np[:, s], 0.95)),
+                        })
+                    final_diag["match_filter_stats_per_soc"] = pass_per_soc
+                    for s, row in enumerate(pass_per_soc):
+                        print(f"  SOC {s+1}: τ={row['tau']:.3f}  k={row['k_sharpness']:.1f}  "
+                              f"below_thresh={100*row['frac_below_thresh']:.1f}%  "
+                              f"mean_pass={row['mean_pass']:.3f}")
+                else:
+                    # Legacy scalar
+                    k_m_real = float(rum.k_match_filter)
+                    t_m_real = float(rum.match_filter_thresh)
+                    match_pass = torch.sigmoid(k_m_real * (match_prob - t_m_real))
+                    n_pairs_below_thresh = int((match_prob < t_m_real).sum())
+                    total_pairs = int(match_prob.numel())
+                    mean_match_pass = float(match_pass.mean())
+                    median_match_pass = float(match_pass.median())
+                    p05_match_pass = float(torch.quantile(match_pass.reshape(-1), 0.05))
+                    p25_match_pass = float(torch.quantile(match_pass.reshape(-1), 0.25))
+                    final_diag["match_filter_stats"] = {
+                        "threshold_actual": t_m_real,
+                        "k_sharpness": k_m_real,
+                        "pairs_below_threshold_pct": 100 * n_pairs_below_thresh / total_pairs,
+                        "mean_match_pass": mean_match_pass,
+                        "median_match_pass": median_match_pass,
+                        "p05_match_pass": p05_match_pass,
+                        "p25_match_pass": p25_match_pass,
+                        "match_data_min": float(match_prob.min()),
+                        "match_data_max": float(match_prob.max()),
+                        "match_data_mean": float(match_prob.mean()),
+                    }
+            if not rum.use_soc_mixture:
+                print(f"  match threshold = {t_m_real:.4f}  (data min={float(match_prob.min()):.4f}, "
+                      f"max={float(match_prob.max()):.4f})")
+                print(f"  pairs below threshold: {n_pairs_below_thresh}/{total_pairs} "
+                      f"({100*n_pairs_below_thresh/total_pairs:.2f}%)")
+                print(f"  match_pass: mean={mean_match_pass:.3f}  median={median_match_pass:.3f}  "
+                      f"p05={p05_match_pass:.3f}  p25={p25_match_pass:.3f}")
+
+        # ===================================================================
+        # Cosine-match-only ablation: feed match_prob = ones so log_cosine_match
+        # = 0 in V_M_c. Isolates the γ_M·log_cosine_match contribution from
+        # the γ_M·log_M_j gravity (otherwise lumped under "gravity_gamma_logM").
+        # ===================================================================
+        print("\n[ablation] mute cosine_match only (γ_M·log_cosine_match = 0)...")
+        with torch.no_grad():
+            out_no_match = forward_cs(
+                encoder, rum, X_static, X_dynamic, edge_index,
+                t_per_mode, mode_names, log_d_ij,
+                torch.ones_like(match_prob),              # cosine = 1 → log = 0
+                log_M_j, log_W_j, log_D_j,
+                income_score, pct_kids, mean_cars, income_tier_props,
+                pi_m_pair, grid_borough_idx, observed_OD, val_mask,
+                soc_props_per_origin=soc_props_per_origin,
+                per_soc_demand_share_j=per_soc_demand_share_j,
+            )
+        cpc_no_cosine_match = cpc(out_no_match["log_P_D"], observed_OD, val_mask)
+        final_diag["cosine_match_ablation"] = {
+            "cpc_no_cosine_match": cpc_no_cosine_match,
+            "cosine_match_drop": final_cpc - cpc_no_cosine_match,
+        }
+        print(f"  no cosine_match: CPC={cpc_no_cosine_match:.4f}  "
+              f"drop={final_cpc - cpc_no_cosine_match:+.4f}")
+
+        # ===================================================================
+        # JOINT ablation: NN-residual OFF and cosine_match OFF together.
+        # Difference (joint - NN-only - cosine-only) ≈ true cosine_match
+        # contribution when NN cannot serve as redundant backup.
+        # ===================================================================
+        print("\n[ablation] mute NN AND cosine_match together...")
+        # First measure NN-only (no NN, cosine_match active)
+        baseline_state = {k: v.detach().clone() for k, v in rum.state_dict().items()}
+        muted_nn = {k: v.clone() for k, v in baseline_state.items()}
+        for pn in ("raw_gnn_residual_scale", "raw_gnn_blend"):
+            if pn in muted_nn:
+                muted_nn[pn] = torch.full_like(muted_nn[pn], -15.0)
+        rum.load_state_dict(muted_nn)
+        with torch.no_grad():
+            out_no_nn = forward_cs(
+                encoder, rum, X_static, X_dynamic, edge_index,
+                t_per_mode, mode_names, log_d_ij, match_prob,
+                log_M_j, log_W_j, log_D_j,
+                income_score, pct_kids, mean_cars, income_tier_props,
+                pi_m_pair, grid_borough_idx, observed_OD, val_mask,
+                soc_props_per_origin=soc_props_per_origin,
+                per_soc_demand_share_j=per_soc_demand_share_j,
+            )
+            cpc_no_nn = cpc(out_no_nn["log_P_D"], observed_OD, val_mask)
+            # Joint: NN off AND cosine_match off
+            out_no_both = forward_cs(
+                encoder, rum, X_static, X_dynamic, edge_index,
+                t_per_mode, mode_names, log_d_ij, torch.ones_like(match_prob),
+                log_M_j, log_W_j, log_D_j,
+                income_score, pct_kids, mean_cars, income_tier_props,
+                pi_m_pair, grid_borough_idx, observed_OD, val_mask,
+                soc_props_per_origin=soc_props_per_origin,
+                per_soc_demand_share_j=per_soc_demand_share_j,
+            )
+            cpc_no_both = cpc(out_no_both["log_P_D"], observed_OD, val_mask)
+        rum.load_state_dict(baseline_state)
+        # True cosine_match contribution when NN is unavailable:
+        cosine_match_drop_no_nn = cpc_no_nn - cpc_no_both
+        final_diag["joint_nn_cosine_ablation"] = {
+            "cpc_no_nn_only":              cpc_no_nn,
+            "cpc_no_nn_and_no_cosine":     cpc_no_both,
+            "cosine_match_drop_under_no_nn": cosine_match_drop_no_nn,
+            "nn_drop_alone":               final_cpc - cpc_no_nn,
+            "joint_drop_from_baseline":    final_cpc - cpc_no_both,
+        }
+        print(f"  no NN only:                  CPC={cpc_no_nn:.4f}  drop={final_cpc-cpc_no_nn:+.4f}")
+        print(f"  no NN + no cosine_match:     CPC={cpc_no_both:.4f}  drop={final_cpc-cpc_no_both:+.4f}")
+        print(f"  ⭐ TRUE cosine_match effect (when NN absent): {cosine_match_drop_no_nn:+.4f}")
 
         # ===================================================================
         # Sub-population CPC breakdown
