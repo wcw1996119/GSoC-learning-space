@@ -135,13 +135,18 @@ def forward_cs(
 
         # Layer 1: occupation match filter
         if rum.use_soc_mixture:
-            # Per-SOC: τ_s and k_s applied to demand_share[j, s] (no manual floor).
-            # log_match_pass_per_soc[s, j] = log σ(k_s · (demand_share[j, s] - τ_s))
-            tau_per_soc = rum.match_filter_thresh_per_soc.view(rum.n_soc, 1)   # (S, 1)
-            k_per_soc = rum.k_match_filter_per_soc.view(rum.n_soc, 1)          # (S, 1)
-            ds_T = per_soc_demand_share_j.t()                                  # (S, N)
-            match_pass_per_soc = torch.sigmoid(k_per_soc * (ds_T - tau_per_soc))
-            log_match_pass_per_soc = torch.log(match_pass_per_soc.clamp(min=1e-9))  # (S, N)
+            if getattr(rum, "frozen_log_match_mask_per_soc", None) is not None:
+                # Lit-anchored frozen mask (Stoll-Houston 2005 / B1 method).
+                # Pre-computed (S, N) log-mask injected by trainer; bypass learnable τ_s.
+                log_match_pass_per_soc = rum.frozen_log_match_mask_per_soc      # (S, N)
+            else:
+                # Per-SOC learnable: τ_s and k_s applied to demand_share[j, s].
+                # log_match_pass_per_soc[s, j] = log σ(k_s · (demand_share[j, s] - τ_s))
+                tau_per_soc = rum.match_filter_thresh_per_soc.view(rum.n_soc, 1)   # (S, 1)
+                k_per_soc = rum.k_match_filter_per_soc.view(rum.n_soc, 1)          # (S, 1)
+                ds_T = per_soc_demand_share_j.t()                                  # (S, N)
+                match_pass_per_soc = torch.sigmoid(k_per_soc * (ds_T - tau_per_soc))
+                log_match_pass_per_soc = torch.log(match_pass_per_soc.clamp(min=1e-9))  # (S, N)
             log_filter_mask_per_tier = None                                    # assembled in loop
         else:
             # Legacy: scalar τ on cosine_match[i, j], optional floor
@@ -801,6 +806,18 @@ def main():
     ap.add_argument("--k-match-init", type=float, default=10.0,
                     help="Initial sharpness of match filter sigmoid. Larger = sharper "
                          "cutoff. Use ≥20 for near-hard cutoff behavior.")
+    ap.add_argument("--use-frozen-match-mask", action="store_true",
+                    help="Stoll-Houston 2005 lit-anchored hard match-set. For each SOC s, "
+                         "J_s = {j : demand_share[j,s] > mean_s · multiplier}; bypasses "
+                         "the learnable per-SOC τ_s (which collapses to ~0 on aggregate OD). "
+                         "Requires --use-soc-mixture and --use-consideration-filter.")
+    ap.add_argument("--match-mean-mult", type=float, default=1.0,
+                    help="τ_s = mean(demand_share[:,s]) · multiplier for frozen mask. "
+                         "1.0 = above-mean grids (Stoll-Houston). 1.2 = stricter (504 orphans). "
+                         "0.8 = looser (90%% pass).")
+    ap.add_argument("--match-mask-log-penalty", type=float, default=-1e9,
+                    help="log-penalty for grids OUTSIDE J_s. -1e9 = hard exclude (prob = 0). "
+                         "-5 = soft penalty (~0.7%% relative weight). Tune for ABM realism.")
     ap.add_argument("--use-tier-mixture", action="store_true",
                     help="Income-tier latent class: each (α, γ, ν, δ_match) tier-specific × 3 tier. "
                          "P(j|i) = Σ_k π(tier=k|i) · softmax(V_upper_k).")
@@ -1049,7 +1066,35 @@ def main():
         k_match_init=args.k_match_init,
         use_soc_mixture=args.use_soc_mixture,
         n_soc=9,
+        use_frozen_match_mask=args.use_frozen_match_mask,
     ).to(device)
+
+    # Inject the frozen lit-anchored match mask AFTER head construction
+    # (mask depends on demand_share, which is computed earlier from aux data).
+    if args.use_frozen_match_mask:
+        assert per_soc_demand_share_j is not None, \
+            "--use-frozen-match-mask requires per_soc_demand_share_j (aux soc_props/grid_industry/epsilon)"
+        with torch.no_grad():
+            ds_NS = per_soc_demand_share_j                              # (N, S) on device
+            mean_per_soc = ds_NS.mean(dim=0, keepdim=True)               # (1, S)
+            tau_per_soc = mean_per_soc * float(args.match_mean_mult)    # (1, S)
+            pass_mask = ds_NS > tau_per_soc                             # (N, S) bool
+            log_mask = torch.where(
+                pass_mask,
+                torch.zeros_like(ds_NS),
+                torch.full_like(ds_NS, float(args.match_mask_log_penalty)),
+            ).t().contiguous()                                          # (S, N)
+        rum.set_frozen_match_mask(log_mask)
+        SOC = ["mgr","prof","assoc","admin","trades","care","sales","oper","elem"]
+        sizes = [int(pass_mask[:, s].sum()) for s in range(pass_mask.shape[1])]
+        print(f"        frozen match mask: mult={args.match_mean_mult}, "
+              f"penalty={args.match_mask_log_penalty}")
+        for s in range(len(SOC)):
+            tau_val = float(tau_per_soc[0, s])
+            print(f"          {SOC[s]:6s}  tau={tau_val:.4f}  |J_s|={sizes[s]:4d}/{N}  "
+                  f"({100*sizes[s]/N:.0f}%)")
+        orphans = int((pass_mask.sum(dim=1) == 0).sum())
+        print(f"          orphan grids (in 0 SOC sets): {orphans}")
 
     # If busy-dest boost enabled: compute top-K busy destinations from training data
     # (total observed inflow per destination), register on head as a buffer.
@@ -1418,7 +1463,29 @@ def main():
             # Ablation: turn off ONLY the match-pass sub-layer (keep cost-pass)
             print("\n[ablation] disable match-pass only (keep cost-pass)...")
             with torch.no_grad():
-                if rum.use_soc_mixture:
+                if rum.use_soc_mixture and getattr(rum, "frozen_log_match_mask_per_soc", None) is not None:
+                    # Frozen mask mode: report (S, N) binary set sizes
+                    log_mask = rum.frozen_log_match_mask_per_soc.detach().cpu()  # (S, N)
+                    in_set = (log_mask > -1e6)                                    # bool (S, N)
+                    ds_np = per_soc_demand_share_j.detach().cpu().numpy()
+                    import numpy as _np
+                    pass_per_soc = []
+                    for s in range(rum.n_soc):
+                        size_s = int(in_set[s].sum())
+                        pass_per_soc.append({
+                            "soc": s,
+                            "set_size": size_s,
+                            "set_frac": size_s / int(in_set.shape[1]),
+                            "demand_share_p05": float(_np.quantile(ds_np[:, s], 0.05)),
+                            "demand_share_p95": float(_np.quantile(ds_np[:, s], 0.95)),
+                            "demand_share_mean": float(ds_np[:, s].mean()),
+                        })
+                    final_diag["match_filter_stats_per_soc"] = pass_per_soc
+                    final_diag["match_filter_mode"] = "frozen_mask"
+                    for s, row in enumerate(pass_per_soc):
+                        print(f"  SOC {s+1}: |J_s|={row['set_size']:4d}/{int(in_set.shape[1])} "
+                              f"({100*row['set_frac']:.0f}%)  ds_mean={row['demand_share_mean']:.3f}")
+                elif rum.use_soc_mixture:
                     # Per-SOC mode: 9 thresholds operate on demand_share[j, s]
                     tau_per_soc = rum.match_filter_thresh_per_soc.detach().cpu().tolist()
                     k_per_soc = rum.k_match_filter_per_soc.detach().cpu().tolist()
@@ -1438,6 +1505,7 @@ def main():
                             "demand_share_p95": float(_np.quantile(ds_np[:, s], 0.95)),
                         })
                     final_diag["match_filter_stats_per_soc"] = pass_per_soc
+                    final_diag["match_filter_mode"] = "learnable_per_soc_tau"
                     for s, row in enumerate(pass_per_soc):
                         print(f"  SOC {s+1}: τ={row['tau']:.3f}  k={row['k_sharpness']:.1f}  "
                               f"below_thresh={100*row['frac_below_thresh']:.1f}%  "

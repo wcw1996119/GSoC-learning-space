@@ -164,6 +164,14 @@ class CerveroShenHead(nn.Module):
                                             # use_consideration_filter (match floor).
                                             # ABM downstream gets P(j | agent.SOC, i, t) directly.
         n_soc: int = 9,                     # Number of SOC categories (default 9 for ONS SOC2020 maj).
+        use_frozen_match_mask: bool = False,  # Lit-anchored hard match-set (Stoll-Houston 2005):
+                                              # for each SOC s, define J_s = {j : demand_share[j,s] > tau_s}
+                                              # OUTSIDE the model and inject as a frozen (S, N) log-mask.
+                                              # Trainer pre-computes mask from demand_share and registers
+                                              # via set_frozen_match_mask(). When this is on, the
+                                              # consideration_filter's match-pass branch is bypassed
+                                              # (cost-pass still works). Mutually exclusive with
+                                              # learnable per-SOC tau_s — pick one.
     ):
         super().__init__()
         self.n_modes = n_modes
@@ -180,6 +188,18 @@ class CerveroShenHead(nn.Module):
         self.use_push_pull = bool(use_push_pull)
         self.use_soc_mixture = bool(use_soc_mixture)
         self.n_soc = int(n_soc)
+        self.use_frozen_match_mask = bool(use_frozen_match_mask)
+        if self.use_frozen_match_mask:
+            assert self.use_soc_mixture, \
+                "frozen_match_mask requires use_soc_mixture=True (mask is per-SOC)"
+            assert bool(use_consideration_filter), \
+                "frozen_match_mask requires use_consideration_filter=True " \
+                "(cost-pass branch still active; match-pass replaced by frozen mask)"
+            # Placeholder buffer; trainer fills the real (S, N) tensor via set_frozen_match_mask.
+            self.register_buffer("frozen_log_match_mask_per_soc",
+                                 torch.full((self.n_soc, 1), -1e9))
+        else:
+            self.frozen_log_match_mask_per_soc = None
         if self.use_soc_mixture:
             assert not self.use_stoll_match, \
                 "soc_mixture replaces aggregate Stoll log_match; disable use_stoll_match"
@@ -459,6 +479,23 @@ class CerveroShenHead(nn.Module):
             self.raw_gate_steepness = None
             self.gate_threshold = None
 
+    def set_frozen_match_mask(self, log_mask: torch.Tensor):
+        """Register a frozen per-SOC log-mask. log_mask: (n_soc, N).
+
+        Typical use: B1 (Stoll-Houston) lit-anchored set
+            mask[s, j] = (demand_share[j, s] > mean_s * multiplier)
+            log_mask = 0 if mask else log_penalty  (-1e9 for hard, -5 for soft)
+
+        Trainer pre-computes from demand_share + multiplier and calls this once
+        after model build. Mask is registered as buffer (no grad, moves with .to()).
+        """
+        assert self.use_frozen_match_mask, "use_frozen_match_mask must be True at init"
+        S, N = log_mask.shape
+        assert S == self.n_soc, f"log_mask first dim = {S}, expected n_soc = {self.n_soc}"
+        device = self.frozen_log_match_mask_per_soc.device
+        delattr(self, "frozen_log_match_mask_per_soc")
+        self.register_buffer("frozen_log_match_mask_per_soc", log_mask.to(device).float())
+
     def set_busy_dest_index(self, dest_to_k: torch.Tensor):
         """Called by trainer to register which grids are top-K busy destinations.
         dest_to_k: (N,) long tensor; entry = busy_idx in [0, K) or -1 if not busy.
@@ -684,4 +721,11 @@ class CerveroShenHead(nn.Module):
                 "use_match_gate": self.use_match_gate,
                 "gate_steepness": float(self.gate_steepness) if self.gate_steepness is not None else None,
                 "gate_threshold": float(self.gate_threshold) if self.gate_threshold is not None else None,
+                "use_frozen_match_mask": self.use_frozen_match_mask,
+                "frozen_match_mask_set_size_per_soc": (
+                    [int((self.frozen_log_match_mask_per_soc[s] > -1e6).sum())
+                     for s in range(self.n_soc)]
+                    if self.frozen_log_match_mask_per_soc is not None
+                       and self.frozen_log_match_mask_per_soc.shape[-1] > 1 else None
+                ),
             }
