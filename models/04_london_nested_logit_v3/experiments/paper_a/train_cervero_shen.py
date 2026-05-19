@@ -845,6 +845,13 @@ def main():
                          "attraction patterns. Default 0 (off). Recommended K=50.")
     ap.add_argument("--busy-dest-l2", type=float, default=1e-3,
                     help="L2 regularization on busy_dest_boost params (K×24).")
+    ap.add_argument("--use-dual-pair-encoder", action="store_true",
+                    help="Full ST-GNN + OD-pair bilinear: GraphSAGE static + per-hour "
+                         "GraphSAGE + GRU + Multi-Scale TCN + Gated Fusion + Origin/Dest "
+                         "MLPs + bilinear → V_NN (T, N, N). Retains neighbors + temporal "
+                         "+ OD-pair signals. Heavier than --use-pair-nn but is the proper "
+                         "spatio-temporal NN, not a substitute. Mutually exclusive with "
+                         "--use-pair-nn and --use-gat.")
     ap.add_argument("--use-pair-nn", action="store_true",
                     help="Replace per-grid NN (T, N) with pair-aware NN (T, N, N). "
                          "Lets V_NN learn OD-pair specific patterns (e.g. unusually "
@@ -1018,7 +1025,24 @@ def main():
             tens = tens.unsqueeze(0).expand(T, N, N).contiguous()
         t_per_mode[m] = tens
 
-    if args.use_pair_nn:
+    if args.use_dual_pair_encoder:
+        # Full ST-GNN + OD-pair bilinear: neighbors (GraphSAGE) + temporal
+        # (GRU + Multi-Scale TCN) + OD-pair (bilinear). Three signals retained.
+        _dpe_spec = importlib.util.spec_from_file_location(
+            "v3_dual_pair_encoder",
+            V3_ROOT / "models_lib" / "inverse_rum" / "dual_branch_pair_encoder.py",
+        )
+        _dpe_mod = importlib.util.module_from_spec(_dpe_spec)
+        _dpe_spec.loader.exec_module(_dpe_mod)
+        encoder = _dpe_mod.DualBranchPairEncoder(
+            static_dim=X_static.shape[1], dyn_dim=X_dynamic.shape[-1],
+            hidden_dim=32, gru_hidden=32, n_sage_layers=2, tcn_kernels=(3, 5, 7),
+            pair_rank=args.pair_rank, pair_hidden=args.pair_hidden,
+        ).to(device)
+        print(f"        encoder: DualBranchPairEncoder "
+              f"(GraphSAGE+GRU+TCN+bilinear, pair_rank={args.pair_rank}, "
+              f"pair_hidden={args.pair_hidden}) → V_NN shape (T, N, N)")
+    elif args.use_pair_nn:
         # Pair-aware NN: outputs (T, N, N) directly — origin × destination bilinear
         _pair_spec = importlib.util.spec_from_file_location(
             "v3_pair_nn", V3_ROOT / "models_lib" / "inverse_rum" / "pair_residual_nn.py"
@@ -1811,7 +1835,12 @@ def main():
         "dyn_dim": int(X_dynamic.shape[-1]),
         "N": int(N),
         "T": int(T),
-        "encoder_kind": "DualBranchGATEncoder" if args.use_gat else "DualBranchEncoder",
+        "encoder_kind": (
+            "DualBranchPairEncoder" if args.use_dual_pair_encoder
+            else "PairResidualNN" if args.use_pair_nn
+            else "DualBranchGATEncoder" if args.use_gat
+            else "DualBranchEncoder"
+        ),
     }
     torch.save(ckpt_payload, ckpt_path)
     print(f"  weights saved to {ckpt_path}")
