@@ -164,6 +164,13 @@ class CerveroShenHead(nn.Module):
                                             # use_consideration_filter (match floor).
                                             # ABM downstream gets P(j | agent.SOC, i, t) directly.
         n_soc: int = 9,                     # Number of SOC categories (default 9 for ONS SOC2020 maj).
+        k_match_min_per_soc: float = 0.1,    # Lower bound on per-SOC sharpness k_s.
+                                              # Default 0.1 = no real bound (back-compat).
+                                              # Set to 20+ for "soft lexicographic" — forces
+                                              # the sigmoid to be sharp regardless of what
+                                              # the optimizer wants. With tau_floor it gives
+                                              # data-driven thresholds inside a structural
+                                              # prior (Aboutaleb 2021 EBA-style).
         use_frozen_match_mask: bool = False,  # Lit-anchored hard match-set (Stoll-Houston 2005):
                                               # for each SOC s, define J_s = {j : demand_share[j,s] > tau_s}
                                               # OUTSIDE the model and inject as a frozen (S, N) log-mask.
@@ -188,6 +195,12 @@ class CerveroShenHead(nn.Module):
         self.use_push_pull = bool(use_push_pull)
         self.use_soc_mixture = bool(use_soc_mixture)
         self.n_soc = int(n_soc)
+        # Soft-lexicographic structural prior: k_s lower bound + τ_s floor (set later).
+        self.k_match_min_per_soc = float(k_match_min_per_soc)
+        # tau_match_floor_per_soc buffer will be filled by trainer via
+        # set_tau_match_floor() with (S,) lit-anchored floors. None = no floor.
+        self.tau_match_floor_per_soc = None
+
         self.use_frozen_match_mask = bool(use_frozen_match_mask)
         if self.use_frozen_match_mask:
             assert self.use_soc_mixture, \
@@ -496,6 +509,24 @@ class CerveroShenHead(nn.Module):
         delattr(self, "frozen_log_match_mask_per_soc")
         self.register_buffer("frozen_log_match_mask_per_soc", log_mask.to(device).float())
 
+    def set_tau_match_floor(self, floor: torch.Tensor):
+        """Set per-SOC threshold lower bound τ_s ≥ floor[s] for the EBA-style filter.
+
+        Typical use: floor = mult × mean(demand_share[:, s]) with mult ∈ [0.3, 0.7].
+        Larger mult = stricter floor = more aggressive consideration cut.
+
+        With floor + k_match_min_per_soc ≥ 20, the filter becomes "soft
+        lexicographic" — model learns where τ_s sits inside [floor, ∞) but
+        cannot collapse to no-filter (Swait 2001 / Aboutaleb 2021 EBA-style).
+        """
+        assert self.raw_match_filter_thresh_per_soc is not None, \
+            "set_tau_match_floor requires use_consideration_filter + use_soc_mixture"
+        S = floor.numel()
+        assert S == self.n_soc, f"floor numel = {S}, expected n_soc = {self.n_soc}"
+        # Register as buffer (no grad, moves with .to())
+        self.register_buffer("_tau_match_floor_buf", floor.float())
+        self.tau_match_floor_per_soc = self._tau_match_floor_buf
+
     def set_busy_dest_index(self, dest_to_k: torch.Tensor):
         """Called by trainer to register which grids are top-K busy destinations.
         dest_to_k: (N,) long tensor; entry = busy_idx in [0, K) or -1 if not busy.
@@ -599,13 +630,23 @@ class CerveroShenHead(nn.Module):
     @property
     def match_filter_thresh_per_soc(self) -> Optional[torch.Tensor]:
         """Per-SOC match threshold τ_s, applied to demand_share[j, s].
-        No floor — model self-discovers heterogeneous cuts."""
+
+        With tau_floor_per_soc buffer (set via set_tau_match_floor), enforces
+        τ_s ≥ floor[s] so the filter cannot collapse to τ ≈ 0 (no real cut).
+        floor is typically `mult × mean(demand_share[:, s])` with mult ∈ [0.3, 0.7].
+        """
         if self.raw_match_filter_thresh_per_soc is None: return None
-        return F.softplus(self.raw_match_filter_thresh_per_soc)
+        floor = getattr(self, "tau_match_floor_per_soc", None)
+        base = F.softplus(self.raw_match_filter_thresh_per_soc)
+        return base if floor is None else floor + base
     @property
     def k_match_filter_per_soc(self) -> Optional[torch.Tensor]:
+        """k_s ≥ k_match_min_per_soc — sharpness lower bound prevents the filter
+        from flattening to a barely-sloped sigmoid (data-driven τ_s with sharp k_s
+        is the lexicographic-flavored signature)."""
         if self.raw_k_match_filter_per_soc is None: return None
-        return F.softplus(self.raw_k_match_filter_per_soc).clamp(min=0.1)
+        k_min = getattr(self, "k_match_min_per_soc", 0.1)
+        return F.softplus(self.raw_k_match_filter_per_soc).clamp(min=k_min)
 
     @property
     def beta_t_slope_per_mode(self) -> torch.Tensor:

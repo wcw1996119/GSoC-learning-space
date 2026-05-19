@@ -806,6 +806,16 @@ def main():
     ap.add_argument("--k-match-init", type=float, default=10.0,
                     help="Initial sharpness of match filter sigmoid. Larger = sharper "
                          "cutoff. Use ≥20 for near-hard cutoff behavior.")
+    ap.add_argument("--k-match-min-per-soc", type=float, default=0.1,
+                    help="Lower bound on per-SOC sharpness k_s. Default 0.1 = no bound "
+                         "(back-compat). Set ≥ 20 for soft-lexicographic: forces sharp "
+                         "sigmoid filter regardless of optimizer preference. Combined with "
+                         "--tau-match-floor-mult, gives data-driven thresholds inside a "
+                         "structural prior (Aboutaleb 2021 EBA-style).")
+    ap.add_argument("--tau-match-floor-mult", type=float, default=0.0,
+                    help="τ_s ≥ mult × mean(demand_share[:, s]). Default 0 = no floor "
+                         "(back-compat). 0.5 = τ at least half the SOC's all-city mean. "
+                         "Use with --k-match-min-per-soc ≥ 20 for soft lexicographic.")
     ap.add_argument("--use-frozen-match-mask", action="store_true",
                     help="Stoll-Houston 2005 lit-anchored hard match-set. For each SOC s, "
                          "J_s = {j : demand_share[j,s] > mean_s · multiplier}; bypasses "
@@ -1090,8 +1100,21 @@ def main():
         k_match_init=args.k_match_init,
         use_soc_mixture=args.use_soc_mixture,
         n_soc=9,
+        k_match_min_per_soc=args.k_match_min_per_soc,
         use_frozen_match_mask=args.use_frozen_match_mask,
     ).to(device)
+
+    # Soft-lexicographic floor: τ_s ≥ mult × mean(demand_share[:, s])
+    if args.tau_match_floor_mult > 0 and args.use_soc_mixture and args.use_consideration_filter:
+        assert per_soc_demand_share_j is not None
+        with torch.no_grad():
+            mean_per_soc = per_soc_demand_share_j.mean(dim=0)         # (S,)
+            floor = mean_per_soc * float(args.tau_match_floor_mult)   # (S,)
+        rum.set_tau_match_floor(floor)
+        SOC = ["mgr","prof","assoc","admin","trades","care","sales","oper","elem"]
+        print(f"        tau_match_floor: mult={args.tau_match_floor_mult}, k_min={args.k_match_min_per_soc}")
+        for s in range(rum.n_soc):
+            print(f"          {SOC[s]:6s}  floor={float(floor[s]):.4f}  (= {args.tau_match_floor_mult} × mean {float(mean_per_soc[s]):.4f})")
 
     # Inject the frozen lit-anchored match mask AFTER head construction
     # (mask depends on demand_share, which is computed earlier from aux data).
