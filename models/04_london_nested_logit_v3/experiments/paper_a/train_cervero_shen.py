@@ -153,11 +153,20 @@ def forward_cs(
                 log_match_pass_per_soc = rum.frozen_log_match_mask_per_soc      # (S, N)
             else:
                 # Per-SOC learnable: τ_s and k_s applied to demand_share[j, s].
-                # log_match_pass_per_soc[s, j] = log σ(k_s · (demand_share[j, s] - τ_s))
+                # log_match_pass_per_soc[s, j] = log σ(k_s · (input[s, j] - τ_s))
+                # If use_z_score_match: input = (demand_share - mean_s) / std_s (z-score).
+                # Else: input = raw demand_share.
                 tau_per_soc = rum.match_filter_thresh_per_soc.view(rum.n_soc, 1)   # (S, 1)
                 k_per_soc = rum.k_match_filter_per_soc.view(rum.n_soc, 1)          # (S, 1)
                 ds_T = per_soc_demand_share_j.t()                                  # (S, N)
-                match_pass_per_soc = torch.sigmoid(k_per_soc * (ds_T - tau_per_soc))
+                if getattr(rum, "use_z_score_match", False):
+                    ds_input = (
+                        (ds_T - rum._ds_mean_per_soc.view(rum.n_soc, 1))
+                        / rum._ds_std_per_soc.view(rum.n_soc, 1)
+                    )
+                else:
+                    ds_input = ds_T
+                match_pass_per_soc = torch.sigmoid(k_per_soc * (ds_input - tau_per_soc))
                 log_match_pass_per_soc = torch.log(match_pass_per_soc.clamp(min=1e-9))  # (S, N)
             log_filter_mask_per_tier = None                                    # assembled in loop
         else:
@@ -818,6 +827,16 @@ def main():
     ap.add_argument("--k-match-init", type=float, default=10.0,
                     help="Initial sharpness of match filter sigmoid. Larger = sharper "
                          "cutoff. Use ≥20 for near-hard cutoff behavior.")
+    ap.add_argument("--use-z-score-match", action="store_true",
+                    help="z-score normalize demand_share[:, s] before the L1 sigmoid gate. "
+                         "τ_z[s] lives in z-space, automatic per-SOC relative scaling. "
+                         "Solves the 'operators in CBD' problem (z=-1.7 cuts CBD even though "
+                         "demand_share=0.03 isn't 0). Requires --use-soc-mixture and "
+                         "--use-consideration-filter.")
+    ap.add_argument("--z-tau-floor", type=float, default=-0.5,
+                    help="Lower bound for τ_z in z-score match mode. Default -0.5 allows "
+                         "model to learn 'slightly below mean still passes' but cannot collapse "
+                         "to 'all pass'. -1.0 = looser, 0.0 = strict above-mean.")
     ap.add_argument("--use-time-gate", action="store_true",
                     help="Stage 2 L3 commute-time hard gate: log σ(k_time · (T_max[tier] - t_min(i,j))) "
                          "added to V_dest as multiplicative routing. Upgrades the soft Bhat 1995 "
@@ -1127,6 +1146,8 @@ def main():
         k_match_init=args.k_match_init,
         use_soc_mixture=args.use_soc_mixture,
         n_soc=9,
+        use_z_score_match=args.use_z_score_match,
+        z_tau_floor=args.z_tau_floor,
         k_match_min_per_soc=args.k_match_min_per_soc,
         use_time_gate=args.use_time_gate,
         T_max_per_tier_init=(args.T_max_low, args.T_max_mid, args.T_max_high),
@@ -1134,6 +1155,19 @@ def main():
         k_time_gate_min=args.k_time_gate_min,
         use_frozen_match_mask=args.use_frozen_match_mask,
     ).to(device)
+
+    # z-score normalization: inject per-SOC demand_share mean and std
+    if args.use_z_score_match:
+        assert per_soc_demand_share_j is not None
+        with torch.no_grad():
+            mean_per_soc = per_soc_demand_share_j.mean(dim=0)              # (S,)
+            std_per_soc = per_soc_demand_share_j.std(dim=0).clamp(min=1e-6)  # (S,)
+        rum.set_demand_share_stats(mean_per_soc, std_per_soc)
+        SOC = ["mgr","prof","assoc","admin","trades","care","sales","oper","elem"]
+        print(f"        z-score match: floor τ_z = {args.z_tau_floor}, "
+              f"k_min = {args.k_match_min_per_soc}")
+        for s in range(rum.n_soc):
+            print(f"          {SOC[s]:6s}  mean={float(mean_per_soc[s]):.4f}  std={float(std_per_soc[s]):.4f}")
 
     # Soft-lexicographic floor: τ_s ≥ mult × mean(demand_share[:, s])
     if args.tau_match_floor_mult > 0 and args.use_soc_mixture and args.use_consideration_filter:

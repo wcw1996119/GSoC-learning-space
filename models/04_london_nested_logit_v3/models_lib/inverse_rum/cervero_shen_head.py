@@ -172,6 +172,16 @@ class CerveroShenHead(nn.Module):
         T_max_per_tier_init: tuple = (60.0, 90.0, 120.0),  # T_max in minutes for low/mid/high tier
         k_time_gate_init: float = 0.2,       # initial sharpness (per-minute resolution)
         k_time_gate_min: float = 0.1,        # lower bound on k_time (force sharpness)
+        use_z_score_match: bool = False,     # z-score normalize demand_share[:, s] before
+                                              # the L1 sigmoid gate. Replaces raw demand_share
+                                              # so τ_s lives in z-space (SOC-relative scale).
+                                              # Solves the "operators in CBD" problem:
+                                              # operators demand_share is 0.03 in CBD (low
+                                              # absolute, but high std means z ~ -1.7), so
+                                              # z-score gate at τ_z ~ 0 cuts CBD operators
+                                              # cleanly. Auto-data-driven, no hand-tuning.
+        z_tau_floor: float = -0.5,           # τ_z ≥ floor (default -0.5). Lower = more
+                                              # permissive, but cannot collapse to "no filter".
         k_match_min_per_soc: float = 0.1,    # Lower bound on per-SOC sharpness k_s.
                                               # Default 0.1 = no real bound (back-compat).
                                               # Set to 20+ for "soft lexicographic" — forces
@@ -229,6 +239,18 @@ class CerveroShenHead(nn.Module):
         # tau_match_floor_per_soc buffer will be filled by trainer via
         # set_tau_match_floor() with (S,) lit-anchored floors. None = no floor.
         self.tau_match_floor_per_soc = None
+
+        # z-score normalization (alternative to raw demand_share + linear floor).
+        # τ_z[s] lives in z-space, floor = z_tau_floor. Stats injected by trainer.
+        self.use_z_score_match = bool(use_z_score_match)
+        self.z_tau_floor = float(z_tau_floor)
+        if self.use_z_score_match:
+            assert bool(use_consideration_filter), \
+                "use_z_score_match requires use_consideration_filter=True"
+            assert bool(use_soc_mixture), \
+                "use_z_score_match requires use_soc_mixture=True"
+            self.register_buffer("_ds_mean_per_soc", torch.zeros(self.n_soc))
+            self.register_buffer("_ds_std_per_soc", torch.ones(self.n_soc))
 
         self.use_frozen_match_mask = bool(use_frozen_match_mask)
         if self.use_frozen_match_mask:
@@ -538,6 +560,18 @@ class CerveroShenHead(nn.Module):
         delattr(self, "frozen_log_match_mask_per_soc")
         self.register_buffer("frozen_log_match_mask_per_soc", log_mask.to(device).float())
 
+    def set_demand_share_stats(self, mean_per_soc: torch.Tensor, std_per_soc: torch.Tensor):
+        """Inject per-SOC demand_share mean and std for z-score normalization.
+
+        mean_per_soc, std_per_soc: (n_soc,) tensors. Called once by trainer after
+        the per_soc_demand_share is computed.
+        """
+        assert self.use_z_score_match, "use_z_score_match must be True at init"
+        assert mean_per_soc.numel() == self.n_soc
+        assert std_per_soc.numel() == self.n_soc
+        self._ds_mean_per_soc = mean_per_soc.float()
+        self._ds_std_per_soc = std_per_soc.clamp(min=1e-6).float()
+
     def set_tau_match_floor(self, floor: torch.Tensor):
         """Set per-SOC threshold lower bound τ_s ≥ floor[s] for the EBA-style filter.
 
@@ -658,15 +692,18 @@ class CerveroShenHead(nn.Module):
         return F.softplus(self.raw_k_match_filter).clamp(min=0.1)
     @property
     def match_filter_thresh_per_soc(self) -> Optional[torch.Tensor]:
-        """Per-SOC match threshold τ_s, applied to demand_share[j, s].
+        """Per-SOC match threshold τ_s.
 
-        With tau_floor_per_soc buffer (set via set_tau_match_floor), enforces
-        τ_s ≥ floor[s] so the filter cannot collapse to τ ≈ 0 (no real cut).
-        floor is typically `mult × mean(demand_share[:, s])` with mult ∈ [0.3, 0.7].
+        - If use_z_score_match: τ_z[s] ∈ [z_tau_floor, ∞), applied to z-scored demand_share.
+          z_tau_floor default -0.5; τ_z = 0 means "above SOC mean" passes.
+        - Else if tau_match_floor_per_soc set: τ_s ≥ floor[s], applied to raw demand_share.
+        - Else: τ_s ≥ 0, applied to raw demand_share (back-compat).
         """
         if self.raw_match_filter_thresh_per_soc is None: return None
-        floor = getattr(self, "tau_match_floor_per_soc", None)
         base = F.softplus(self.raw_match_filter_thresh_per_soc)
+        if self.use_z_score_match:
+            return self.z_tau_floor + base    # τ_z ∈ [z_tau_floor, ∞)
+        floor = getattr(self, "tau_match_floor_per_soc", None)
         return base if floor is None else floor + base
     @property
     def k_match_filter_per_soc(self) -> Optional[torch.Tensor]:
@@ -804,6 +841,12 @@ class CerveroShenHead(nn.Module):
                 "use_match_gate": self.use_match_gate,
                 "gate_steepness": float(self.gate_steepness) if self.gate_steepness is not None else None,
                 "gate_threshold": float(self.gate_threshold) if self.gate_threshold is not None else None,
+                "use_z_score_match": self.use_z_score_match,
+                "z_tau_floor": self.z_tau_floor if self.use_z_score_match else None,
+                "ds_mean_per_soc": (self._ds_mean_per_soc.tolist()
+                                     if self.use_z_score_match else None),
+                "ds_std_per_soc": (self._ds_std_per_soc.tolist()
+                                    if self.use_z_score_match else None),
                 "use_time_gate": self.use_time_gate,
                 "T_max_per_tier": (self.T_max_per_tier.tolist()
                                     if self.T_max_per_tier is not None else None),
