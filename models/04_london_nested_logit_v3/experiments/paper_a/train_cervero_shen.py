@@ -82,6 +82,10 @@ def forward_cs(
     train_mask: torch.Tensor,
     soc_props_per_origin: Optional[torch.Tensor] = None,    # (N, 9)
     per_soc_demand_share_j: Optional[torch.Tensor] = None,  # (N, 9), row-sum 1
+    hour_weights: Optional[torch.Tensor] = None,            # (T,) — Plan E hour weighting:
+                                                            # weights * flow → loss focus on
+                                                            # commute-pure hours (Toole 2015,
+                                                            # Iqbal 2014). None = legacy all-hours.
 ):
     _V_gnn_raw = encoder(X_static, X_dynamic, edge_index)
     # Encoder may return (T, N) [legacy per-grid] or (T, N, N) [pair-aware NN]
@@ -510,7 +514,13 @@ def forward_cs(
         log_P_D = torch.log_softmax(V_dest, dim=-1)                      # (T, N, N)
 
     # ---- losses ----
+    # Plan E (Toole 2015 / Iqbal 2014 fusion): hour_weights re-weights commute-pure
+    # hours up and non-commute hours down (or zero them out for hard slicing).
+    # Math equivalence: L_weighted = Σ_h w_h · CE_h, which is the
+    # weighted-MLE form of IPF calibration when w_h = P(commute|hour=h).
     mask_f = train_mask.view(1, N, 1).float()
+    if hour_weights is not None:
+        mask_f = mask_f * hour_weights.view(T, 1, 1)
     flow = observed_OD * mask_f
     flow_sum = flow.sum().clamp(min=1.0)
 
@@ -732,13 +742,28 @@ def forward_cs(
     }
 
 
-def cpc(log_P: torch.Tensor, observed_OD: torch.Tensor, mask: torch.Tensor) -> float:
+def cpc(log_P: torch.Tensor, observed_OD: torch.Tensor, mask: torch.Tensor,
+        hour_weights: Optional[torch.Tensor] = None) -> float:
+    """CPC = Sørensen index over destination inflows.
+
+    When hour_weights is provided (Plan E), only hours with non-zero weight
+    contribute. This keeps CPC aligned with the training objective: if loss
+    is computed on commute-hours only, CPC must be too — otherwise a model
+    trained on commute peaks gets scored on midday shopping flows and looks
+    artificially bad.
+    """
     with torch.no_grad():
         P = log_P.exp()
         row_sum = observed_OD.sum(dim=2, keepdim=True)
         pred = P * row_sum
-        num = 2.0 * torch.minimum(pred[:, mask], observed_OD[:, mask]).sum()
-        den = (pred[:, mask].sum() + observed_OD[:, mask].sum()).clamp(min=1.0)
+        if hour_weights is not None:
+            keep_h = (hour_weights > 0).nonzero(as_tuple=True)[0]
+            pred = pred[keep_h]
+            obs = observed_OD[keep_h]
+        else:
+            obs = observed_OD
+        num = 2.0 * torch.minimum(pred[:, mask], obs[:, mask]).sum()
+        den = (pred[:, mask].sum() + obs[:, mask].sum()).clamp(min=1.0)
         return float(num / den)
 
 
@@ -927,6 +952,24 @@ def main():
                     help="After final eval, compute per-hour / per-borough / per-distance / "
                          "per-flow-bin CPC breakdowns + top-30 over/under-predicted cells. "
                          "Saved into result JSON to find data ceiling shape.")
+    # --- Plan E: commute-hour slicing + NTS-weighted loss ---
+    # GEODS 2019 OD has no trip purpose. To approximate commute-only training,
+    # we (a) zero-mask non-commute hours and (b) re-weight remaining hours by
+    # NTS commute-departure share (P(h|commute) as proxy for P(commute|h)).
+    # Math equivalence: L_weighted = Σ_h w_h · CE_h. Lit anchors:
+    #   - Iqbal et al. 2014 (TRC) — AM-peak slicing
+    #   - Toole et al. 2015 (TRC) — survey-fusion calibration
+    ap.add_argument("--commute-hours", type=str, default="",
+                    help="Comma-separated hour list to keep in loss (e.g. '7,8,9,17,18'). "
+                         "Other hours get weight=0 (hard slice). Empty string = keep all 24h.")
+    ap.add_argument("--use-nts-weighted-loss", action="store_true",
+                    help="Within kept commute_hours, weight each hour by NTS commute-departure "
+                         "share (P(start hour = h | trip = commute)). Without this flag, all "
+                         "kept hours get weight 1/|kept| (uniform).")
+    ap.add_argument("--nts-share-csv", type=str,
+                    default=str(V3_ROOT / "data" / "processed" / "nts_commute_departure_time.csv"),
+                    help="Path to NTS commute departure-time share CSV. "
+                         "Source: DfT NTS0502 (assets.publishing.service.gov.uk).")
     ap.add_argument("--lambda-kl", type=float, default=1.0)
     ap.add_argument("--kl-warmup-epochs", type=int, default=15)
     ap.add_argument("--lr-theta", type=float, default=1e-3)
@@ -1080,6 +1123,55 @@ def main():
         if tens.dim() == 2:
             tens = tens.unsqueeze(0).expand(T, N, N).contiguous()
         t_per_mode[m] = tens
+
+    # ---- Plan E: hour_weights tensor for commute-pure loss focus ----
+    # Empty --commute-hours and no --use-nts-weighted-loss → None → legacy
+    # behaviour (uniform all-hours, exactly equivalent to pre-Plan-E training).
+    hour_weights = None
+    commute_hours_list = []
+    if args.commute_hours.strip():
+        commute_hours_list = [int(h) for h in args.commute_hours.split(",") if h.strip()]
+        assert all(0 <= h < T for h in commute_hours_list), \
+            f"--commute-hours must be in [0, {T}); got {commute_hours_list}"
+    if commute_hours_list or args.use_nts_weighted_loss:
+        hour_weights_np = np.zeros(T, dtype=np.float32)
+        if args.use_nts_weighted_loss:
+            import csv as _csv
+            nts_share_by_hour = {}
+            with open(args.nts_share_csv, "r") as f:
+                for ln in f:
+                    if ln.startswith("#") or ln.startswith("mode"):
+                        continue
+                    parts = ln.strip().split(",")
+                    if len(parts) != 3:
+                        continue
+                    mode_tag, h_str, share_str = parts
+                    if mode_tag != "all":
+                        continue
+                    nts_share_by_hour[int(h_str)] = float(share_str)
+            assert len(nts_share_by_hour) == 24, \
+                f"--nts-share-csv must have 24 hours for mode=all; got {len(nts_share_by_hour)}"
+            kept = commute_hours_list if commute_hours_list else list(range(T))
+            for h in kept:
+                hour_weights_np[h] = nts_share_by_hour[h]
+            # Re-normalize so weights sum to len(kept) — preserves loss scale.
+            s = hour_weights_np.sum()
+            assert s > 0, "NTS weights summed to 0 over kept commute_hours"
+            hour_weights_np *= len(kept) / s
+        else:
+            for h in commute_hours_list:
+                hour_weights_np[h] = 1.0   # uniform within kept hours
+
+        hour_weights = torch.from_numpy(hour_weights_np).to(device).float()
+        nz = hour_weights_np > 0
+        print(f"  Plan E hour weights: kept={int(nz.sum())}/24 hours, "
+              f"weights[active]={hour_weights_np[nz].tolist()}")
+        # Diagnostic: what fraction of total OD flow is kept?
+        with torch.no_grad():
+            flow_total = observed_OD.sum().item()
+            flow_kept = (observed_OD * hour_weights.view(T, 1, 1)).sum().item()
+            print(f"    weighted OD flow fraction: {flow_kept/flow_total:.3f} "
+                  f"(raw kept-hour fraction: {observed_OD[nz].sum().item()/flow_total:.3f})")
 
     if args.use_dual_pair_encoder:
         # Full ST-GNN + OD-pair bilinear: neighbors (GraphSAGE) + temporal
@@ -1377,6 +1469,7 @@ def main():
             pi_m_pair, grid_borough_idx, observed_OD, train_mask,
             soc_props_per_origin=soc_props_per_origin,
             per_soc_demand_share_j=per_soc_demand_share_j,
+            hour_weights=hour_weights,
         )
         loss = (out["nll_dest"]
                 + kl_weight * out["ce_mode"]
@@ -1403,9 +1496,11 @@ def main():
                 pi_m_pair, grid_borough_idx, observed_OD, val_mask,
                 soc_props_per_origin=soc_props_per_origin,
                 per_soc_demand_share_j=per_soc_demand_share_j,
+                hour_weights=hour_weights,
             )
             val_nll = float(out_e["nll_dest"])
-            val_cpc = cpc(out_e["log_P_D"], observed_OD, val_mask)
+            val_cpc = cpc(out_e["log_P_D"], observed_OD, val_mask,
+                          hour_weights=hour_weights)
             diag = out_e["diagnostic"]
             ce_val = float(out_e["ce_mode"])
 
@@ -1474,8 +1569,10 @@ def main():
             pi_m_pair, grid_borough_idx, observed_OD, val_mask,
             soc_props_per_origin=soc_props_per_origin,
             per_soc_demand_share_j=per_soc_demand_share_j,
+            hour_weights=hour_weights,
         )
-        final_cpc = cpc(out_final["log_P_D"], observed_OD, val_mask)
+        final_cpc = cpc(out_final["log_P_D"], observed_OD, val_mask,
+                        hour_weights=hour_weights)
         final_diag = out_final["diagnostic"]
         full_snapshot = rum.snapshot()
 
@@ -1538,8 +1635,10 @@ def main():
                 pi_m_pair, grid_borough_idx, observed_OD, val_mask,
                 soc_props_per_origin=soc_props_per_origin,
                 per_soc_demand_share_j=per_soc_demand_share_j,
+                hour_weights=hour_weights,
             )
-            abl_cpc = cpc(out_abl["log_P_D"], observed_OD, val_mask)
+            abl_cpc = cpc(out_abl["log_P_D"], observed_OD, val_mask,
+                          hour_weights=hour_weights)
             ablation_cpc[comp_name] = abl_cpc
             ablation_drop[comp_name] = final_cpc - abl_cpc
             print(f"  mute {comp_name:<24s} CPC {abl_cpc:.4f}  drop {final_cpc - abl_cpc:+.4f}")
@@ -1563,8 +1662,10 @@ def main():
                 pi_m_pair, grid_borough_idx, observed_OD, val_mask,
                 soc_props_per_origin=soc_props_per_origin,
                 per_soc_demand_share_j=per_soc_demand_share_j,
+                hour_weights=hour_weights,
             )
-            cpc_no_filter = cpc(out_no_filter["log_P_D"], observed_OD, val_mask)
+            cpc_no_filter = cpc(out_no_filter["log_P_D"], observed_OD, val_mask,
+                                hour_weights=hour_weights)
             rum.use_consideration_filter = orig_filter_flag
             final_diag["structural_ablation"] = {
                 "no_consideration_filter_cpc": cpc_no_filter,
@@ -1669,8 +1770,10 @@ def main():
                 pi_m_pair, grid_borough_idx, observed_OD, val_mask,
                 soc_props_per_origin=soc_props_per_origin,
                 per_soc_demand_share_j=per_soc_demand_share_j,
+                hour_weights=hour_weights,
             )
-        cpc_no_cosine_match = cpc(out_no_match["log_P_D"], observed_OD, val_mask)
+        cpc_no_cosine_match = cpc(out_no_match["log_P_D"], observed_OD, val_mask,
+                                  hour_weights=hour_weights)
         final_diag["cosine_match_ablation"] = {
             "cpc_no_cosine_match": cpc_no_cosine_match,
             "cosine_match_drop": final_cpc - cpc_no_cosine_match,
@@ -1700,8 +1803,10 @@ def main():
                 pi_m_pair, grid_borough_idx, observed_OD, val_mask,
                 soc_props_per_origin=soc_props_per_origin,
                 per_soc_demand_share_j=per_soc_demand_share_j,
+                hour_weights=hour_weights,
             )
-            cpc_no_nn = cpc(out_no_nn["log_P_D"], observed_OD, val_mask)
+            cpc_no_nn = cpc(out_no_nn["log_P_D"], observed_OD, val_mask,
+                            hour_weights=hour_weights)
             # Joint: NN off AND cosine_match off
             out_no_both = forward_cs(
                 encoder, rum, X_static, X_dynamic, edge_index,
@@ -1711,8 +1816,10 @@ def main():
                 pi_m_pair, grid_borough_idx, observed_OD, val_mask,
                 soc_props_per_origin=soc_props_per_origin,
                 per_soc_demand_share_j=per_soc_demand_share_j,
+                hour_weights=hour_weights,
             )
-            cpc_no_both = cpc(out_no_both["log_P_D"], observed_OD, val_mask)
+            cpc_no_both = cpc(out_no_both["log_P_D"], observed_OD, val_mask,
+                              hour_weights=hour_weights)
         rum.load_state_dict(baseline_state)
         # True cosine_match contribution when NN is unavailable:
         cosine_match_drop_no_nn = cpc_no_nn - cpc_no_both
