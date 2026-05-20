@@ -344,108 +344,158 @@ def forward_cs(
         from torch.utils.checkpoint import checkpoint as _ckpt
         use_ckpt = rum.training or any(p.requires_grad for p in rum.parameters())
 
-        # Pre-extract per-class kink params as tensors (small) so checkpoint can take them.
-        # The actual (T, N, N) kink_term is computed inside the checkpoint to avoid saving 27 of them.
+        # Pre-extract per-class kink params (small tensors).
         if rum.use_tier_threshold:
-            T_thresholds = rum.T_threshold_per_tier                          # (K,)
-            beta_kinks = rum.beta_t_kink_per_tier                            # (K,)
-            k_sharps = rum.k_sharpness_per_tier                              # (K,)
-        # Consideration filter (Swait 2001 / Cascetta 2001): when enabled,
-        # log_filter_mask_per_tier has shape (n_tiers, T, N, N) — same across SOCs.
-
-        def _class_logp_step(V_M_c, V_other_c, log_pi_c_row,
-                              T_c, beta_kink_c, k_sharp_c, has_kink_t,
-                              filter_term, match_term_per_soc, cost_term_per_tier):
-            # All (T, N, N) intermediates created here are NOT retained for backward.
-            V_rum_c = (V_M_c + V_other_c).unsqueeze(0) + lam_view * IV_mode
-            if V_push_pull is not None:
-                V_rum_c = V_rum_c + V_push_pull
-            if V_self_loop is not None:
-                V_rum_c = V_rum_c + V_self_loop
-            if V_busy_dest is not None:
-                V_rum_c = V_rum_c + V_busy_dest
-            if has_kink_t:
-                sig = torch.sigmoid((t_min_per_pair - T_c) / k_sharp_c)
-                V_rum_c = V_rum_c + beta_kink_c * t_min_per_pair * sig
-            if filter_term is not None:
-                V_rum_c = V_rum_c + filter_term
-            elif match_term_per_soc is not None:
-                # Per-SOC mode: combine match (N,) + cost (T, N, N) INSIDE checkpoint
-                # so the (T, N, N) combined tensor isn't retained for backward.
-                V_rum_c = (V_rum_c
-                          + match_term_per_soc.view(1, 1, N)
-                          + cost_term_per_tier)
-            if rum.gnn_mode == "residual":
-                V_dest_c = V_rum_c + V_nn_scaled
-            elif rum.gnn_mode == "mult":
-                V_dest_c = V_rum_c if _gnn_mult is None else V_rum_c * _gnn_mult
-            elif rum.gnn_mode == "moe":
-                V_dest_c = (1.0 - _gnn_g) * V_rum_c + _gnn_g * V_gnn
-            else:
-                V_dest_c = (V_rum_c if _gnn_blend is None
-                            else (1.0 - _gnn_blend) * V_rum_c + V_nn_scaled)
-            log_P_c = F.log_softmax(V_dest_c, dim=-1)
-            return log_pi_c_row.view(1, N, 1) + log_P_c
-
-        log_P_accum = None
-        V_rum_dest_avg = torch.zeros(T, N, N, device=V_gnn.device)
+            T_thresholds = rum.T_threshold_per_tier                          # (K_tier,)
+            beta_kinks = rum.beta_t_kink_per_tier
+            k_sharps = rum.k_sharpness_per_tier
+        else:
+            T_thresholds = beta_kinks = k_sharps = None
         has_kink = rum.use_tier_threshold
-        for c in range(K):
-            # Structured-heterogeneity lookup:
-            #   tier_idx selects tier-only params (α_W, ν_D, T, β_kink, k_sharp)
-            #   soc_idx selects SOC-only params (δ_match)
-            #   c selects tier×SOC params (γ_M)
-            if rum.use_soc_mixture:
-                tier_idx = c // S
-                soc_idx = c % S
-                log_dshare_for_c = log_demand_share[:, soc_idx]              # (N,)
-                # Stoll coupling on cosine match + per-SOC refinement
-                V_M_c = (gamma_M[c] * (log_M_j.view(1, N) + log_cosine_match)
-                         + delta_m[soc_idx] * log_dshare_for_c.view(1, N))   # (N, N)
-            else:
-                tier_idx = c                                                  # plain tier mixture
-                if log_match_signal is not None:
-                    V_M_c = gamma_M[c] * (log_M_j.view(1, N) + log_match_signal)
+
+        # OOM fix (2026-05-20): wrap the ENTIRE K-class logaddexp chain in one
+        # checkpoint scope. Previously, per-step checkpoint retained 27 weighted_c
+        # + 27 log_P_accum intermediates (~36 GB on 27-class × dual_pair). Now
+        # forward retains only the final log_P_D (T, N, N) ≈ 685 MB; backward
+        # recomputes the chain (~30% slower). V_rum_dest_avg (diagnostic-only,
+        # no_grad) is computed in a separate post-ckpt loop.
+        def _all_classes_chain(V_nn_scaled_t, lam_view_t, IV_mode_t,
+                               V_push_pull_t, V_self_loop_t, V_busy_dest_t,
+                               gamma_M_t, alpha_w_t, nu_D_t, delta_m_t,
+                               match_or_log_match_t, log_cosine_match_t,
+                               T_thresh_t, beta_kink_t, k_sharp_t,
+                               log_filter_mask_per_tier_t,
+                               log_match_pass_per_soc_t, log_cost_pass_per_tier_t,
+                               log_joint_per_class_t,
+                               _gnn_mult_t, _gnn_g_t, _gnn_blend_t, V_gnn_t):
+            """K-class logaddexp accumulator. All requires_grad tensors explicit
+            per torch.utils.checkpoint.checkpoint(use_reentrant=False) convention."""
+            log_P_accum_inner = None
+            for c in range(K):
+                if rum.use_soc_mixture:
+                    tier_idx = c // S
+                    soc_idx = c % S
+                    log_dshare_for_c = log_demand_share[:, soc_idx]              # (N,)
+                    V_M_c = (gamma_M_t[c] * (log_M_j.view(1, N) + log_cosine_match_t)
+                             + delta_m_t[soc_idx] * log_dshare_for_c.view(1, N))   # (N, N)
                 else:
-                    gamma_eff_c = gamma_M[c] + delta_m[c] * match_signal
-                    V_M_c = gamma_eff_c * log_M_j.view(1, N)
-            V_other_c = (alpha_w[tier_idx] * log_W_j
-                         + nu_D[tier_idx] * log_D_j).view(1, N)
-            T_c = T_thresholds[tier_idx] if has_kink else log_M_j.new_zeros(())
-            bk_c = beta_kinks[tier_idx] if has_kink else log_M_j.new_zeros(())
-            ks_c = k_sharps[tier_idx] if has_kink else log_M_j.new_ones(())
-            # Consideration filter assembly:
-            #   - Per-SOC mode: pass match (N,) and cost (T, N, N) SEPARATELY so the
-            #     combined (T, N, N) tensor only lives inside the checkpointed function
-            #     and is not retained for backward (saves 27 × 286 MB).
-            #   - Legacy mode: filter_term_c = log_filter_mask_per_tier[tier]
-            if log_match_pass_per_soc is not None:
-                filter_term_c = None
-                match_term_c = log_match_pass_per_soc[soc_idx]          # (N,) — tiny
-                cost_term_c = log_cost_pass_per_tier[tier_idx]          # (T, N, N) — 3 unique shared
-            elif log_filter_mask_per_tier is not None:
-                filter_term_c = log_filter_mask_per_tier[tier_idx]
-                match_term_c = None
-                cost_term_c = None
-            else:
-                filter_term_c = None
-                match_term_c = None
-                cost_term_c = None
-            if use_ckpt:
-                weighted_c = _ckpt(_class_logp_step,
-                                   V_M_c, V_other_c, log_joint_per_class[c],
-                                   T_c, bk_c, ks_c, has_kink,
-                                   filter_term_c, match_term_c, cost_term_c,
-                                   use_reentrant=False)
-            else:
-                weighted_c = _class_logp_step(V_M_c, V_other_c,
-                                              log_joint_per_class[c],
-                                              T_c, bk_c, ks_c, has_kink,
-                                              filter_term_c, match_term_c, cost_term_c)
-            log_P_accum = (weighted_c if log_P_accum is None
-                           else torch.logaddexp(log_P_accum, weighted_c))
-            # Detached diagnostic accumulator
-            with torch.no_grad():
+                    tier_idx = c
+                    if log_match_signal is not None:
+                        V_M_c = gamma_M_t[c] * (log_M_j.view(1, N) + match_or_log_match_t)
+                    else:
+                        gamma_eff_c = gamma_M_t[c] + delta_m_t[c] * match_or_log_match_t
+                        V_M_c = gamma_eff_c * log_M_j.view(1, N)
+                V_other_c = (alpha_w_t[tier_idx] * log_W_j
+                             + nu_D_t[tier_idx] * log_D_j).view(1, N)
+                if has_kink:
+                    T_c = T_thresh_t[tier_idx]
+                    bk_c = beta_kink_t[tier_idx]
+                    ks_c = k_sharp_t[tier_idx]
+
+                if log_match_pass_per_soc_t is not None:
+                    filter_term_c = None
+                    match_term_c = log_match_pass_per_soc_t[soc_idx]
+                    cost_term_c = log_cost_pass_per_tier_t[tier_idx]
+                elif log_filter_mask_per_tier_t is not None:
+                    filter_term_c = log_filter_mask_per_tier_t[tier_idx]
+                    match_term_c = None
+                    cost_term_c = None
+                else:
+                    filter_term_c = match_term_c = cost_term_c = None
+
+                V_rum_c = (V_M_c + V_other_c).unsqueeze(0) + lam_view_t * IV_mode_t
+                if V_push_pull_t is not None: V_rum_c = V_rum_c + V_push_pull_t
+                if V_self_loop_t is not None: V_rum_c = V_rum_c + V_self_loop_t
+                if V_busy_dest_t is not None: V_rum_c = V_rum_c + V_busy_dest_t
+                if has_kink:
+                    sig = torch.sigmoid((t_min_per_pair - T_c) / ks_c)
+                    V_rum_c = V_rum_c + bk_c * t_min_per_pair * sig
+                if filter_term_c is not None:
+                    V_rum_c = V_rum_c + filter_term_c
+                elif match_term_c is not None:
+                    V_rum_c = V_rum_c + match_term_c.view(1, 1, N) + cost_term_c
+
+                if rum.gnn_mode == "residual":
+                    V_dest_c = V_rum_c + V_nn_scaled_t
+                elif rum.gnn_mode == "mult":
+                    V_dest_c = V_rum_c if _gnn_mult_t is None else V_rum_c * _gnn_mult_t
+                elif rum.gnn_mode == "moe":
+                    V_dest_c = (1.0 - _gnn_g_t) * V_rum_c + _gnn_g_t * V_gnn_t
+                else:
+                    V_dest_c = (V_rum_c if _gnn_blend_t is None
+                                else (1.0 - _gnn_blend_t) * V_rum_c + V_nn_scaled_t)
+                log_P_c = F.log_softmax(V_dest_c, dim=-1)
+                weighted_c = log_joint_per_class_t[c].view(1, N, 1) + log_P_c
+                log_P_accum_inner = (weighted_c if log_P_accum_inner is None
+                                     else torch.logaddexp(log_P_accum_inner, weighted_c))
+            return log_P_accum_inner
+
+        # Match signal selection (mutually exclusive paths)
+        _match_pass = (log_match_signal if log_match_signal is not None
+                       else (match_signal if not rum.use_soc_mixture else None))
+        _log_cosine_pass = log_cosine_match if rum.use_soc_mixture else None
+
+        if use_ckpt:
+            log_P_D = _ckpt(_all_classes_chain,
+                            V_nn_scaled, lam_view, IV_mode,
+                            V_push_pull, V_self_loop, V_busy_dest,
+                            gamma_M, alpha_w, nu_D, delta_m,
+                            _match_pass, _log_cosine_pass,
+                            T_thresholds, beta_kinks, k_sharps,
+                            log_filter_mask_per_tier, log_match_pass_per_soc,
+                            log_cost_pass_per_tier,
+                            log_joint_per_class,
+                            _gnn_mult, _gnn_g, _gnn_blend, V_gnn,
+                            use_reentrant=False)
+        else:
+            log_P_D = _all_classes_chain(
+                V_nn_scaled, lam_view, IV_mode,
+                V_push_pull, V_self_loop, V_busy_dest,
+                gamma_M, alpha_w, nu_D, delta_m,
+                _match_pass, _log_cosine_pass,
+                T_thresholds, beta_kinks, k_sharps,
+                log_filter_mask_per_tier, log_match_pass_per_soc,
+                log_cost_pass_per_tier,
+                log_joint_per_class,
+                _gnn_mult, _gnn_g, _gnn_blend, V_gnn,
+            )
+
+        # ---- Diagnostic V_rum_dest_avg (no_grad, post-ckpt loop) ----
+        # Used by paper §4 attribute-share decomposition. Forward-only,
+        # doesn't affect backward graph or loss.
+        V_rum_dest_avg = torch.zeros(T, N, N, device=V_gnn.device)
+        with torch.no_grad():
+            for c in range(K):
+                if rum.use_soc_mixture:
+                    tier_idx = c // S
+                    soc_idx = c % S
+                    log_dshare_for_c = log_demand_share[:, soc_idx]
+                    V_M_c = (gamma_M[c] * (log_M_j.view(1, N) + log_cosine_match)
+                             + delta_m[soc_idx] * log_dshare_for_c.view(1, N))
+                else:
+                    tier_idx = c
+                    if log_match_signal is not None:
+                        V_M_c = gamma_M[c] * (log_M_j.view(1, N) + log_match_signal)
+                    else:
+                        gamma_eff_c = gamma_M[c] + delta_m[c] * match_signal
+                        V_M_c = gamma_eff_c * log_M_j.view(1, N)
+                V_other_c = (alpha_w[tier_idx] * log_W_j
+                             + nu_D[tier_idx] * log_D_j).view(1, N)
+                if has_kink:
+                    T_c = T_thresholds[tier_idx]
+                    bk_c = beta_kinks[tier_idx]
+                    ks_c = k_sharps[tier_idx]
+                if log_match_pass_per_soc is not None:
+                    filter_term_c = None
+                    match_term_c = log_match_pass_per_soc[soc_idx]
+                    cost_term_c = log_cost_pass_per_tier[tier_idx]
+                elif log_filter_mask_per_tier is not None:
+                    filter_term_c = log_filter_mask_per_tier[tier_idx]
+                    match_term_c = None
+                    cost_term_c = None
+                else:
+                    filter_term_c = match_term_c = cost_term_c = None
+
                 V_rum_c_diag = (V_M_c + V_other_c).unsqueeze(0) + lam_view * IV_mode
                 if V_push_pull is not None: V_rum_c_diag = V_rum_c_diag + V_push_pull
                 if V_self_loop is not None: V_rum_c_diag = V_rum_c_diag + V_self_loop
@@ -459,7 +509,7 @@ def forward_cs(
                     V_rum_c_diag = (V_rum_c_diag + match_term_c.view(1, 1, N)
                                     + cost_term_c)
                 V_rum_dest_avg = V_rum_dest_avg + V_rum_c_diag / K
-        log_P_D = log_P_accum
+
         V_rum_dest = V_rum_dest_avg
     else:
         # single-RUM path (original)
