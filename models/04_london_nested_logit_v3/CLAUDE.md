@@ -47,6 +47,57 @@ Guidance for Claude Code working in **04_london_nested_logit_v3/**.
 - TS063 SOC9 occupational detail
 - JTS (Journey Time Statistics)
 
+## ⚠⚠⚠ Plan E baseline TRUE config (from .pt args, 2026-05-22 recovery)
+
+The README in `data/autodl_bundle/` mixes 5/19 sdt_v1 flags with 5/20 Plan E flags. **The .pt file `evaluation_outputs/paper_a/v3l_planE_full_s0.pt` is the only source of truth** for Plan E's actual args. Critical differences from README:
+
+| Flag | README says | .pt actual |
+|---|---|---|
+| `--use-frozen-match-mask` | required | **NOT USED** |
+| `--match-mean-mult` | 1.0 | N/A (frozen mask off) |
+| `--match-mask-log-penalty` | -50 | N/A |
+| `--k-match-min-per-soc` | 20 | **0.1** (default) |
+| `--tau-match-floor-mult` | 0.5 | **0.0** (default) |
+| `--gnn-mode` | (unspecified) | **residual** |
+| `--gnn-residual-scale-init` | (unspecified) | **0.5** |
+
+**True Plan E command** (= CPC 0.557 baseline):
+```
+python experiments/paper_a/train_cervero_shen.py \
+    --epochs 500 --device cuda --seed 0 --patience 100 \
+    --use-dual-pair-encoder \
+    --use-tier-mixture --use-soc-mixture \
+    --use-consideration-filter --use-time-gate --use-self-loop-boost \
+    --commute-hours 7,8,9,17,18 --use-nts-weighted-loss \
+    --gnn-mode residual --gnn-residual-scale-init 0.5
+```
+
+**Hard rule**: when reproducing or extending a baseline, ALWAYS load the original .pt's args dict (`torch.load(pt).args`), NEVER trust README/memory recollection.
+
+## ⚠⚠ Critical: `--gnn-mode residual` is REQUIRED for good baseline (added 2026-05-22)
+
+CLI default is `--gnn-mode convex` (legacy), BUT all historical best results (sdt_v1 0.589, Plan E 0.564) used `--gnn-mode residual --gnn-residual-scale-init 0.1`. Without `residual`:
+- Default convex mode: V_dest = (1 - blend) · V_RUM + blend · V_NN, blend init ≈ 0.5
+- At ep 0, V_NN is random noise (~0.5 RMS), so 50% of V_dest is noise
+- Training trajectory degraded: ep 0 vnll 6.71 (vs 4.89 with residual), CPC plateaus around 0.487
+- **-0.075 CPC vs residual mode**
+
+**Hard rule**: Every experiment must include `--gnn-mode residual --gnn-residual-scale-init 0.1` (or relevant config). 5/22 R6-R9 fiasco was caused by missing this flag.
+
+## ⚠ Baseline comparison hygiene (added 2026-05-22 after R6-R9 fiasco)
+
+**MUST follow** before reporting any "experiment X vs baseline" CPC/NLL comparison:
+
+1. **NEVER use historical JSON as baseline** if you've changed `train_cervero_shen.py` or `cervero_shen_head.py` (or any code in their dependency tree) since the JSON was produced. Code changes have non-trivial unconditional effects (clamp logic, property formulas, init paths) even when new features are "default off".
+
+2. **Always re-train a CURRENT-CODE baseline** with the exact same CLI args as the comparison experiment, minus the new flag(s). This is the only fair benchmark.
+
+3. **At ep 0**, check `tnll`/`vnll`/`rum_rms` between baseline and experiment. If they differ by > 5% with identical seed/CLI, **the code paths differ** — investigate before continuing the experiment.
+
+4. **Cross-check param init values** at ep 0 for shared modules (α_wage, γ_M, λ_b, k_match etc.). Different init values with same CLI = something changed in head/trainer that needs documenting.
+
+5. Karpathy 4 principles (the link user always sends): Think Before Coding / Simplicity First / Surgical Changes / Goal-Driven Execution. The R6-R9 sequence violated #1 (assumed JSON baseline valid) and #4 (compared against wrong reference for goal of breaking ceiling).
+
 ## Key constraints
 
 - Don't add features that have no Beijing equivalent. Beijing-friendly is a **hard constraint**, same as v2.

@@ -86,6 +86,18 @@ def forward_cs(
                                                             # weights * flow → loss focus on
                                                             # commute-pure hours (Toole 2015,
                                                             # Iqbal 2014). None = legacy all-hours.
+    log_transit_access_z: Optional[torch.Tensor] = None,    # (N,) z-scored PTAL proxy
+    log_commercial_z: Optional[torch.Tensor] = None,        # (N,) z-scored commercial land use
+    quality_nvm_z: Optional[torch.Tensor] = None,           # (N, N) z-scored modal flexibility
+    quality_ta_z: Optional[torch.Tensor] = None,            # (N, N) z-scored log_transit_advantage
+    quality_wf_z: Optional[torch.Tensor] = None,            # (N, N) z-scored walk_feasibility
+    log_time_mask_per_tier: Optional[torch.Tensor] = None,  # (K_tier, N, N) frozen feasibility mask
+    strip_time_from_vdest_iv: bool = False,                 # 2026-05-22 reframing — Component 3:
+                                                            # compute a second IV from V_lower_quality
+                                                            # = ASC + agent_term (NO β_t·t) and use
+                                                            # it (not the full IV_mode) inside V_dest.
+                                                            # Mode probability P(m|i,j) STILL uses
+                                                            # the full IV_mode with raw time.
 ):
     _V_gnn_raw = encoder(X_static, X_dynamic, edge_index)
     # Encoder may return (T, N) [legacy per-grid] or (T, N, N) [pair-aware NN]
@@ -149,6 +161,14 @@ def forward_cs(
             log_pass_time = F.logsigmoid(k_time * time_diff)                   # (K_tier, T, N, N)
             log_cost_pass_per_tier = log_cost_pass_per_tier + log_pass_time
 
+        # Frozen time mask (Component 1 of 2026-05-22 reframing): hard feasibility
+        # gate independent of (and stronger than) the soft use_time_gate. Same
+        # injection path — adds to log_cost_pass_per_tier so the per-class loop
+        # already picks it up via cost_term_c.
+        if log_time_mask_per_tier is not None:
+            # (K_tier, N, N) broadcast onto (K_tier, T, N, N)
+            log_cost_pass_per_tier = log_cost_pass_per_tier + log_time_mask_per_tier.unsqueeze(1)
+
         # Layer 1: occupation match filter
         if rum.use_soc_mixture:
             if getattr(rum, "frozen_log_match_mask_per_soc", None) is not None:
@@ -188,6 +208,7 @@ def forward_cs(
         log_match_pass_per_soc = None
         log_cost_pass_per_tier = None
 
+    log_iv_quality = None  # only used when strip_time_from_vdest_iv=True
     for m_idx, name in enumerate(mode_names):
         t_m = t_per_mode[name]                                        # (T, N, N)
         # β_t_m(d) = β_t_m,0 + β_t_m,1 · log_d_ij  → per-pair time-disutility coeff
@@ -210,8 +231,22 @@ def forward_cs(
         else:
             ce_accum = ce_accum + pi_m_ij * scaled
 
+        # 2026-05-22 reframing — Component 3: strip raw time from the IV that
+        # feeds V_dest. V_lower_q_m has only ASC + agent_term (no β_t·t_m), so
+        # IV_quality has no time variance. The full IV_mode (with time) is
+        # still used for mode probability P(m|i,j) below.
+        if strip_time_from_vdest_iv:
+            V_lower_q_m = (asc[m_idx] + agent_term)                    # (1, N, 1) — no j-dep
+            scaled_q = V_lower_q_m / lam_view                          # (1, N, N) — j-dep only via λ
+            if log_iv_quality is None:
+                log_iv_quality = scaled_q
+            else:
+                log_iv_quality = torch.logaddexp(log_iv_quality, scaled_q)
+
     IV_mode = log_iv                                                   # (T, N, N)
     ce_mode_per_ijt = IV_mode - ce_accum                               # (T, N, N)
+    # IV used inside V_dest: full (with time) by default, quality-only when stripping.
+    IV_for_V_dest = log_iv_quality if strip_time_from_vdest_iv else IV_mode
 
     # ---- V_upper (Cervero 1999 multiplicative + optional tier-mixture) ----
     # Single (legacy):  γ_eff = γ + δ · match;  V = γ_eff·log_M + α·log_W + ν·log_D
@@ -221,6 +256,18 @@ def forward_cs(
     gamma_M = rum.gamma_M
     nu_D = rum.nu_D
     delta_m = rum.delta_match
+
+    # Attribute attention modulators (None if disabled).
+    # Δ_attr(i) is per-origin; γ_M, α_W, δ_match use multiplicative exp(Δ);
+    # ν_D uses additive Δ (sign-free with --nu-D-sign-free). At init the MLP
+    # output is zeroed → exp(0)=1 → no perturbation vs baseline.
+    d_g_attn, d_a_attn, d_n_attn, d_d_attn = rum.attribute_modulators()
+    if d_g_attn is not None:
+        exp_d_g_attn = torch.exp(d_g_attn)        # (N,) > 0
+        exp_d_a_attn = torch.exp(d_a_attn)        # (N,)
+        exp_d_d_attn = torch.exp(d_d_attn)        # (N,)
+    else:
+        exp_d_g_attn = exp_d_a_attn = exp_d_d_attn = None
 
     if rum.use_match_gate:
         k_gate = rum.gate_steepness
@@ -357,7 +404,7 @@ def forward_cs(
                               T_c, beta_kink_c, k_sharp_c, has_kink_t,
                               filter_term, match_term_per_soc, cost_term_per_tier):
             # All (T, N, N) intermediates created here are NOT retained for backward.
-            V_rum_c = (V_M_c + V_other_c).unsqueeze(0) + lam_view * IV_mode
+            V_rum_c = (V_M_c + V_other_c).unsqueeze(0) + lam_view * IV_for_V_dest
             if V_push_pull is not None:
                 V_rum_c = V_rum_c + V_push_pull
             if V_self_loop is not None:
@@ -399,18 +446,75 @@ def forward_cs(
                 tier_idx = c // S
                 soc_idx = c % S
                 log_dshare_for_c = log_demand_share[:, soc_idx]              # (N,)
-                # Stoll coupling on cosine match + per-SOC refinement
-                V_M_c = (gamma_M[c] * (log_M_j.view(1, N) + log_cosine_match)
-                         + delta_m[soc_idx] * log_dshare_for_c.view(1, N))   # (N, N)
+                # Stoll coupling on cosine match + per-SOC refinement.
+                # With attribute attention: γ_M[c] / δ_match[soc] become per-origin via
+                # multiplicative modulator (≥0 sign preserved).
+                if exp_d_g_attn is not None:
+                    gamma_M_eff = gamma_M[c] * exp_d_g_attn                          # (N,)
+                    delta_m_eff = delta_m[soc_idx] * exp_d_d_attn                    # (N,)
+                    V_M_c = (gamma_M_eff.view(N, 1) * (log_M_j.view(1, N) + log_cosine_match)
+                             + delta_m_eff.view(N, 1) * log_dshare_for_c.view(1, N))  # (N, N)
+                else:
+                    V_M_c = (gamma_M[c] * (log_M_j.view(1, N) + log_cosine_match)
+                             + delta_m[soc_idx] * log_dshare_for_c.view(1, N))        # (N, N)
             else:
                 tier_idx = c                                                  # plain tier mixture
-                if log_match_signal is not None:
-                    V_M_c = gamma_M[c] * (log_M_j.view(1, N) + log_match_signal)
+                if exp_d_g_attn is not None:
+                    gamma_M_eff_t = gamma_M[c] * exp_d_g_attn                # (N,)
+                    delta_m_eff_t = delta_m[c] * exp_d_d_attn                # (N,)
+                    if log_match_signal is not None:
+                        V_M_c = gamma_M_eff_t.view(N, 1) * (log_M_j.view(1, N) + log_match_signal)
+                    else:
+                        # gamma_eff(i, j) = γ[c]·exp(Δγ(i)) + δ[c]·exp(Δδ(i))·match(i,j)
+                        gamma_eff_c = (gamma_M_eff_t.view(N, 1)
+                                       + delta_m_eff_t.view(N, 1) * match_signal)   # (N, N)
+                        V_M_c = gamma_eff_c * log_M_j.view(1, N)
                 else:
-                    gamma_eff_c = gamma_M[c] + delta_m[c] * match_signal
-                    V_M_c = gamma_eff_c * log_M_j.view(1, N)
-            V_other_c = (alpha_w[tier_idx] * log_W_j
-                         + nu_D[tier_idx] * log_D_j).view(1, N)
+                    if log_match_signal is not None:
+                        V_M_c = gamma_M[c] * (log_M_j.view(1, N) + log_match_signal)
+                    else:
+                        gamma_eff_c = gamma_M[c] + delta_m[c] * match_signal
+                        V_M_c = gamma_eff_c * log_M_j.view(1, N)
+            if exp_d_a_attn is not None:
+                # α_W: multiplicative exp(Δα); ν_D: additive Δν (sign-free path).
+                alpha_w_eff = alpha_w[tier_idx] * exp_d_a_attn                       # (N,)
+                nu_D_eff = nu_D[tier_idx] + d_n_attn                                 # (N,)
+                V_other_c = (alpha_w_eff.view(N, 1) * log_W_j.view(1, N)
+                             + nu_D_eff.view(N, 1) * log_D_j.view(1, N))             # (N, N)
+            else:
+                V_other_c = (alpha_w[tier_idx] * log_W_j
+                             + nu_D[tier_idx] * log_D_j).view(1, N)
+            if rum.beta_transit is not None:
+                V_other_c = V_other_c + (rum.beta_transit * log_transit_access_z
+                                         + rum.beta_commercial * log_commercial_z).view(1, N)
+            if rum.use_quality_features and quality_nvm_z is not None:
+                # Pair-wise (N, N) quality residuals — promote V_other_c to (N, N)
+                # via broadcasting. Same downstream path as attention's V_other_c
+                # shape upgrade.
+                V_other_c = V_other_c + (rum.beta_nvm * quality_nvm_z
+                                         + rum.beta_ta * quality_ta_z
+                                         + rum.beta_wf * quality_wf_z)
+            # R7/R8 — Hansen decay (tier-specific scalar × log_d_ij (N, N))
+            if rum.use_hansen_decay:
+                gamma_decay_t = rum.gamma_decay_per_tier[tier_idx]
+                V_other_c = V_other_c - gamma_decay_t * log_d_ij                          # (N, N)
+            # R8 — t_min cost (tier-specific scalar × t_min(i, j) (N, N))
+            if rum.use_tmin_cost:
+                beta_tmin_t = rum.beta_tmin_per_tier[tier_idx]
+                # t_min_per_pair is (T, N, N) but static across T (data fact);
+                # take first slice for the per-pair cost.
+                V_other_c = V_other_c - beta_tmin_t * t_min_per_pair[0]                   # (N, N)
+            # R7/R8 — Agent × destination explicit interactions.
+            # Round 13 fix (2026-05-22): all 3 terms pair with attractor (log_M / log_W)
+            # NOT log_d, to avoid multicollinearity with IV's implicit distance signal.
+            #   θ_inc · income · log_M : income-jobs sorting (Rosen 1974)
+            #   θ_kids · kids · log_W  : family-wage attraction (financial security)
+            #   θ_cars · cars · log_M  : car-enabled job access (Schwanen 2003 mobility)
+            if rum.use_agent_dest_interaction:
+                V_other_c = (V_other_c
+                             + rum.theta_inc_dest * income_score_per_origin.view(N, 1) * log_M_j.view(1, N)
+                             + rum.theta_kids_dest * pct_kids_per_origin.view(N, 1) * log_W_j.view(1, N)
+                             + rum.theta_cars_dest * mean_cars_per_origin.view(N, 1) * log_M_j.view(1, N))
             T_c = T_thresholds[tier_idx] if has_kink else log_M_j.new_zeros(())
             bk_c = beta_kinks[tier_idx] if has_kink else log_M_j.new_zeros(())
             ks_c = k_sharps[tier_idx] if has_kink else log_M_j.new_ones(())
@@ -446,7 +550,7 @@ def forward_cs(
                            else torch.logaddexp(log_P_accum, weighted_c))
             # Detached diagnostic accumulator
             with torch.no_grad():
-                V_rum_c_diag = (V_M_c + V_other_c).unsqueeze(0) + lam_view * IV_mode
+                V_rum_c_diag = (V_M_c + V_other_c).unsqueeze(0) + lam_view * IV_for_V_dest
                 if V_push_pull is not None: V_rum_c_diag = V_rum_c_diag + V_push_pull
                 if V_self_loop is not None: V_rum_c_diag = V_rum_c_diag + V_self_loop
                 if V_busy_dest is not None: V_rum_c_diag = V_rum_c_diag + V_busy_dest
@@ -463,14 +567,39 @@ def forward_cs(
         V_rum_dest = V_rum_dest_avg
     else:
         # single-RUM path (original)
-        if log_match_signal is not None:
-            V_M = gamma_M * (log_M_j.view(1, N) + log_match_signal)      # (N, N)
+        # gamma_M / alpha_w / nu_D / delta_m are scalars here (shape (1,) or 0-dim).
+        # With attribute attention they become per-origin via modulator.
+        if exp_d_g_attn is not None:
+            gamma_eff_i = gamma_M * exp_d_g_attn                              # (N,)
+            delta_m_eff_i = delta_m * exp_d_d_attn                            # (N,)
+            if log_match_signal is not None:
+                V_M = gamma_eff_i.view(N, 1) * (log_M_j.view(1, N) + log_match_signal)  # (N, N)
+            else:
+                gamma_eff = (gamma_eff_i.view(N, 1)
+                             + delta_m_eff_i.view(N, 1) * match_signal)       # (N, N)
+                V_M = gamma_eff * log_M_j.view(1, N)
         else:
-            gamma_effective = gamma_M + delta_m * match_signal           # (N, N)
-            V_M = gamma_effective * log_M_j.view(1, N)                   # (N, N)
-        V_other = (alpha_w * log_W_j.view(1, 1, N)
-                   + nu_D * log_D_j.view(1, 1, N))                       # (1, 1, N)
-        V_rum_dest = (V_M.unsqueeze(0) + V_other + lam_view * IV_mode)   # (T, N, N)
+            if log_match_signal is not None:
+                V_M = gamma_M * (log_M_j.view(1, N) + log_match_signal)       # (N, N)
+            else:
+                gamma_effective = gamma_M + delta_m * match_signal            # (N, N)
+                V_M = gamma_effective * log_M_j.view(1, N)                    # (N, N)
+        if exp_d_a_attn is not None:
+            alpha_w_eff_i = alpha_w * exp_d_a_attn                            # (N,)
+            nu_D_eff_i = nu_D + d_n_attn                                      # (N,)
+            V_other = (alpha_w_eff_i.view(1, N, 1) * log_W_j.view(1, 1, N)
+                       + nu_D_eff_i.view(1, N, 1) * log_D_j.view(1, 1, N))   # (1, N, N)
+        else:
+            V_other = (alpha_w * log_W_j.view(1, 1, N)
+                       + nu_D * log_D_j.view(1, 1, N))                       # (1, 1, N)
+        if rum.beta_transit is not None:
+            V_other = V_other + (rum.beta_transit * log_transit_access_z
+                                 + rum.beta_commercial * log_commercial_z).view(1, 1, N)
+        if rum.use_quality_features and quality_nvm_z is not None:
+            V_other = V_other + (rum.beta_nvm * quality_nvm_z
+                                 + rum.beta_ta * quality_ta_z
+                                 + rum.beta_wf * quality_wf_z).view(1, N, N)
+        V_rum_dest = (V_M.unsqueeze(0) + V_other + lam_view * IV_for_V_dest)   # (T, N, N)
         if V_push_pull is not None:
             V_rum_dest = V_rum_dest + V_push_pull
         if V_self_loop is not None:
@@ -548,7 +677,7 @@ def forward_cs(
             "gravity_gamma_logM": (g_avg * log_M_j.view(1, 1, N)).expand(T, N, N),
             "wage_alpha_logW":    (a_avg * log_W_j.view(1, 1, N)).expand(T, N, N),
             "competition_nu_logD":(n_avg * log_D_j.view(1, 1, N)).expand(T, N, N),
-            "mode_choice_IV":     (lam_view * IV_mode).expand(T, N, N),
+            "mode_choice_IV":     (lam_view * IV_for_V_dest).expand(T, N, N),
         }
         if log_match_signal is not None:
             # Stoll-Houston: match contributes via γ · log_match (same elasticity as gravity)
@@ -635,7 +764,7 @@ def forward_cs(
     # Push IV_mode's share of across-j destination-discriminating variance toward target.
     # If IV dominates (current ~97%), force it down so gravity/wage/match must carry the
     # destination signal — attribute shares become more balanced.
-    iv_var = (lam_view * IV_mode).var(dim=-1, unbiased=False).mean()
+    iv_var = (lam_view * IV_for_V_dest).var(dim=-1, unbiased=False).mean()
     if rum.use_tier_mixture:
         if rum.use_soc_mixture:
             # Per-SOC log_demand_share enters per class; aggregate elasticity for
@@ -899,6 +1028,98 @@ def main():
     ap.add_argument("--match-mask-log-penalty", type=float, default=-1e9,
                     help="log-penalty for grids OUTSIDE J_s. -1e9 = hard exclude (prob = 0). "
                          "-5 = soft penalty (~0.7%% relative weight). Tune for ABM realism.")
+    ap.add_argument("--use-transit-commercial-features", action="store_true",
+                    help="Add β_transit·log_transit_access_z + β_commercial·log_commercial_z "
+                         "to V_other (destination utility). PTAL proxy + commercial land use. "
+                         "Both coefs sign-free real. Requires aux npz with log_transit_access_j_z "
+                         "and log_commercial_j_z (1725,) — see build_transit_office_features.py.")
+    ap.add_argument("--r7-warmup-epochs", type=int, default=0,
+                    help="2026-05-22 Round 13 — Sequential training for R7 additions. "
+                         "If N>0: first N epochs train Plan E baseline with R7 additions "
+                         "(γ_decay, β_tmin, θ_*_dest) FROZEN at init. After ep N: freeze "
+                         "Plan E params (all RUM + encoder), unfreeze R7 additions. "
+                         "Prevents the multicollinearity train wreck (R7 100% IV inflation) "
+                         "by letting baseline converge first, then R7 additions absorb residual. "
+                         "Lit anchor: Wang TB-ResNet sequential training (Wang 2021 Essay 3).")
+    ap.add_argument("--use-hansen-decay", action="store_true",
+                    help="2026-05-22 R7/R8 — Hansen 1959 distance decay in V_dest. "
+                         "Adds -γ_decay[tier]·log_d_ij. 3 tier-specific, ≥0 sign-constrained.")
+    ap.add_argument("--gamma-decay-init", type=float, default=0.05,
+                    help="Hansen decay init per tier (≥0 via softplus).")
+    ap.add_argument("--use-tmin-cost", action="store_true",
+                    help="2026-05-22 R8 — scalar best-mode time cost in V_dest. "
+                         "Adds -β_tmin[tier]·t_min(i, j). 3 tier-specific, ≥0. "
+                         "Designed to partially replace nested IV when paired with "
+                         "--strip-time-from-vdest-iv (Path B / Wang MTL style).")
+    ap.add_argument("--beta-tmin-init", type=float, default=0.01,
+                    help="t_min cost init per tier.")
+    ap.add_argument("--use-agent-dest-interaction", action="store_true",
+                    help="2026-05-22 R7/R8 — agent × destination explicit interactions. "
+                         "Adds θ_inc·income_i·log_M_j + θ_kids·kids_i·log_d_ij + θ_cars·cars_i·log_d_ij "
+                         "to V_dest. 3 sign-free scalars. Sub-population heterogeneity in V_dest.")
+    ap.add_argument("--strip-time-from-vdest-iv", action="store_true",
+                    help="2026-05-22 reframing — Component 3 (the real V_lower surgery). "
+                         "Compute a 2nd IV from V_lower_quality (= ASC + agent_term, NO β_t·t) "
+                         "and use IT (not the time-bearing IV_mode) inside V_dest. Mode "
+                         "probability P(m|i,j) STILL uses full IV_mode with time. Decouples "
+                         "destination choice from raw travel time entirely — feasibility now "
+                         "handled only by --use-frozen-time-mask, IV_quality only carries "
+                         "ASC + agent-mode interaction signal (small magnitude → no across-j "
+                         "dominance). Pair with --use-frozen-time-mask + --use-quality-features.")
+    ap.add_argument("--use-frozen-time-mask", action="store_true",
+                    help="2026-05-22 reframing pivot — Component 1 (Feasibility gate). "
+                         "Add a HARD per-tier log-mask based on t_min(i, j) vs T_max[tier]. "
+                         "Pairs with t_min > T_max[tier] get log_penalty (default -50, near-hard). "
+                         "Decouples 'can I reach there' (this mask) from 'how much do I like getting "
+                         "there' (residual IV + quality features). Requires --use-consideration-filter "
+                         "(piggybacks on log_cost_pass_per_tier path). Uses --T-max-low/mid/high.")
+    ap.add_argument("--time-mask-log-penalty", type=float, default=-50.0,
+                    help="log-penalty for INFEASIBLE pairs in frozen time mask. Default -50 "
+                         "(near-hard, ~e-22 weight). Use -1e9 for fully hard.")
+    ap.add_argument("--lambda-max", type=float, default=1.0,
+                    help="2026-05-22 reframing pivot — Component 2 (IV down-weight). "
+                         "Upper bound on λ_borough ∈ [lambda_eps_min, lambda_max]. "
+                         "Default 1.0 keeps Plan E behaviour. Set 0.15 to suppress IV from "
+                         "89%% across-j variance to ~15%%, opening V_dest space for A_j + quality.")
+    ap.add_argument("--use-quality-features", action="store_true",
+                    help="2026-05-22 reframing sanity check: add 3 pair-wise (N, N) quality "
+                         "features to V_other (additive, sign-free): n_viable_modes_z + "
+                         "log_transit_advantage_z + walk_feasibility_z. Tests whether modal-"
+                         "flex / transit-network / walk-access signals carry across-j variance "
+                         "beyond what IV (raw travel time) captures. Requires aux npz built by "
+                         "data/scripts/build_quality_features.py. Expected: β_nvm > 0 "
+                         "(more options = better), β_ta > 0 (transit-favored = better), "
+                         "β_wf > 0 (walkable = better).")
+    ap.add_argument("--use-attribute-attention", action="store_true",
+                    help="Origin-conditioned attribute modulator: per-origin MLP from "
+                         "i_emb produces 4 deltas applied to γ_M / α_W / ν_D / δ_match. "
+                         "γ_M, α_W, δ_match use multiplicative exp(Δ) (keeps ≥0); ν_D "
+                         "uses additive Δ — requires --nu-D-sign-free for true sign-free "
+                         "ν_D. Targets multicollinearity ceiling found in direction 1 "
+                         "additive features (PTAL/commercial) experiment.")
+    ap.add_argument("--attn-emb-dim", type=int, default=32,
+                    help="Per-origin embedding width for attribute attention. Default 32.")
+    ap.add_argument("--attn-hidden", type=int, default=64,
+                    help="MLP hidden width for attribute attention (2 hidden layers). Default 64.")
+    ap.add_argument("--attn-dropout", type=float, default=0.1,
+                    help="Dropout between MLP layers in attribute attention. Default 0.1.")
+    ap.add_argument("--attn-weight-decay", type=float, default=1e-4,
+                    help="Weight decay on attribute attention params only (separate group). "
+                         "Default 1e-4 — moderate regularization on ~62k attention params.")
+    ap.add_argument("--attn-max-log-mul", type=float, default=1.0,
+                    help="Bound on multiplicative modulator for γ_M / α_W / δ_match: "
+                         "exp(Δ) ∈ [exp(-X), exp(+X)] via tanh(Δ_raw)·X. Default 1.0 → "
+                         "[0.37, 2.72]. Set higher only if you want more amplification; "
+                         "2026-05-22 unbounded run hit exp(60)=1e26 and collapsed.")
+    ap.add_argument("--attn-max-add", type=float, default=1.0,
+                    help="Bound on additive modulator for ν_D (sign-free): Δ ∈ [-X, +X]. "
+                         "Default 1.0 → ν_D can shift by ±1, enough to flip sign from "
+                         "the typical ν ≈ -0.1 base.")
+    ap.add_argument("--nu-D-sign-free", action="store_true",
+                    help="Bypass -softplus on ν_D and use a raw learnable parameter so the "
+                         "competition coefficient can flip sign if data demands. Cervero-Shen "
+                         "lit-anchor (ν<0) is relaxed. Typical pairing with attribute attention "
+                         "for the 'let data decide' design choice.")
     ap.add_argument("--use-tier-mixture", action="store_true",
                     help="Income-tier latent class: each (α, γ, ν, δ_match) tier-specific × 3 tier. "
                          "P(j|i) = Σ_k π(tier=k|i) · softmax(V_upper_k).")
@@ -1029,6 +1250,41 @@ def main():
         mean_cars = torch.zeros(N_grid).float()
         print(f"  WARNING: pct_with_kids / mean_cars not in aux, using zero placeholders")
 
+    # Optional destination features: transit access proxy (PTAL) + commercial land use
+    if args.use_transit_commercial_features:
+        if "log_transit_access_j_z" not in aux.files or "log_commercial_j_z" not in aux.files:
+            raise RuntimeError(
+                "--use-transit-commercial-features requires log_transit_access_j_z and "
+                "log_commercial_j_z in aux npz. Run data/scripts/build_transit_office_features.py."
+            )
+        log_transit_access_z = torch.from_numpy(aux["log_transit_access_j_z"]).float()
+        log_commercial_z = torch.from_numpy(aux["log_commercial_j_z"]).float()
+        print(f"  transit/commercial features loaded: log_transit_access_j_z "
+              f"(std {float(log_transit_access_z.std()):.3f}), "
+              f"log_commercial_j_z (std {float(log_commercial_z.std()):.3f})")
+    else:
+        log_transit_access_z = None
+        log_commercial_z = None
+
+    # Pair-wise quality features (2026-05-22 reframing sanity check)
+    if args.use_quality_features:
+        for k in ("quality_n_viable_modes_z", "quality_log_transit_adv_z",
+                  "quality_walk_feasibility_z"):
+            assert k in aux.files, (
+                f"--use-quality-features requires {k} in aux npz. "
+                "Run data/scripts/build_quality_features.py."
+            )
+        quality_nvm_z = torch.from_numpy(aux["quality_n_viable_modes_z"]).float()
+        quality_ta_z = torch.from_numpy(aux["quality_log_transit_adv_z"]).float()
+        quality_wf_z = torch.from_numpy(aux["quality_walk_feasibility_z"]).float()
+        print(f"  quality features loaded: n_viable_modes (std {float(quality_nvm_z.std()):.3f}), "
+              f"log_transit_adv (std {float(quality_ta_z.std()):.3f}), "
+              f"walk_feasibility (std {float(quality_wf_z.std()):.3f})")
+    else:
+        quality_nvm_z = None
+        quality_ta_z = None
+        quality_wf_z = None
+
     # Income-tier mixture: P(tier=k | origin i)
     if "income_tier_props" in aux.files:
         income_tier_props = torch.from_numpy(aux["income_tier_props"]).float()
@@ -1109,6 +1365,13 @@ def main():
     income_score = income_score.to(device)
     pct_kids = pct_kids.to(device)
     mean_cars = mean_cars.to(device)
+    if log_transit_access_z is not None:
+        log_transit_access_z = log_transit_access_z.to(device)
+        log_commercial_z = log_commercial_z.to(device)
+    if quality_nvm_z is not None:
+        quality_nvm_z = quality_nvm_z.to(device)
+        quality_ta_z = quality_ta_z.to(device)
+        quality_wf_z = quality_wf_z.to(device)
     income_tier_props = income_tier_props.to(device)
     if soc_props_per_origin is not None:
         soc_props_per_origin = soc_props_per_origin.to(device)
@@ -1123,6 +1386,36 @@ def main():
         if tens.dim() == 2:
             tens = tens.unsqueeze(0).expand(T, N, N).contiguous()
         t_per_mode[m] = tens
+
+    # ---- Frozen time mask (2026-05-22 reframing Component 1) ----
+    # Hard / near-hard feasibility gate: pairs with t_min(i, j) > T_max[tier] are
+    # excluded (log_mask = -50 → softmax ~ e-22 weight). Decouples "can I reach"
+    # from "do I want to". Static t_per_mode → mask is also static (K_tier, N, N).
+    log_time_mask_per_tier = None
+    if args.use_frozen_time_mask:
+        assert args.use_consideration_filter, \
+            "--use-frozen-time-mask requires --use-consideration-filter (merges into log_cost_pass_per_tier path)"
+        with torch.no_grad():
+            t_min_static = torch.stack(
+                [t_per_mode[m][0] for m in mode_names], dim=0
+            ).min(dim=0).values                                              # (N, N)
+            T_max_per_tier_t = torch.tensor(
+                [args.T_max_low, args.T_max_mid, args.T_max_high][:args.n_income_tiers],
+                device=device, dtype=torch.float32,
+            )
+            is_feasible = t_min_static.unsqueeze(0) <= T_max_per_tier_t.view(-1, 1, 1)  # (K_tier, N, N)
+            log_time_mask_per_tier = torch.where(
+                is_feasible,
+                torch.zeros_like(t_min_static).unsqueeze(0).expand_as(is_feasible),
+                torch.full_like(t_min_static, float(args.time_mask_log_penalty))
+                     .unsqueeze(0).expand_as(is_feasible),
+            ).contiguous()                                                   # (K_tier, N, N)
+            print(f"        frozen time mask (Component 1):")
+            for k in range(log_time_mask_per_tier.shape[0]):
+                frac = float(is_feasible[k].float().mean())
+                t_med = float(t_min_static[is_feasible[k]].median()) if is_feasible[k].any() else 0.0
+                print(f"          tier {k}: T_max={float(T_max_per_tier_t[k]):.0f} min, "
+                      f"feasible {frac*100:.1f}%, median t_min within set {t_med:.1f} min")
 
     # ---- Plan E: hour_weights tensor for commute-pure loss focus ----
     # Empty --commute-hours and no --use-nts-weighted-loss → None → legacy
@@ -1218,6 +1511,7 @@ def main():
     rum = CerveroShenHead(
         n_modes=M, n_boroughs=n_boroughs, n_tiers=args.n_income_tiers,
         lambda_init=args.lambda_init, lambda_eps_min=args.lambda_eps_min,
+        lambda_max=args.lambda_max,
         use_gnn_blend=True, gnn_blend_init=0.5, blend_max=args.blend_max,
         gnn_mode=args.gnn_mode,
         gnn_residual_scale_init=args.gnn_residual_scale_init,
@@ -1246,6 +1540,21 @@ def main():
         k_time_gate_init=args.k_time_gate_init,
         k_time_gate_min=args.k_time_gate_min,
         use_frozen_match_mask=args.use_frozen_match_mask,
+        use_transit_commercial_features=args.use_transit_commercial_features,
+        use_quality_features=args.use_quality_features,
+        use_hansen_decay=args.use_hansen_decay,
+        gamma_decay_init=args.gamma_decay_init,
+        use_tmin_cost=args.use_tmin_cost,
+        beta_tmin_init=args.beta_tmin_init,
+        use_agent_dest_interaction=args.use_agent_dest_interaction,
+        use_attribute_attention=args.use_attribute_attention,
+        attn_n_origins=N if args.use_attribute_attention else 0,
+        attn_emb_dim=args.attn_emb_dim,
+        attn_hidden=args.attn_hidden,
+        attn_dropout=args.attn_dropout,
+        attn_max_log_mul=args.attn_max_log_mul,
+        attn_max_add=args.attn_max_add,
+        nu_D_sign_free=args.nu_D_sign_free,
     ).to(device)
 
     # z-score normalization: inject per-SOC demand_share mean and std
@@ -1323,12 +1632,31 @@ def main():
     print(f"        rum params: {sum(p.numel() for p in rum.parameters())}")
     print(f"        encoder params: {sum(p.numel() for p in encoder.parameters())}")
 
-    optimizer = torch.optim.AdamW(
-        [
-            {"params": encoder.parameters(), "lr": args.lr_theta, "weight_decay": 1e-4},
-            {"params": rum.parameters(), "lr": args.lr_rum, "weight_decay": 0.0},
-        ]
-    )
+    # Split RUM params: attribute-attention params get their own weight_decay group,
+    # all other RUM params remain wd=0 (preserves prior behaviour exactly when
+    # use_attribute_attention=False — rum_attn is empty in that case).
+    def _split_rum_params(only_requires_grad=False):
+        attn_ids = set()
+        if getattr(rum, "attribute_attention", None) is not None:
+            attn_ids = {id(p) for p in rum.attribute_attention.parameters()}
+        rum_other, rum_attn = [], []
+        for p in rum.parameters():
+            if only_requires_grad and not p.requires_grad:
+                continue
+            (rum_attn if id(p) in attn_ids else rum_other).append(p)
+        return rum_other, rum_attn
+
+    _rum_other, _rum_attn = _split_rum_params()
+    _opt_groups = [
+        {"params": encoder.parameters(), "lr": args.lr_theta, "weight_decay": 1e-4},
+        {"params": _rum_other, "lr": args.lr_rum, "weight_decay": 0.0},
+    ]
+    if _rum_attn:
+        _opt_groups.append({"params": _rum_attn, "lr": args.lr_rum,
+                            "weight_decay": float(args.attn_weight_decay)})
+        print(f"        attribute attention: {sum(p.numel() for p in _rum_attn)} params, "
+              f"wd={args.attn_weight_decay}")
+    optimizer = torch.optim.AdamW(_opt_groups)
 
     # ===================================================================
     # Sequential training (Wang TB-ResNet + boosting extension)
@@ -1396,6 +1724,43 @@ def main():
                 p.requires_grad = False
             return f"Stage {stage_idx} [NN-only]"
 
+    # R7 staged training infra (2026-05-22 Round 13).
+    # If --r7-warmup-epochs N > 0: stage 0 (eps 0..N) trains Plan E baseline with R7
+    # additions frozen at init values. Stage 1 (eps N..end) freezes Plan E baseline
+    # and unfreezes only R7 additions. Prevents multicollinearity train wreck.
+    R7_PARAM_NAMES = (
+        "raw_gamma_decay",
+        "raw_beta_tmin",
+        "theta_inc_dest",
+        "theta_kids_dest",
+        "theta_cars_dest",
+        "beta_nvm", "beta_ta", "beta_wf",  # quality features (if on)
+    )
+    def _is_r7_addition(param_name: str) -> bool:
+        return any(tag in param_name for tag in R7_PARAM_NAMES)
+
+    def _apply_r7_stage(stage: str):
+        """stage = 'baseline' (Plan E learn, R7 frozen) OR 'r7' (Plan E frozen, R7 learn)."""
+        if stage == "baseline":
+            for name, p in rum.named_parameters():
+                p.requires_grad = (not _is_r7_addition(name))
+            for p in encoder.parameters():
+                p.requires_grad = True
+            print(f"        [r7-staging] Stage BASELINE: R7 additions frozen, Plan E + encoder trainable")
+        elif stage == "r7":
+            for name, p in rum.named_parameters():
+                p.requires_grad = _is_r7_addition(name)
+            for p in encoder.parameters():
+                p.requires_grad = False
+            print(f"        [r7-staging] Stage R7-ONLY: Plan E + encoder frozen, R7 additions trainable")
+        n_trainable = sum(p.numel() for p in rum.parameters() if p.requires_grad)
+        print(f"        [r7-staging] trainable RUM params: {n_trainable}")
+
+    if args.r7_warmup_epochs > 0:
+        assert args.train_mode == "joint", \
+            "--r7-warmup-epochs requires --train-mode joint (mutually exclusive with --train-mode sequential)"
+        _apply_r7_stage("baseline")
+
     # Compute stage durations and boundaries
     if args.train_mode == "sequential":
         n_stages = args.n_stages
@@ -1423,7 +1788,29 @@ def main():
     current_stage = 0
     stage_t0 = t0
 
+    r7_stage_switched = False
     for ep in range(total_epochs):
+        # R7 staged training transition: at ep == r7_warmup_epochs, switch from
+        # baseline-only to R7-additions-only training.
+        if args.r7_warmup_epochs > 0 and ep == args.r7_warmup_epochs and not r7_stage_switched:
+            prev_cpc = history[-1]["cpc"] if history else 0.0
+            print(f"\n[r7-staging] Baseline stage done at ep {ep}, CPC={prev_cpc:.4f}. Switching to R7-only.")
+            _apply_r7_stage("r7")
+            # Rebuild optimizer with only currently-trainable params
+            _rum_other_s, _rum_attn_s = _split_rum_params(only_requires_grad=True)
+            _opt_groups_s = [
+                {"params": [p for p in encoder.parameters() if p.requires_grad],
+                 "lr": args.lr_theta, "weight_decay": 1e-4},
+                {"params": _rum_other_s, "lr": args.lr_rum,
+                 "weight_decay": 1e-3},  # stronger wd on R7 additions to prevent runaway
+            ]
+            if _rum_attn_s:
+                _opt_groups_s.append({"params": _rum_attn_s, "lr": args.lr_rum,
+                                      "weight_decay": float(args.attn_weight_decay)})
+            optimizer = torch.optim.AdamW(_opt_groups_s)
+            r7_stage_switched = True
+            no_improve = 0   # reset patience for fresh stage
+
         # Detect stage transition
         if args.train_mode == "sequential":
             next_stage = current_stage
@@ -1440,12 +1827,16 @@ def main():
                 label = _apply_stage(current_stage)
                 print(f"[sequential] {label}: ({stage_durations[current_stage]} epochs)")
                 # Reset optimizer for new freeze set
-                optimizer = torch.optim.AdamW(
-                    [{"params": [p for p in encoder.parameters() if p.requires_grad],
-                      "lr": args.lr_theta, "weight_decay": 1e-4},
-                     {"params": [p for p in rum.parameters() if p.requires_grad],
-                      "lr": args.lr_rum, "weight_decay": 0.0}]
-                )
+                _rum_other_s, _rum_attn_s = _split_rum_params(only_requires_grad=True)
+                _opt_groups_s = [
+                    {"params": [p for p in encoder.parameters() if p.requires_grad],
+                     "lr": args.lr_theta, "weight_decay": 1e-4},
+                    {"params": _rum_other_s, "lr": args.lr_rum, "weight_decay": 0.0},
+                ]
+                if _rum_attn_s:
+                    _opt_groups_s.append({"params": _rum_attn_s, "lr": args.lr_rum,
+                                          "weight_decay": float(args.attn_weight_decay)})
+                optimizer = torch.optim.AdamW(_opt_groups_s)
                 # Keep best_val/best_state across stages (same val set, comparable);
                 # only reset patience counter so each stage gets fresh chance.
                 no_improve = 0
@@ -1470,6 +1861,13 @@ def main():
             soc_props_per_origin=soc_props_per_origin,
             per_soc_demand_share_j=per_soc_demand_share_j,
             hour_weights=hour_weights,
+            log_transit_access_z=log_transit_access_z,
+            log_commercial_z=log_commercial_z,
+            quality_nvm_z=quality_nvm_z,
+            quality_ta_z=quality_ta_z,
+            quality_wf_z=quality_wf_z,
+            log_time_mask_per_tier=log_time_mask_per_tier,
+            strip_time_from_vdest_iv=args.strip_time_from_vdest_iv,
         )
         loss = (out["nll_dest"]
                 + kl_weight * out["ce_mode"]
@@ -1497,6 +1895,13 @@ def main():
                 soc_props_per_origin=soc_props_per_origin,
                 per_soc_demand_share_j=per_soc_demand_share_j,
                 hour_weights=hour_weights,
+                log_transit_access_z=log_transit_access_z,
+                log_commercial_z=log_commercial_z,
+                quality_nvm_z=quality_nvm_z,
+                quality_ta_z=quality_ta_z,
+                quality_wf_z=quality_wf_z,
+                log_time_mask_per_tier=log_time_mask_per_tier,
+                strip_time_from_vdest_iv=args.strip_time_from_vdest_iv,
             )
             val_nll = float(out_e["nll_dest"])
             val_cpc = cpc(out_e["log_P_D"], observed_OD, val_mask,
@@ -1570,6 +1975,13 @@ def main():
             soc_props_per_origin=soc_props_per_origin,
             per_soc_demand_share_j=per_soc_demand_share_j,
             hour_weights=hour_weights,
+            log_transit_access_z=log_transit_access_z,
+            log_commercial_z=log_commercial_z,
+            quality_nvm_z=quality_nvm_z,
+            quality_ta_z=quality_ta_z,
+            quality_wf_z=quality_wf_z,
+            log_time_mask_per_tier=log_time_mask_per_tier,
+            strip_time_from_vdest_iv=args.strip_time_from_vdest_iv,
         )
         final_cpc = cpc(out_final["log_P_D"], observed_OD, val_mask,
                         hour_weights=hour_weights)
@@ -1636,6 +2048,13 @@ def main():
                 soc_props_per_origin=soc_props_per_origin,
                 per_soc_demand_share_j=per_soc_demand_share_j,
                 hour_weights=hour_weights,
+                log_transit_access_z=log_transit_access_z,
+                log_commercial_z=log_commercial_z,
+                quality_nvm_z=quality_nvm_z,
+                quality_ta_z=quality_ta_z,
+                quality_wf_z=quality_wf_z,
+                log_time_mask_per_tier=log_time_mask_per_tier,
+                strip_time_from_vdest_iv=args.strip_time_from_vdest_iv,
             )
             abl_cpc = cpc(out_abl["log_P_D"], observed_OD, val_mask,
                           hour_weights=hour_weights)
@@ -1663,6 +2082,13 @@ def main():
                 soc_props_per_origin=soc_props_per_origin,
                 per_soc_demand_share_j=per_soc_demand_share_j,
                 hour_weights=hour_weights,
+                log_transit_access_z=log_transit_access_z,
+                log_commercial_z=log_commercial_z,
+                quality_nvm_z=quality_nvm_z,
+                quality_ta_z=quality_ta_z,
+                quality_wf_z=quality_wf_z,
+                log_time_mask_per_tier=log_time_mask_per_tier,
+                strip_time_from_vdest_iv=args.strip_time_from_vdest_iv,
             )
             cpc_no_filter = cpc(out_no_filter["log_P_D"], observed_OD, val_mask,
                                 hour_weights=hour_weights)
@@ -1771,6 +2197,13 @@ def main():
                 soc_props_per_origin=soc_props_per_origin,
                 per_soc_demand_share_j=per_soc_demand_share_j,
                 hour_weights=hour_weights,
+                log_transit_access_z=log_transit_access_z,
+                log_commercial_z=log_commercial_z,
+                quality_nvm_z=quality_nvm_z,
+                quality_ta_z=quality_ta_z,
+                quality_wf_z=quality_wf_z,
+                log_time_mask_per_tier=log_time_mask_per_tier,
+                strip_time_from_vdest_iv=args.strip_time_from_vdest_iv,
             )
         cpc_no_cosine_match = cpc(out_no_match["log_P_D"], observed_OD, val_mask,
                                   hour_weights=hour_weights)
@@ -1804,6 +2237,13 @@ def main():
                 soc_props_per_origin=soc_props_per_origin,
                 per_soc_demand_share_j=per_soc_demand_share_j,
                 hour_weights=hour_weights,
+                log_transit_access_z=log_transit_access_z,
+                log_commercial_z=log_commercial_z,
+                quality_nvm_z=quality_nvm_z,
+                quality_ta_z=quality_ta_z,
+                quality_wf_z=quality_wf_z,
+                log_time_mask_per_tier=log_time_mask_per_tier,
+                strip_time_from_vdest_iv=args.strip_time_from_vdest_iv,
             )
             cpc_no_nn = cpc(out_no_nn["log_P_D"], observed_OD, val_mask,
                             hour_weights=hour_weights)
@@ -1817,6 +2257,13 @@ def main():
                 soc_props_per_origin=soc_props_per_origin,
                 per_soc_demand_share_j=per_soc_demand_share_j,
                 hour_weights=hour_weights,
+                log_transit_access_z=log_transit_access_z,
+                log_commercial_z=log_commercial_z,
+                quality_nvm_z=quality_nvm_z,
+                quality_ta_z=quality_ta_z,
+                quality_wf_z=quality_wf_z,
+                log_time_mask_per_tier=log_time_mask_per_tier,
+                strip_time_from_vdest_iv=args.strip_time_from_vdest_iv,
             )
             cpc_no_both = cpc(out_no_both["log_P_D"], observed_OD, val_mask,
                               hour_weights=hour_weights)

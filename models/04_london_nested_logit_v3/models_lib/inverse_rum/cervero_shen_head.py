@@ -70,6 +70,68 @@ def _inv_sigmoid(s: float) -> float:
     return math.log(s / (1 - s))
 
 
+class AttributeAttention(nn.Module):
+    """Origin-conditioned per-attribute modulator (FiLM-style), tanh-bounded.
+
+    Each of the four V_upper attribute coefficients (γ_M, α_W, ν_D, δ_match)
+    becomes origin-dependent through this module:
+        Δ_raw(i) = MLP(emb(i))[:, attr_idx]                      (unbounded)
+        Δ_mul(i) = max_log_mul · tanh(Δ_raw)                      (∈ [-max_log_mul, +max_log_mul])
+        Δ_add(i) = max_add     · tanh(Δ_raw)                      (∈ [-max_add,    +max_add])
+
+    γ_M / α_W / δ_match use the multiplicative form: coefficient · exp(Δ_mul)
+    → modulator ∈ [exp(-max_log_mul), exp(+max_log_mul)] (≥ 0 sign preserved).
+    ν_D uses the additive form: coefficient + Δ_add (sign-free).
+
+    Bounding via tanh prevents the runaway observed in the first 100-ep AutoDL
+    run (2026-05-22), where unbounded exp(Δ) reached factor 1e11 multipliers
+    and CPC collapsed from 0.56 baseline to 0.41.
+
+    Output layer initialised to zero so Δ_raw starts at 0 → tanh(0)=0 → the
+    model behaves identically to the no-attention baseline at epoch 0.
+    """
+    def __init__(
+        self,
+        n_origins: int,
+        emb_dim: int = 32,
+        hidden: int = 64,
+        dropout: float = 0.1,
+        max_log_mul: float = 1.0,
+        max_add: float = 1.0,
+    ):
+        super().__init__()
+        assert n_origins > 0, "AttributeAttention requires n_origins > 0"
+        self.n_origins = int(n_origins)
+        self.max_log_mul = float(max_log_mul)
+        self.max_add = float(max_add)
+        self.emb = nn.Embedding(n_origins, emb_dim)
+        nn.init.normal_(self.emb.weight, std=0.02)
+        self.mlp = nn.Sequential(
+            nn.Linear(emb_dim, hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, 4),
+        )
+        # Zero last layer so initial deltas are 0 → tanh(0)=0 → identity
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+
+    def forward(self) -> tuple:
+        """Return (Δγ_mul, Δα_mul, Δν_add, Δδ_mul) — each (N,) bounded tensor."""
+        idx = torch.arange(self.n_origins, device=self.emb.weight.device)
+        e = self.emb(idx)                                # (N, emb_dim)
+        out_raw = self.mlp(e)                            # (N, 4)
+        out_t = torch.tanh(out_raw)                      # ∈ [-1, +1]
+        d_g = self.max_log_mul * out_t[:, 0]             # multiplicative (log)
+        d_a = self.max_log_mul * out_t[:, 1]             # multiplicative (log)
+        d_n = self.max_add     * out_t[:, 2]             # additive (sign-free)
+        d_d = self.max_log_mul * out_t[:, 3]             # multiplicative (log)
+        return d_g, d_a, d_n, d_d
+
+
 class CerveroShenHead(nn.Module):
     """D→M nested logit head with Cervero match + Shen competition + Hansen attractiveness.
 
@@ -131,6 +193,13 @@ class CerveroShenHead(nn.Module):
                                           # towards lit-expected behavioral gradient
         use_push_pull: bool = False,     # origin labor surplus × dest M_j interaction (push-pull gravity)
         xi_push_pull_init: float = 0.0,  # free real init for push×pull coefficient
+        use_transit_commercial_features: bool = False,  # add β_transit·log_transit_access_z +
+                                                         # β_commercial·log_commercial_z to V_other.
+                                                         # Both sign-free (learned from data).
+                                                         # Aux npz must contain log_transit_access_j_z
+                                                         # and log_commercial_j_z (1725,) each.
+        beta_transit_init: float = 0.1,                  # init for transit-access coef (free real).
+        beta_commercial_init: float = 0.1,               # init for commercial coef (free real).
         use_self_loop_boost: bool = False,  # per-(origin borough, hour) intra-zone bias
         n_hours: int = 24,                  # T (used only if use_self_loop_boost)
         n_busy_dest: int = 0,               # K > 0: top-K busy destinations get
@@ -189,6 +258,76 @@ class CerveroShenHead(nn.Module):
                                               # the optimizer wants. With tau_floor it gives
                                               # data-driven thresholds inside a structural
                                               # prior (Aboutaleb 2021 EBA-style).
+        lambda_max: float = 1.0,                 # Upper bound on λ_borough.
+                                                  # λ_b ∈ [lambda_eps_min, lambda_max].
+                                                  # Default 1.0 preserves prior behaviour.
+                                                  # Set lambda_max << 1.0 (e.g. 0.15) to
+                                                  # **down-weight IV** in V_dest, the 2026-05-22
+                                                  # reframing pivot: IV's role becomes minor
+                                                  # quality contributor instead of dominant
+                                                  # accessibility utility. raw_lambda_borough
+                                                  # init is rescaled so that λ_b at init still
+                                                  # equals lambda_init (clamped to lambda_max).
+        use_hansen_decay: bool = False,       # 2026-05-22 R7/R8 — Hansen 1959 distance decay.
+                                              # V_dest -= γ_decay[tier] · log_d_ij. tier-specific
+                                              # (3 params), >=0 via softplus, sign-constrained.
+                                              # Lit anchor: Hansen 1959 — gravity model.
+        gamma_decay_init: float = 0.05,        # init Hansen decay coef (3 tier-only)
+        use_tmin_cost: bool = False,           # 2026-05-22 R8 — replace nested IV with scalar
+                                                # access cost. V_dest -= β_tmin[tier] · t_min(i, j).
+                                                # 3 tier-specific, >=0 via softplus.
+                                                # Lit anchor: Bhat 1995 — heterogeneous VOT.
+                                                # Only meaningful when paired with
+                                                # --strip-time-from-vdest-iv (otherwise IV provides
+                                                # this signal via log-sum-exp).
+        beta_tmin_init: float = 0.01,          # init t_min coef per tier
+        use_agent_dest_interaction: bool = False,  # 2026-05-22 R7/R8 — agent × destination
+                                                    # explicit interaction in V_dest:
+                                                    #   θ_inc_dest · income_i · log_M_j
+                                                    # + θ_kids_dest · kids_i · log_d_ij
+                                                    # + θ_cars_dest · cars_i · log_d_ij
+                                                    # 3 scalars, sign-free.
+                                                    # Lit anchor: Rosen 1974 (wage-distance),
+                                                    # Schwanen 2003 (family commute), mobility theory.
+        theta_inc_dest_init: float = 0.0,
+        theta_kids_dest_init: float = 0.0,
+        theta_cars_dest_init: float = 0.0,
+        use_quality_features: bool = False,  # Pair-wise (i, j) "quality" features
+                                              # for the 2026-05-22 framing pivot
+                                              # (raw travel time → feasibility,
+                                              # quality residual carries preference):
+                                              #   β_nvm · n_viable_modes_z[i, j]
+                                              #   β_ta  · log_transit_advantage_z[i, j]
+                                              #   β_wf  · walk_feasibility_z[i, j]
+                                              # All sign-free real. Added additively
+                                              # to V_other.
+        beta_nvm_init: float = 0.0,
+        beta_ta_init: float = 0.0,
+        beta_wf_init: float = 0.0,
+        use_attribute_attention: bool = False,  # Origin-conditioned per-attribute modulator.
+                                                # Adds AttributeAttention(N → MLP → 4 deltas).
+                                                # γ_M / α_W / δ_match: multiplicative (exp(Δ)).
+                                                # ν_D: additive (sign-free, requires
+                                                # nu_D_sign_free=True).
+        attn_n_origins: int = 0,                # Number of origin grids (=N, e.g. 1725).
+                                                # Required if use_attribute_attention=True.
+        attn_emb_dim: int = 32,                 # Per-origin embedding width.
+        attn_hidden: int = 64,                  # MLP hidden width (2 hidden layers).
+        attn_dropout: float = 0.1,              # Dropout between MLP layers.
+        attn_max_log_mul: float = 1.0,          # Bound on multiplicative modulator: the
+                                                # exp(Δ) factor is constrained to
+                                                # [exp(-attn_max_log_mul), exp(+attn_max_log_mul)].
+                                                # Default 1.0 → modulator ∈ [0.37, 2.72].
+                                                # Without this, optimizer ran exp(Δ) to 1e11
+                                                # and CPC collapsed (2026-05-22).
+        attn_max_add: float = 1.0,              # Bound on additive modulator (ν_D sign-free):
+                                                # Δ ∈ [-attn_max_add, +attn_max_add]. Default 1.0.
+        nu_D_sign_free: bool = False,           # If True: bypass -softplus on raw_nu_D,
+                                                # use a separate raw_nu_D_free parameter
+                                                # initialised at nu_D_init directly so the
+                                                # competition coefficient can flip sign if
+                                                # the data demands it (Cervero-Shen prior
+                                                # relaxed). Typical pairing with attention.
         use_frozen_match_mask: bool = False,  # Lit-anchored hard match-set (Stoll-Houston 2005):
                                               # for each SOC s, define J_s = {j : demand_share[j,s] > tau_s}
                                               # OUTSIDE the model and inject as a frozen (S, N) log-mask.
@@ -202,6 +341,9 @@ class CerveroShenHead(nn.Module):
         self.n_modes = n_modes
         self.n_boroughs = n_boroughs
         self.lambda_eps_min = float(lambda_eps_min)
+        self.lambda_max = float(lambda_max)
+        assert self.lambda_max > self.lambda_eps_min, \
+            f"lambda_max {self.lambda_max} must exceed lambda_eps_min {self.lambda_eps_min}"
         self.use_gnn_blend = use_gnn_blend
         self.blend_max = float(blend_max)
         self.gnn_mode = str(gnn_mode)
@@ -319,11 +461,105 @@ class CerveroShenHead(nn.Module):
         # γ (M_j) — enforced > 0 via softplus
         self.raw_gamma_M = nn.Parameter(_shaped_init(gamma_M_init, size_gamma_M))
 
-        # ν (D_j) — enforced < 0 via -softplus (use abs in init)
+        # ν (D_j) — by default enforced < 0 via -softplus (use abs in init).
+        # When nu_D_sign_free is True (typical with attribute attention), a separate
+        # raw_nu_D_free parameter is used directly (no transformation) so the
+        # coefficient can flip sign if data demands it. raw_nu_D is still kept for
+        # back-compat path but ignored by the ν_D property.
         self.raw_nu_D = nn.Parameter(_shaped_init(-nu_D_init, size_nu_D))
+        self.nu_D_sign_free = bool(nu_D_sign_free)
+        if self.nu_D_sign_free:
+            if size_nu_D == 1:
+                init_t = torch.tensor(float(nu_D_init))
+            else:
+                init_t = torch.tensor(
+                    [float(nu_D_init) * (1.0 + k * tier_init_scale)
+                     for k in range(size_nu_D)],
+                    dtype=torch.float32,
+                )
+            self.raw_nu_D_free = nn.Parameter(init_t)
+        else:
+            self.raw_nu_D_free = None
 
         # δ (match_prob) — enforced >= 0 via softplus
         self.raw_delta_match = nn.Parameter(_shaped_init(delta_match_init, size_delta_match))
+
+        # β_transit, β_commercial — destination-level scalar attributes (PTAL proxy
+        # + commercial land use). Sign-free real init; data picks the sign.
+        # Used in V_other as: V_other += β_transit · log_transit_access_z[j]
+        #                              + β_commercial · log_commercial_z[j]
+        # Disabled by default; trainer passes the z-scored vectors when the flag is on.
+        self.use_transit_commercial_features = bool(use_transit_commercial_features)
+        if self.use_transit_commercial_features:
+            self.beta_transit = nn.Parameter(torch.tensor(float(beta_transit_init)))
+            self.beta_commercial = nn.Parameter(torch.tensor(float(beta_commercial_init)))
+        else:
+            self.beta_transit = None
+            self.beta_commercial = None
+
+        # Hansen 1959 distance decay (R7/R8 加项)
+        self.use_hansen_decay = bool(use_hansen_decay)
+        if self.use_hansen_decay:
+            target = max(float(gamma_decay_init), 1e-4)
+            self.raw_gamma_decay = nn.Parameter(
+                torch.full((self.n_income_tiers,), _inv_softplus(target))
+            )
+        else:
+            self.raw_gamma_decay = None
+
+        # t_min scalar access cost (R8 — replaces nested IV)
+        self.use_tmin_cost = bool(use_tmin_cost)
+        if self.use_tmin_cost:
+            target = max(float(beta_tmin_init), 1e-4)
+            self.raw_beta_tmin = nn.Parameter(
+                torch.full((self.n_income_tiers,), _inv_softplus(target))
+            )
+        else:
+            self.raw_beta_tmin = None
+
+        # Agent × destination explicit interaction (R7/R8 加项)
+        self.use_agent_dest_interaction = bool(use_agent_dest_interaction)
+        if self.use_agent_dest_interaction:
+            self.theta_inc_dest = nn.Parameter(torch.tensor(float(theta_inc_dest_init)))
+            self.theta_kids_dest = nn.Parameter(torch.tensor(float(theta_kids_dest_init)))
+            self.theta_cars_dest = nn.Parameter(torch.tensor(float(theta_cars_dest_init)))
+        else:
+            self.theta_inc_dest = None
+            self.theta_kids_dest = None
+            self.theta_cars_dest = None
+
+        # Pair-wise quality features (2026-05-22 reframing sanity check).
+        # Three sign-free additive coefficients on quality_{n_viable_modes, log_transit_adv,
+        # walk_feasibility}_z (each (N, N) z-scored). Trainer injects the feature tensors and
+        # this head only owns the coefficients (per 2026-05-21 transit_commercial pattern).
+        self.use_quality_features = bool(use_quality_features)
+        if self.use_quality_features:
+            self.beta_nvm = nn.Parameter(torch.tensor(float(beta_nvm_init)))
+            self.beta_ta = nn.Parameter(torch.tensor(float(beta_ta_init)))
+            self.beta_wf = nn.Parameter(torch.tensor(float(beta_wf_init)))
+        else:
+            self.beta_nvm = None
+            self.beta_ta = None
+            self.beta_wf = None
+
+        # Origin-conditioned per-attribute modulator (2026-05-22 design).
+        # Replaces failed additive features (transit/commercial) by attaching
+        # an MLP-derived modulator to each of the 4 V_upper coefficients.
+        # See AttributeAttention class above.
+        self.use_attribute_attention = bool(use_attribute_attention)
+        if self.use_attribute_attention:
+            assert attn_n_origins > 0, \
+                "use_attribute_attention requires attn_n_origins > 0"
+            self.attribute_attention = AttributeAttention(
+                n_origins=attn_n_origins,
+                emb_dim=attn_emb_dim,
+                hidden=attn_hidden,
+                dropout=attn_dropout,
+                max_log_mul=attn_max_log_mul,
+                max_add=attn_max_add,
+            )
+        else:
+            self.attribute_attention = None
 
         # Push-pull cross term: V += ξ · push_i · log_M_j
         #   push_i = log(workers reaching i) - log(jobs at i) = labor surplus indicator
@@ -478,8 +714,11 @@ class CerveroShenHead(nn.Module):
         # θ_cars per mode — free (mean cars per household × mode interaction)
         self.theta_cars_per_mode = nn.Parameter(torch.zeros(n_modes))
 
-        # λ_b per borough — bounded
-        s = (lambda_init - lambda_eps_min) / (1.0 - lambda_eps_min)
+        # λ_b per borough — bounded ∈ [lambda_eps_min, lambda_max].
+        # Default lambda_max=1.0 preserves prior behaviour. Reframing experiments
+        # set lambda_max=0.15 to suppress IV's contribution to V_dest.
+        lambda_init_clamped = min(max(float(lambda_init), lambda_eps_min + 1e-4), self.lambda_max - 1e-4)
+        s = (lambda_init_clamped - lambda_eps_min) / (self.lambda_max - lambda_eps_min)
         raw_l = _inv_sigmoid(s)
         self.raw_lambda_borough = nn.Parameter(torch.full((n_boroughs,), raw_l))
 
@@ -618,7 +857,14 @@ class CerveroShenHead(nn.Module):
 
     @property
     def nu_D(self) -> torch.Tensor:
-        """ν ≤ 0 (competition repels, must be non-positive behaviourally)."""
+        """ν (Shen competition).
+
+        Default: ν ≤ 0 (competition repels, sign-constrained via -softplus).
+        With nu_D_sign_free=True: return raw_nu_D_free directly so the sign
+        is learned from data (typical pairing with attribute attention).
+        """
+        if self.nu_D_sign_free and self.raw_nu_D_free is not None:
+            return self.raw_nu_D_free
         return -F.softplus(self.raw_nu_D)
 
     @property
@@ -734,7 +980,7 @@ class CerveroShenHead(nn.Module):
 
     @property
     def lambda_per_borough(self) -> torch.Tensor:
-        return self.lambda_eps_min + (1.0 - self.lambda_eps_min) * torch.sigmoid(
+        return self.lambda_eps_min + (self.lambda_max - self.lambda_eps_min) * torch.sigmoid(
             self.raw_lambda_borough
         )
 
@@ -778,8 +1024,57 @@ class CerveroShenHead(nn.Module):
             return None
         return F.softplus(self.raw_gate_steepness)
 
+    @property
+    def gamma_decay_per_tier(self) -> Optional[torch.Tensor]:
+        """γ_decay ≥ 0 per tier — Hansen 1959 distance decay (R7/R8)."""
+        if self.raw_gamma_decay is None:
+            return None
+        return F.softplus(self.raw_gamma_decay)
+
+    @property
+    def beta_tmin_per_tier(self) -> Optional[torch.Tensor]:
+        """β_tmin ≥ 0 per tier — scalar best-mode time cost (R8, replaces nested IV)."""
+        if self.raw_beta_tmin is None:
+            return None
+        return F.softplus(self.raw_beta_tmin)
+
     def lambda_for_destination(self, grid_borough_idx: torch.Tensor) -> torch.Tensor:
         return self.lambda_per_borough[grid_borough_idx]
+
+    def _attention_modulator_stats(self) -> dict:
+        """Per-attribute (mean, std, abs-max) across N origins for the 4 modulators.
+        Useful diagnostic: how much does attention deviate from the no-op (Δ=0)?
+        """
+        if self.attribute_attention is None:
+            return None
+        with torch.no_grad():
+            d_g, d_a, d_n, d_d = self.attribute_attention()
+            def _stats(x):
+                return {
+                    "mean": float(x.mean()),
+                    "std": float(x.std()),
+                    "abs_max": float(x.abs().max()),
+                }
+            return {
+                "delta_gamma_M": _stats(d_g),
+                "delta_alpha_W": _stats(d_a),
+                "delta_nu_D":    _stats(d_n),
+                "delta_delta_match": _stats(d_d),
+            }
+
+    def attribute_modulators(self) -> tuple:
+        """Return per-origin modulators (Δγ, Δα, Δν, Δδ), each (N,).
+
+        Returns (None, None, None, None) when attribute_attention is disabled.
+        Applied in trainer V_dest assembly as:
+            γ_M_eff(i, c)    = γ_M[c] * exp(Δγ(i))
+            α_W_eff(i, c)    = α_W[c] * exp(Δα(i))
+            ν_D_eff(i, c)    = ν_D[c] + Δν(i)               (sign-free, additive)
+            δ_match_eff(i, s)= δ_match[s] * exp(Δδ(i))
+        """
+        if self.attribute_attention is None:
+            return None, None, None, None
+        return self.attribute_attention()
 
     # =============================================================================
     # Snapshot for json logging
@@ -797,6 +1092,8 @@ class CerveroShenHead(nn.Module):
                 "gamma_M": _to_py(self.gamma_M),
                 "nu_D": _to_py(self.nu_D),
                 "delta_match": _to_py(self.delta_match),
+                "beta_transit": (float(self.beta_transit) if self.beta_transit is not None else None),
+                "beta_commercial": (float(self.beta_commercial) if self.beta_commercial is not None else None),
                 "beta_t_per_mode": self.beta_t_per_mode.tolist(),
                 "beta_t_slope_per_mode": self.beta_t_slope_per_mode.tolist(),
                 "asc_per_mode": self.asc_per_mode.tolist(),
@@ -852,6 +1149,24 @@ class CerveroShenHead(nn.Module):
                                     if self.T_max_per_tier is not None else None),
                 "k_time_gate": (float(self.k_time_gate)
                                  if self.k_time_gate is not None else None),
+                "use_hansen_decay": self.use_hansen_decay,
+                "gamma_decay_per_tier": (self.gamma_decay_per_tier.tolist()
+                                          if self.gamma_decay_per_tier is not None else None),
+                "use_tmin_cost": self.use_tmin_cost,
+                "beta_tmin_per_tier": (self.beta_tmin_per_tier.tolist()
+                                        if self.beta_tmin_per_tier is not None else None),
+                "use_agent_dest_interaction": self.use_agent_dest_interaction,
+                "theta_inc_dest": (float(self.theta_inc_dest) if self.theta_inc_dest is not None else None),
+                "theta_kids_dest": (float(self.theta_kids_dest) if self.theta_kids_dest is not None else None),
+                "theta_cars_dest": (float(self.theta_cars_dest) if self.theta_cars_dest is not None else None),
+                "use_quality_features": self.use_quality_features,
+                "beta_nvm": (float(self.beta_nvm) if self.beta_nvm is not None else None),
+                "beta_ta": (float(self.beta_ta) if self.beta_ta is not None else None),
+                "beta_wf": (float(self.beta_wf) if self.beta_wf is not None else None),
+                "use_attribute_attention": self.use_attribute_attention,
+                "nu_D_sign_free": self.nu_D_sign_free,
+                "attention_modulator_stats": (self._attention_modulator_stats()
+                                              if self.use_attribute_attention else None),
                 "use_frozen_match_mask": self.use_frozen_match_mask,
                 "frozen_match_mask_set_size_per_soc": (
                     [int((self.frozen_log_match_mask_per_soc[s] > -1e6).sum())
