@@ -175,6 +175,15 @@ class BeijingNestedHead(nn.Module):
             F.softplus(self.raw_k_time) * (self.T_max[k_tier] - t_min))
         return log_mask
 
+    def mode_logits(self, batch):
+        """每 edge 的 per-mode scaled 效用 (3,E), softmax 即 P(m|i,j)。"""
+        log_d = batch["log_d"]; income_o = batch["income_o"]; lam = self.lam
+        tms = [batch["t_car"], batch["t_transit"], batch["t_walk"]]
+        b0, b1 = self.beta_t0, self.beta_t1
+        V = [(b0[m] + b1[m] * log_d) * tms[m] + self.asc[m] + self.theta_inc[m] * income_o
+             for m in range(self.M)]
+        return torch.stack(V, 0) / lam
+
     def forward(self, batch, v_nn=None):
         seg_id, num_seg = batch["seg_id"], batch["num_seg"]
         log_d = batch["log_d"]; income_o = batch["income_o"]; lam = self.lam

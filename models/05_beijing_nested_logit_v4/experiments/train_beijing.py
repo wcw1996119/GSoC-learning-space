@@ -60,6 +60,21 @@ def build_data(args):
         t_walk, t_transit, flow = t_walk[em], t_transit[em], flow[em]
         print(f"  smoke: {args.smoke_cells} cells -> {em.sum():,} edges (of {len(em):,})")
 
+    # 刷卡公交 OD -> 每 edge 观测 transit 量 (Ben-Akiva-Morikawa 联合估计锚)
+    obs_transit = None
+    if getattr(args, "anchor_transit", False):
+        tod = np.load(PROC / "beijing_transit_od.npz")
+        tk = tod["to_o"].astype(np.int64) * N + tod["to_d"].astype(np.int64)
+        tv = tod["to_n"].astype(np.float64)
+        order = np.argsort(tk); tk = tk[order]; tv = tv[order]
+        ek = o.astype(np.int64) * N + d.astype(np.int64)
+        pos = np.searchsorted(tk, ek)
+        pos = np.clip(pos, 0, len(tk) - 1)
+        hit = tk[pos] == ek
+        obs_transit = np.where(hit, tv[pos], 0.0).astype(np.float32)
+        print(f"  anchor: 刷卡公交命中 {int((obs_transit>0).sum()):,}/{len(o):,} edges, "
+              f"覆盖公交出行 {obs_transit.sum()/tv.sum()*100:.0f}%")
+
     # CSR: 边已按 o 排序; seg_id + seg_starts (各出发地首边)
     origin_ids, seg_starts = np.unique(o, return_index=True)
     O = len(origin_ids)
@@ -87,6 +102,8 @@ def build_data(args):
         tier_props=to(tier_props), district=to(district),
         soc_props=to(soc_props), demand_share=to(demand_share),
         Xnode=to(Xnode), edge_index=to(edge_index) if edge_index is not None else None,
+        flow_tot=to(flow.sum(1)),
+        obs_transit=to(obs_transit) if obs_transit is not None else None,
     )
     rng = np.random.RandomState(args.seed)
     val_seg = np.zeros(O, bool); val_seg[rng.permutation(O)[:int(O*args.val_frac)]] = True
@@ -139,8 +156,13 @@ def main():
     ap.add_argument("--gnn-mode", default="residual")
     ap.add_argument("--residual-scale-init", type=float, default=0.1)
     ap.add_argument("--origin-chunks", type=int, default=1)
+    ap.add_argument("--anchor-transit", action="store_true",
+                    help="刷卡公交OD矩匹配(Ben-Akiva-Morikawa), 识别mode; 需 chunks=1")
+    ap.add_argument("--anchor-weight", type=float, default=1.0)
     ap.add_argument("--out", default=str(ROOT / "evaluation_outputs" / "v4_run.pt"))
     args = ap.parse_args()
+    if args.anchor_transit:
+        assert args.origin_chunks == 1, "--anchor-transit 需 --origin-chunks 1 (全局归一化)"
 
     torch.manual_seed(args.seed); np.random.seed(args.seed)
     flags = [f for f, on in [("nn", args.use_nn), ("filter", args.use_consideration),
@@ -184,6 +206,14 @@ def main():
                 v_nn = enc.edge_vnn(e_o, e_d, data["o"][e0:e1], data["d"][e0:e1]) if enc is not None else None
                 logP = head(batch, v_nn=v_nn)
                 loss_p = -(flow_all[e0:e1, p] * train_m[e0:e1] * logP).sum() / flow_train_sum
+                # 刷卡公交锚 (Ben-Akiva-Morikawa): 模型预测公交分布 对齐 刷卡公交OD分布
+                if args.anchor_transit and p == 0:
+                    p_tr = torch.softmax(head.mode_logits(batch), 0)[1]      # (E,) P(公交|edge)
+                    pred_tr = (p_tr * data["flow_tot"]).clamp_min(1e-12)
+                    pred_dist = pred_tr / pred_tr.sum()
+                    obs = data["obs_transit"]; obs_dist = obs / obs.sum()
+                    anchor = -(obs_dist * torch.log(pred_dist)).sum()
+                    loss_p = loss_p + args.anchor_weight * anchor
                 bi += 1
                 loss_p.backward(retain_graph=(enc is not None) and (bi < n_back))
                 loss_val += loss_p.item()
@@ -214,11 +244,16 @@ def main():
             cpc_tot = sum(c*wi for c, wi in zip(cpcs, w)) / max(sum(w), 1)
             best_cpc = max(best_cpc, cpc_tot)
             pr = head.param_report()
+            # 方式分担 (流量加权, ampeak)
+            with torch.no_grad():
+                b0 = make_batch(data, 0, args.use_soc_mixture, 0, len(data["o"]), 0, data["num_seg"])
+                Pm = torch.softmax(head.mode_logits(b0), 0)            # (3,E)
+                w_m = data["flow_tot"]; ms = (Pm * w_m).sum(1) / w_m.sum()
             extra = f" w_nn={pr.get('w_nn')}" if 'w_nn' in pr else ""
             extra += f" Tmax={pr.get('T_max')}" if 'T_max' in pr else ""
             print(f"ep {ep:3d}  loss {loss_val:.4f}  CPC {cpc_tot:.4f}  "
-                  f"[{','.join(f'{c:.3f}' for c in cpcs)}]  λ={pr['lambda']:.3f} "
-                  f"γ={pr['gamma_M']} ν={pr['nu_D']} δ={pr['delta']}{extra}")
+                  f"[{','.join(f'{c:.3f}' for c in cpcs)}]  mode[车{ms[0]:.2f}公交{ms[1]:.2f}步{ms[2]:.2f}] "
+                  f"λ={pr['lambda']:.3f} γ={pr['gamma_M']} ν={pr['nu_D']}{extra}")
 
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     payload = {"head_state": head.state_dict(), "args": vars(args),

@@ -38,10 +38,13 @@ def main():
     # ---- 步行 ----
     t_walk = (hav / WALK_SPEED_KMH * 60.0).astype(np.float32)
 
-    # ---- 公交 v1 (标定型) ----
-    in_vehicle = hav / V_BUS_KMH * 60.0
-    transfer = BUS_TRANSFER_PER_10KM * np.clip(hav - 4.0, 0, None) / 10.0  # 4km 起算换乘
-    t_transit = (BUS_ACCESS_EGRESS_MIN + BUS_WAIT_MIN + in_vehicle + transfer).astype(np.float32)
+    # ---- 公交 v2 (刷卡实测标定, 含地铁) ----
+    # 刷卡 20190506 真实行程时间距离档中位 (build_beijing_transit_od.py 实测):
+    #   0-2km 5.7 / 2-5km 14.4 / 5-10km 26.1 / 10-20km 41.4 / 20+km 65.3 min
+    # 用档中位距离→时间插值 (远超我原代理: 原 5-10km=52min, 实测仅 26min)
+    SC_KM = np.array([1.0, 3.5, 7.5, 15.0, 30.0])
+    SC_MIN = np.array([5.7, 14.4, 26.1, 41.4, 65.3])
+    t_transit = np.interp(hav, SC_KM, SC_MIN).astype(np.float32)  # 端点外用边界值
 
     # ---- mode_share 先验 (距离感知, 顺序 = [car, transit, walk]) ----
     # walk: 短程主导, 指数衰减; >阈值置 0
