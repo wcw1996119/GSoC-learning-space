@@ -161,8 +161,8 @@ def main():
     ap.add_argument("--anchor-weight", type=float, default=1.0)
     ap.add_argument("--anchor-share", action="store_true",
                     help="整体方式份额矩(北京交通发展年报通勤结构), 钉mode份额水平")
-    ap.add_argument("--share-target", default="0.35,0.40,0.25",
-                    help="目标 [车,公交,步行+自行车], 默认北京通勤 (公交40/车35/慢行25)")
+    ap.add_argument("--share-target", default="0.21,0.35,0.44",
+                    help="目标 [车,公交,步行+自行车], 默认=2015 1%微观北京通勤 ground truth (车21/公交35/慢行44)")
     ap.add_argument("--share-weight", type=float, default=2.0)
     ap.add_argument("--out", default=str(ROOT / "evaluation_outputs" / "v4_run.pt"))
     args = ap.parse_args()
