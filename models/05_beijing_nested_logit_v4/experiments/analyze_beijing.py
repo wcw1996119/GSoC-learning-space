@@ -67,6 +67,12 @@ def main():
     mode_flow = np.zeros(3); tot_pred = 0.0
     sum_pred_km = sum_obs_km = sum_pred = sum_obs = 0.0
     self_pred = self_obs = 0.0
+    # 距离档 / 收入档 拆分 (CPC = 2Σmin/(Σpred+Σobs), val 边)
+    BANDS = [(0,2),(2,5),(5,10),(10,20),(20,40)]
+    band_min = np.zeros(len(BANDS)); band_pd = np.zeros(len(BANDS)); band_ob = np.zeros(len(BANDS))
+    band_mode = np.zeros((len(BANDS),3)); band_w = np.zeros(len(BANDS))
+    tier_min = np.zeros(3); tier_pd = np.zeros(3); tier_ob = np.zeros(3)
+    tier_props_all = data["tier_props"]
     with torch.no_grad():
         e_o = e_d = None
         if enc is not None:
@@ -94,6 +100,21 @@ def main():
                 sum_pred_km += float((pred*hav).sum()); sum_pred += float(pred.sum())
                 sum_obs_km += float((fp*hav).sum()); sum_obs += float(fp.sum())
                 self_pred += float(pred[is_self].sum()); self_obs += float(fp[is_self].sum())
+                # 拆分 (只在 val 边算 CPC)
+                vm = data["edge_is_val"][e0:e1]
+                havn = hav.numpy(); predn = pred.numpy(); fpn = fp.numpy(); vmn = vm.numpy()
+                mn = np.minimum(predn, fpn)
+                for bi,(lo,hi) in enumerate(BANDS):
+                    bmask = (havn>=lo)&(havn<hi)
+                    vb = bmask & vmn
+                    band_min[bi]+=mn[vb].sum(); band_pd[bi]+=predn[vb].sum(); band_ob[bi]+=fpn[vb].sum()
+                    Pmn = Pm.numpy()
+                    for m in range(3): band_mode[bi,m]+=float((Pmn[m][bmask]*predn[bmask]).sum())
+                    band_w[bi]+=float(predn[bmask].sum())
+                tier_o = tier_props_all[o].argmax(1).numpy()
+                for ti in range(3):
+                    vt = (tier_o==ti) & vmn
+                    tier_min[ti]+=mn[vt].sum(); tier_pd[ti]+=predn[vt].sum(); tier_ob[ti]+=fpn[vt].sum()
 
     ms = mode_flow / max(tot_pred, 1)
     print("\n--- 2. 模型隐含方式分担 (流量加权) ---")
@@ -103,6 +124,17 @@ def main():
     print(f"  观测 {sum_obs_km/max(sum_obs,1):.2f}  vs  预测 {sum_pred_km/max(sum_pred,1):.2f}")
     print("\n--- 4. 自连边(同格通勤)占比 ---")
     print(f"  观测 {self_obs/max(sum_obs,1)*100:.1f}%  vs  预测 {self_pred/max(sum_pred,1)*100:.1f}%")
+
+    print("\n--- 5. CPC + 方式分担 按距离档 (val 边) ---")
+    for bi,(lo,hi) in enumerate(BANDS):
+        cpc = 2*band_min[bi]/max(band_pd[bi]+band_ob[bi],1)
+        ms_b = band_mode[bi]/max(band_w[bi],1)
+        print(f"  {lo:2d}-{hi:2d}km: CPC {cpc:.3f}  方式[车{ms_b[0]:.2f} 公交{ms_b[1]:.2f} 步行{ms_b[2]:.2f}]")
+
+    print("\n--- 6. CPC 按收入档 (val 边, 出发地主档) ---")
+    for ti,nm in enumerate(["低","中","高"]):
+        cpc = 2*tier_min[ti]/max(tier_pd[ti]+tier_ob[ti],1)
+        print(f"  {nm}收入: CPC {cpc:.3f}")
 
 
 if __name__ == "__main__":
