@@ -201,7 +201,8 @@ class BeijingNestedHead(nn.Module):
         if v_nn is not None and self.gnn_mode == "residual":
             nn_term = self.w_nn * v_nn
 
-        logP_c_list, log_pi_list = [], []
+        # 逐类增量 logaddexp (不堆 (E,C) stack, 省显存)
+        acc = None
         for c in range(self.n_classes):
             if self.use_soc_mixture:
                 k_tier, soc = c // self.S, c % self.S
@@ -223,12 +224,9 @@ class BeijingNestedHead(nn.Module):
             if self.use_consideration:
                 V_dest = V_dest + self._consideration_mask(k_tier, soc, batch)
             lse = segment_logsumexp(V_dest, seg_id, num_seg)
-            logP_c_list.append(V_dest - lse[seg_id])
-            log_pi_list.append(log_pi_c)
-
-        logP_c = torch.stack(logP_c_list, 1)       # (E,C)
-        log_pi = torch.stack(log_pi_list, 1)       # (E,C)
-        return torch.logsumexp(log_pi + logP_c, 1)  # (E,)
+            term = log_pi_c + (V_dest - lse[seg_id])     # (E,)
+            acc = term if acc is None else torch.logaddexp(acc, term)
+        return acc                                        # (E,)
 
     def param_report(self):
         with torch.no_grad():

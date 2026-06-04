@@ -81,6 +81,22 @@ def main():
                       f"setsid bash run_batch.sh </dev/null > logs/v4_batch.log 2>&1 & echo launched PID $!")
             _, o, e = c.exec_command(f"bash -lc '{launch}'")
             print("   " + o.read().decode("utf-8", "replace").strip())
+        elif action == "socfull":
+            # 重传改后的代码 (省显存版 forward), expandable_segments 抗碎片, setsid 后台
+            sftp = c.open_sftp()
+            for f in ("experiments/beijing_model.py", "experiments/train_beijing.py"):
+                sftp.put(str(ROOT / f), f"{RDIR}/{f}")
+            sftp.close()
+            launch = (f"cd {RDIR} && export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True && "
+                      f"setsid python experiments/train_beijing.py --epochs 300 --device cuda --seed 0 "
+                      f"--use-nn --use-consideration --use-soc-mixture --gnn-mode residual "
+                      f"--lr 0.03 --origin-chunks 8 "
+                      f"--out evaluation_outputs/v4_socfull_s0.pt </dev/null > logs/v4_socfull.log 2>&1 & echo launched PID $!")
+            _, o, e = c.exec_command(f"bash -lc '{launch}'")
+            print("   " + o.read().decode("utf-8", "replace").strip())
+        elif action == "socstatus":
+            run(c, f"cd {RDIR} && tail -6 logs/v4_socfull.log 2>/dev/null; "
+                   f"echo ===gpu===; nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,noheader", tail=12)
         elif action == "status":
             run(c, f"cd {RDIR} && echo ===batchlog===; tail -14 logs/v4_batch.log 2>/dev/null; "
                    f"echo ===donept===; ls -1 evaluation_outputs/*.pt 2>/dev/null; "

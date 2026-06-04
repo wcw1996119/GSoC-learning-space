@@ -1,11 +1,13 @@
-"""北京 v4 稀疏 trainer (Phase 3 + 2b 完整版)
+"""北京 v4 稀疏 trainer (Phase 3 + 2b 完整版, 支持 origin-chunking)
 
 数据: data/processed/{beijing_edges,beijing_modes,beijing_aux,beijing_grid}.npz
 模型: beijing_model.{BeijingNestedHead, BeijingPairEncoder}
 
-损失: 4 时段加权 CE, 逐时段 backward (省显存)。CPC: edge 级 Sørensen。
+损失: 4 时段加权 CE, 逐时段+逐chunk backward (省显存)。CPC: edge 级 Sørensen。
+--origin-chunks G: 出发地切 G 块, 每块单独前向/backward (segment-softmax per-origin,
+  CSR 边连续 -> 分块精确无近似)。显存降到 1/G, soc 混合(21类)必用。
 功能 flag: --use-nn --use-consideration --use-soc-mixture --gnn-mode --no-self-loop
-smoke: --smoke-cells K 取 jobs 前 K 格子子图 (本地 CPU 验证语义)。
+smoke: --smoke-cells K 取 jobs 前 K 格子子图。
 """
 import argparse, time, sys
 from pathlib import Path
@@ -58,26 +60,27 @@ def build_data(args):
         t_walk, t_transit, flow = t_walk[em], t_transit[em], flow[em]
         print(f"  smoke: {args.smoke_cells} cells -> {em.sum():,} edges (of {len(em):,})")
 
-    origin_ids, inv = np.unique(o, return_inverse=True)
-    seg_id = inv.astype(np.int64); O = len(origin_ids)
+    # CSR: 边已按 o 排序; seg_id + seg_starts (各出发地首边)
+    origin_ids, seg_starts = np.unique(o, return_index=True)
+    O = len(origin_ids)
+    seg_id = np.repeat(np.arange(O), np.diff(np.append(seg_starts, len(o)))).astype(np.int64)
+    seg_starts = np.append(seg_starts, len(o)).astype(np.int64)   # (O+1,)
     t_car = {0: t_obs, 1: t_obs, 2: (0.5*(t_obs+t_ff)).astype(np.float32), 3: t_ff}
 
-    # NN 节点特征 (全 N 格) + kNN 图
     Xnode = np.stack([log_M, log_D, income, log_W, zlog(jobs), zlog(residents),
                       (xy[:,0]/1e5), (xy[:,1]/1e5)], axis=1).astype(np.float32)
     edge_index = None
     if args.use_nn:
         from scipy.spatial import cKDTree
         k = 8
-        _, nn = cKDTree(xy).query(xy, k=k+1)   # 含自身
+        _, nn = cKDTree(xy).query(xy, k=k+1)
         src = np.repeat(np.arange(N), k); dst = nn[:, 1:].reshape(-1)
-        ei = np.stack([np.concatenate([src, dst]), np.concatenate([dst, src])], axis=0)  # 双向
-        edge_index = ei.astype(np.int64)
+        edge_index = np.stack([np.concatenate([src, dst]), np.concatenate([dst, src])], axis=0).astype(np.int64)
 
     dev = args.device
     to = lambda a: torch.from_numpy(np.ascontiguousarray(a)).to(dev)
     data = dict(
-        o=to(o), d=to(d), seg_id=to(seg_id), num_seg=O, N=N,
+        o=to(o), d=to(d), seg_id=to(seg_id), seg_starts=seg_starts, num_seg=O, N=N,
         t_obs=to(t_obs), t_ff=to(t_ff), t_walk=to(t_walk), t_transit=to(t_transit),
         t_car={p: to(v) for p, v in t_car.items()}, log_d=to(log_d), match=to(match), flow=to(flow),
         log_M=to(log_M), log_W=to(log_W), log_D=to(log_D), income=to(income),
@@ -91,16 +94,17 @@ def build_data(args):
     return data
 
 
-def make_batch(data, period, use_soc):
-    o, d = data["o"], data["d"]
-    t_car = data["t_car"][period]
-    t_min = torch.minimum(torch.minimum(t_car, data["t_transit"]), data["t_walk"])
+def make_batch(data, period, use_soc, e0, e1, seg_base, n_seg):
+    o = data["o"][e0:e1]; d = data["d"][e0:e1]
+    t_car = data["t_car"][period][e0:e1]
+    t_transit = data["t_transit"][e0:e1]; t_walk = data["t_walk"][e0:e1]
+    t_min = torch.minimum(torch.minimum(t_car, t_transit), t_walk)
     b = dict(
-        seg_id=data["seg_id"], num_seg=data["num_seg"],
-        t_car=t_car, t_transit=data["t_transit"], t_walk=data["t_walk"],
-        log_d=data["log_d"], t_min=t_min,
+        seg_id=data["seg_id"][e0:e1] - seg_base, num_seg=n_seg,
+        t_car=t_car, t_transit=t_transit, t_walk=t_walk,
+        log_d=data["log_d"][e0:e1], t_min=t_min,
         log_M_d=data["log_M"][d], log_W_d=data["log_W"][d], log_D_d=data["log_D"][d],
-        match=data["match"], income_o=data["income"][o], tier_props_o=data["tier_props"][o],
+        match=data["match"][e0:e1], income_o=data["income"][o], tier_props_o=data["tier_props"][o],
         district_o=data["district"][o], is_self=(o == d), period=period,
     )
     if use_soc:
@@ -109,13 +113,15 @@ def make_batch(data, period, use_soc):
     return b
 
 
-def cpc_metric(logP, flow_p, seg_id, num_seg, mask):
-    with torch.no_grad():
-        origin_tot = segment_sum(flow_p, seg_id, num_seg)
-        pred = logP.exp() * origin_tot[seg_id]
-        num = 2.0 * torch.minimum(pred[mask], flow_p[mask]).sum()
-        den = (pred[mask].sum() + flow_p[mask].sum()).clamp_min(1.0)
-        return float(num / den)
+def chunk_ranges(seg_starts, O, G):
+    """G 块出发地 -> [(e0,e1,seg_base,n_seg), ...]"""
+    bounds = np.linspace(0, O, G + 1).astype(int)
+    out = []
+    for g in range(G):
+        a, bb = bounds[g], bounds[g + 1]
+        if bb <= a: continue
+        out.append((int(seg_starts[a]), int(seg_starts[bb]), int(a), int(bb - a)))
+    return out
 
 
 def main():
@@ -132,16 +138,20 @@ def main():
     ap.add_argument("--use-soc-mixture", action="store_true")
     ap.add_argument("--gnn-mode", default="residual")
     ap.add_argument("--residual-scale-init", type=float, default=0.1)
+    ap.add_argument("--origin-chunks", type=int, default=1)
     ap.add_argument("--out", default=str(ROOT / "evaluation_outputs" / "v4_run.pt"))
     args = ap.parse_args()
 
     torch.manual_seed(args.seed); np.random.seed(args.seed)
     flags = [f for f, on in [("nn", args.use_nn), ("filter", args.use_consideration),
                              ("soc", args.use_soc_mixture), ("self_loop", not args.no_self_loop)] if on]
-    print(f"device={args.device} seed={args.seed} epochs={args.epochs} feat=[{','.join(flags)}] gnn={args.gnn_mode}")
+    print(f"device={args.device} seed={args.seed} epochs={args.epochs} feat=[{','.join(flags)}] "
+          f"gnn={args.gnn_mode} chunks={args.origin_chunks}")
     t0 = time.time()
     data = build_data(args)
-    print(f"  data built {time.time()-t0:.1f}s  edges={data['o'].shape[0]:,} origins={data['num_seg']:,}")
+    O = data["num_seg"]
+    chunks = chunk_ranges(data["seg_starts"], O, args.origin_chunks)
+    print(f"  data built {time.time()-t0:.1f}s  edges={data['o'].shape[0]:,} origins={O:,} chunks={len(chunks)}")
 
     head = BeijingNestedHead(n_districts=16, use_self_loop=not args.no_self_loop,
                              use_consideration=args.use_consideration,
@@ -155,35 +165,52 @@ def main():
         params += list(enc.parameters())
     opt = torch.optim.Adam(params, lr=args.lr)
 
-    flow_all = data["flow"]; train_m, val_m = data["edge_is_train"], data["edge_is_val"]
+    flow_all = data["flow"]; train_m = data["edge_is_train"]
     flow_train_sum = (flow_all * train_m.unsqueeze(1)).sum().clamp_min(1.0)
     best_cpc = -1.0
+    n_back = len(chunks) * 4   # 总 backward 次数 (retain encoder 图到最后一次)
 
     for ep in range(args.epochs):
         head.train()
         if enc: enc.train()
         opt.zero_grad()
-        # NN 节点嵌入 (时段无关, 每 epoch 一次)
         e_o = e_d = None
         if enc is not None:
             e_o, e_d = enc.node_embed(data["Xnode"], data["edge_index"], data["N"])
-        loss_val = 0.0; logP_periods = []
-        for p in range(4):
-            batch = make_batch(data, p, args.use_soc_mixture)
-            v_nn = enc.edge_vnn(e_o, e_d, data["o"], data["d"]) if enc is not None else None
-            logP = head(batch, v_nn=v_nn)
-            loss_p = -(flow_all[:, p] * train_m * logP).sum() / flow_train_sum
-            loss_p.backward(retain_graph=(p < 3) and enc is not None)
-            loss_val += loss_p.item()
-            logP_periods.append(logP.detach())
+        loss_val = 0.0; bi = 0
+        for (e0, e1, sb, ns) in chunks:
+            for p in range(4):
+                batch = make_batch(data, p, args.use_soc_mixture, e0, e1, sb, ns)
+                v_nn = enc.edge_vnn(e_o, e_d, data["o"][e0:e1], data["d"][e0:e1]) if enc is not None else None
+                logP = head(batch, v_nn=v_nn)
+                loss_p = -(flow_all[e0:e1, p] * train_m[e0:e1] * logP).sum() / flow_train_sum
+                bi += 1
+                loss_p.backward(retain_graph=(enc is not None) and (bi < n_back))
+                loss_val += loss_p.item()
         torch.nn.utils.clip_grad_norm_(params, 5.0)
         opt.step()
 
         if ep % 10 == 0 or ep == args.epochs - 1:
             head.eval()
-            cpcs = [cpc_metric(logP_periods[p], flow_all[:, p], data["seg_id"], data["num_seg"], val_m)
-                    for p in range(4)]
-            w = [float((flow_all[:, p] * val_m).sum()) for p in range(4)]
+            if enc: enc.eval()
+            num = [0.0]*4; den = [0.0]*4
+            with torch.no_grad():
+                e_o2 = e_d2 = None
+                if enc is not None:
+                    e_o2, e_d2 = enc.node_embed(data["Xnode"], data["edge_index"], data["N"])
+                for (e0, e1, sb, ns) in chunks:
+                    vm = data["edge_is_val"][e0:e1]
+                    for p in range(4):
+                        batch = make_batch(data, p, args.use_soc_mixture, e0, e1, sb, ns)
+                        v_nn = enc.edge_vnn(e_o2, e_d2, data["o"][e0:e1], data["d"][e0:e1]) if enc is not None else None
+                        logP = head(batch, v_nn=v_nn)
+                        fp = flow_all[e0:e1, p]
+                        otot = segment_sum(fp, batch["seg_id"], ns)
+                        pred = logP.exp() * otot[batch["seg_id"]]
+                        num[p] += float(torch.minimum(pred[vm], fp[vm]).sum())
+                        den[p] += float((pred[vm].sum() + fp[vm].sum()))
+            cpcs = [2*num[p]/max(den[p], 1.0) for p in range(4)]
+            w = [float((flow_all[:, p] * data["edge_is_val"]).sum()) for p in range(4)]
             cpc_tot = sum(c*wi for c, wi in zip(cpcs, w)) / max(sum(w), 1)
             best_cpc = max(best_cpc, cpc_tot)
             pr = head.param_report()
