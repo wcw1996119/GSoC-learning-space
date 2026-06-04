@@ -1,0 +1,27 @@
+# ⚠ GOVERNANCE 红线: 北京手机信令及其派生数据 2026-07 前不出库不 commit。
+# 代码 (*.py / *.md) 可 commit; 任何北京数据/缓存/checkpoint 一律忽略。
+
+# 所有派生数据
+data/processed/
+data/raw/
+data/cache/
+
+# 数据文件类型 (北京 OD / 时间矩阵 / 职业 / 房价派生)
+*.npz
+*.npy
+*.parquet
+*.h5
+*.pt
+*.pth
+*.tar.gz
+*.tar
+*.zip
+
+# 评估/训练输出
+evaluation_outputs/
+*.log
+
+# 临时
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
