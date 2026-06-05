@@ -21,6 +21,7 @@ INCLUDE = [
     "data/processed/beijing_aux.npz",
     "data/processed/beijing_income.npz",
     "data/processed/beijing_occupation.npz",
+    "data/processed/beijing_transit_od.npz",   # 刷卡锚需要
     "AUTODL_RUN.md",
 ]
 
