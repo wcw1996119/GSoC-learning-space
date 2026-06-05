@@ -153,6 +153,8 @@ def main():
     ap.add_argument("--use-nn", action="store_true")
     ap.add_argument("--use-consideration", action="store_true")
     ap.add_argument("--use-soc-mixture", action="store_true")
+    ap.add_argument("--typed-mass-occ", action="store_true",
+                    help="引力作用在本职业岗位 M_j^o(不混总数, 需 soc-mixture + cell级demand)")
     ap.add_argument("--gnn-mode", default="residual")
     ap.add_argument("--residual-scale-init", type=float, default=0.1)
     ap.add_argument("--origin-chunks", type=int, default=1)
@@ -184,7 +186,8 @@ def main():
                              use_consideration=args.use_consideration,
                              use_soc_mixture=args.use_soc_mixture,
                              gnn_mode=args.gnn_mode,
-                             residual_scale_init=args.residual_scale_init).to(args.device)
+                             residual_scale_init=args.residual_scale_init,
+                             use_typed_mass=args.typed_mass_occ).to(args.device)
     params = list(head.parameters())
     enc = None
     if args.use_nn:

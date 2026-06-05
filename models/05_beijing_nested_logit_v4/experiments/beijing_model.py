@@ -84,13 +84,14 @@ class BeijingPairEncoder(nn.Module):
 class BeijingNestedHead(nn.Module):
     def __init__(self, n_modes=3, n_tiers=3, n_soc=7, n_districts=16, n_periods=4,
                  use_self_loop=True, use_consideration=False, use_soc_mixture=False,
-                 gnn_mode="residual", residual_scale_init=0.1):
+                 gnn_mode="residual", residual_scale_init=0.1, use_typed_mass=False):
         super().__init__()
         self.M, self.K, self.S = n_modes, n_tiers, n_soc
         self.n_districts, self.n_periods = n_districts, n_periods
         self.use_self_loop = use_self_loop
         self.use_consideration = use_consideration
         self.use_soc_mixture = use_soc_mixture
+        self.use_typed_mass = use_typed_mass
         self.gnn_mode = gnn_mode
         self.lam_eps = 0.05
         self.n_classes = (n_tiers * n_soc) if use_soc_mixture else n_tiers
@@ -225,7 +226,11 @@ class BeijingNestedHead(nn.Module):
                 delta_c = dl[c]
                 log_pi_c = torch.log(tier_props_o[:, k_tier].clamp_min(1e-9))
 
-            V_M = gM[k_tier] * log_M_d + delta_c * match_sig
+            if self.use_typed_mass and self.use_soc_mixture:
+                # 引力作用在"本职业岗位"M_j^o = 总岗位×职业需求 (不混总数, 微观验证 δ≈γ)
+                V_M = gM[k_tier] * (log_M_d + torch.log(match_sig.clamp_min(1e-6)))
+            else:
+                V_M = gM[k_tier] * log_M_d + delta_c * match_sig
             V_other = aW[k_tier] * log_W_d + nD[k_tier] * log_D_d
             V_dest = V_M + V_other + lam * log_iv
             if boost is not None: V_dest = V_dest + boost
