@@ -75,15 +75,22 @@ def main():
         print(f"      xj  : {xj_cols}")
         raise SystemExit("区名对齐失败, 终止")
 
-    # 广播到格子
+    # soc_props(出发地居民职业)只有区级 -> 广播 (居住职业本就区级, 正确)
     soc_props = np.zeros((N, n_occ), dtype=np.float64)
-    grid_industry = np.zeros((N, n_ind), dtype=np.float64)
     for i in range(N):
-        d = district_names[district_idx[i]]
-        soc_props[i] = occ_by_dist[d]
-        grid_industry[i] = ind_prop_by_dist[d]
-    # 归一 soc_props
+        soc_props[i] = occ_by_dist[district_names[district_idx[i]]]
     soc_props = soc_props / soc_props.sum(axis=1, keepdims=True).clip(min=1e-9)
+
+    # grid_industry(目的地行业): 优先用 cell 级(2008街道, finer geo), 否则区级广播
+    cell_ind_path = PROC / "beijing_cell_industry.npz"
+    if cell_ind_path.exists():
+        grid_industry = np.load(cell_ind_path)["cell_industry_prop"].astype(np.float64)  # (N,19)
+        print(f"  [finer-geo] grid_industry 用 cell 级 (2008街道, beijing_cell_industry.npz)")
+    else:
+        grid_industry = np.zeros((N, n_ind), dtype=np.float64)
+        for i in range(N):
+            grid_industry[i] = ind_prop_by_dist[district_names[district_idx[i]]]
+        print(f"  grid_industry 用区级广播")
 
     # demand_share = norm(grid_industry @ epsilon^T)
     expected_occ = grid_industry @ epsilon.T          # (N,7)
