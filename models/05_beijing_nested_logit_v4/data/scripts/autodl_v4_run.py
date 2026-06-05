@@ -43,7 +43,32 @@ def main():
     action = sys.argv[1] if len(sys.argv) > 1 else "upload"
     c = connect()
     try:
-        if action == "upload":
+        if action == "resume":
+            # 断点续传: 从远程已有字节接着写 (笔记本断网后用)
+            rb = f"{RBASE}/{BUNDLE.name}"
+            sftp = c.open_sftp()
+            try: rsize = sftp.stat(rb).st_size
+            except Exception: rsize = 0
+            lsize = BUNDLE.stat().st_size
+            off = max(0, rsize - (1 << 20))   # 回退1MB覆盖可能的半截块
+            print(f"[resume] 远程已有 {rsize/1e6:.0f}MB / {lsize/1e6:.0f}MB, 从 {off/1e6:.0f}MB 续传")
+            if rsize >= lsize:
+                print("  已完整, 跳过续传")
+            else:
+                import time as _t; t0 = _t.time()
+                rf = sftp.open(rb, "r+b"); rf.seek(off)
+                with open(BUNDLE, "rb") as f:
+                    f.seek(off)
+                    while True:
+                        ch = f.read(1 << 20)
+                        if not ch: break
+                        rf.write(ch)
+                rf.close(); print(f"  续传完成 {_t.time()-t0:.0f}s")
+            sftp.close()
+            run(c, f"cd {RBASE} && rm -rf v4_beijing && tar xzf {BUNDLE.name} && "
+                   f"ls v4_beijing/data/processed | head", tail=12)
+            run(c, "pip install -q torch numpy scipy 2>&1 | tail -2", tail=3)
+        elif action == "upload":
             run(c, f"mkdir -p {RBASE}", tail=2)
             sftp = c.open_sftp()
             rb = f"{RBASE}/{BUNDLE.name}"
