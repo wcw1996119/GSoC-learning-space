@@ -167,9 +167,9 @@ def main():
                     help="目标 [车,公交,步行+自行车], 默认=2015 1%微观北京通勤 ground truth (车21/公交35/慢行44)")
     ap.add_argument("--share-weight", type=float, default=2.0)
     ap.add_argument("--out", default=str(ROOT / "evaluation_outputs" / "v4_run.pt"))
+    ap.add_argument("--anchor-sample", type=int, default=2000000,
+                    help="锚在多少条边的采样上算(脱离chunks=1, 兼容chunking/24GB)")
     args = ap.parse_args()
-    if args.anchor_transit or args.anchor_share:
-        assert args.origin_chunks == 1, "--anchor-* 需 --origin-chunks 1 (全局归一化)"
 
     torch.manual_seed(args.seed); np.random.seed(args.seed)
     flags = [f for f, on in [("nn", args.use_nn), ("filter", args.use_consideration),
@@ -181,6 +181,22 @@ def main():
     O = data["num_seg"]
     chunks = chunk_ranges(data["seg_starts"], O, args.origin_chunks)
     print(f"  data built {time.time()-t0:.1f}s  edges={data['o'].shape[0]:,} origins={O:,} chunks={len(chunks)}")
+
+    # 锚采样 (脱离 chunks=1: 在固定边采样上算 mode 锚, 兼容 chunking)
+    anchor_on = args.anchor_transit or args.anchor_share
+    asb = None
+    if anchor_on:
+        E = data["o"].shape[0]
+        si = torch.randperm(E, device="cpu")[:min(args.anchor_sample, E)].to(args.device)
+        o_s, d_s = data["o"][si], data["d"][si]
+        asb = dict(
+            si=si, log_d=data["log_d"][si], income_o=data["income"][o_s],
+            t_car=data["t_car"][0][si], t_transit=data["t_transit"][si], t_walk=data["t_walk"][si],
+            flow_tot=data["flow_tot"][si],
+            obs_transit=(data["obs_transit"][si] if data.get("obs_transit") is not None else None),
+            tgt=torch.tensor([float(x) for x in args.share_target.split(",")], device=args.device),
+        )
+        print(f"  anchor 采样 {len(si):,} 边 (transit={args.anchor_transit} share={args.anchor_share})")
 
     head = BeijingNestedHead(n_districts=16, use_self_loop=not args.no_self_loop,
                              use_consideration=args.use_consideration,
@@ -214,23 +230,24 @@ def main():
                 v_nn = enc.edge_vnn(e_o, e_d, data["o"][e0:e1], data["d"][e0:e1]) if enc is not None else None
                 logP = head(batch, v_nn=v_nn)
                 loss_p = -(flow_all[e0:e1, p] * train_m[e0:e1] * logP).sum() / flow_train_sum
-                # 刷卡公交锚 (Ben-Akiva-Morikawa): 模型预测公交分布 对齐 刷卡公交OD分布
-                if (args.anchor_transit or args.anchor_share) and p == 0:
-                    Pm = torch.softmax(head.mode_logits(batch), 0)            # (3,E)
-                    ftot = data["flow_tot"]
-                    if args.anchor_transit:
-                        pred_tr = (Pm[1] * ftot).clamp_min(1e-12)
-                        pred_dist = pred_tr / pred_tr.sum()
-                        obs = data["obs_transit"]; obs_dist = obs / obs.sum()
-                        loss_p = loss_p + args.anchor_weight * (-(obs_dist * torch.log(pred_dist)).sum())
-                    if args.anchor_share:
-                        ms = (Pm * ftot).sum(1) / ftot.sum()                  # (3,) 流量加权方式份额
-                        tgt = torch.tensor([float(x) for x in args.share_target.split(",")],
-                                           device=ms.device)
-                        loss_p = loss_p + args.share_weight * (-(tgt * torch.log(ms.clamp_min(1e-9))).sum())
                 bi += 1
+                # 锚是独立 forward(asb)独立图, 不需保留 chunk 图; 只为 encoder(跨chunk共享)retain
                 loss_p.backward(retain_graph=(enc is not None) and (bi < n_back))
                 loss_val += loss_p.item()
+        # 锚 (采样, Ben-Akiva-Morikawa): mode_logits 不依赖 NN/segment, 单独 backward
+        if anchor_on:
+            ml = head.mode_logits(asb)                       # (3, n_sample)
+            Pm = torch.softmax(ml, 0)
+            a_loss = 0.0
+            if args.anchor_transit and asb["obs_transit"] is not None:
+                pred = (Pm[1] * asb["flow_tot"]).clamp_min(1e-12); pred = pred / pred.sum()
+                obs = asb["obs_transit"]; obs = obs / obs.sum().clamp_min(1e-9)
+                a_loss = a_loss + args.anchor_weight * (-(obs * torch.log(pred)).sum())
+            if args.anchor_share:
+                ms = (Pm * asb["flow_tot"]).sum(1) / asb["flow_tot"].sum()
+                a_loss = a_loss + args.share_weight * (-(asb["tgt"] * torch.log(ms.clamp_min(1e-9))).sum())
+            a_loss.backward()
+            loss_val += float(a_loss)
         torch.nn.utils.clip_grad_norm_(params, 5.0)
         opt.step()
 

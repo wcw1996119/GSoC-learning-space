@@ -35,6 +35,23 @@ python experiments/train_beijing.py --epochs 300 --device cuda --seed 0 \
     --out evaluation_outputs/v4_socfull_s0.pt
 ```
 
+**⭐⭐ 完整模型 (mode双锚 + typed-mass occupation + NN + 筛选, 24GB chunks=16)**:
+```
+python experiments/train_beijing.py --epochs 300 --device cuda --seed 0 \
+    --use-nn --use-consideration --use-soc-mixture --typed-mass-occ \
+    --anchor-transit --anchor-share --gnn-mode residual \
+    --origin-chunks 16 --lr 0.03 --out evaluation_outputs/v4_full_anchored_s0.pt
+```
+(锚已改采样版, 兼容 chunking, 任意GPU可跑; mode→[车.21公交.35步.44], occupation typed-mass cell级)
+
+**⭐ typed-mass 职业模型 (finer-geo cell级demand, 你的formulation, 24GB chunks够)**:
+```
+python experiments/train_beijing.py --epochs 300 --device cuda --seed 0 \
+    --use-nn --use-consideration --use-soc-mixture --typed-mass-occ --gnn-mode residual \
+    --origin-chunks 16 --lr 0.03 --out evaluation_outputs/v4_typedmass_s0.pt
+```
+(aux 已含 cell级职业需求: 海淀中关村/望京/亦庄集聚; --typed-mass-occ = 引力作用在本职业岗位)
+
 **3-seed**: 上面每条改 `--seed 0/1/2`, 取 CPC mean±std。
 
 ## 关注指标 (拉回本地分析)
