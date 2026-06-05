@@ -89,10 +89,10 @@ def main():
     np.savez_compressed(OUT, cell_industry_prop=cell_prop.astype(np.float32),
                         ind_letters=st["ind_letters"])
     print(f"[OK] {OUT}  cell_industry_prop {cell_prop.shape}")
-    # 验证: 海淀中关村一带的格子 G(信息)占比 vs 全市
-    IL=[str(x) for x in st["ind_letters"]]; gi=IL.index("G")
-    print(f"  G(信息)占比: 全市cell均值 {cell_prop[:,gi].mean():.3f}, "
-          f"海淀cell均值 {cell_prop[didx==name2idx['海淀'],gi].mean():.3f}")
+    # 验证: 海淀中关村一带的格子 信息业(I=idx8 规范顺序)占比 vs 全市
+    gi = 8  # 信息传输 (规范xj顺序)
+    print(f"  信息业(I)占比: 全市cell均值 {cell_prop[:,gi].mean():.3f}, "
+          f"海淀cell均值 {cell_prop[didx==name2idx['海淀'],gi].mean():.3f} (应海淀>>全市)")
     # 唯一行数 (>16 说明真到街道级了)
     print(f"  cell行业构成唯一行数 {len(np.unique(cell_prop.round(5),axis=0))} (>16=突破区级广播)")
 

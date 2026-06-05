@@ -22,25 +22,31 @@ CODE2NAME = {"110101":"东城","110102":"西城","110103":"东城","110104":"西
              "110106":"丰台","110107":"石景山","110108":"海淀","110109":"门头沟","110111":"房山",
              "110112":"通州","110113":"顺义","110114":"昌平","110115":"大兴","110116":"怀柔",
              "110117":"平谷","110228":"密云","110229":"延庆"}
+# ⚠ 对齐到 xj/epsilon 的规范顺序(GB-2011 标签): A农林牧渔 B采矿 C制造 D电力 E建筑
+#   F批发零售 G交通运输 H住宿餐饮 I信息传输 J金融 K房地产 L租赁商务 M科研 N水利环境
+#   O居民服务 P教育 Q卫生 R文化体育 S公共管理 (idx 0..18)
 IND_LETTERS = ['A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S']
 
-def cz2letter(cz):
-    # GB/T 4754-2002 (2008经普用此版), 区间经业务文字反推校准:
-    #   60电信/62软件=G, 63批发/65零售=H, 66住宿/67餐饮=I, 72房地产=K, 73-74租赁商务=L, 75科研=M, 84教育=P
+def cz2idx(cz):
+    # 2008经普=GB/T4754-2002, 按"语义"映到上面规范idx(非GB-2002字母位置!两版F/G/H/I含义不同)
+    # 2008码语义(业务文字反推): 51-59交通 60-62信息 63-65批发零售 66-67住宿餐饮 68-71金融 72房地产 73-74租赁商务 75-78科研 84教育
     try: c = int(cz)
     except: return None
-    R=[(1,5,'A'),(6,12,'B'),(13,43,'C'),(44,46,'D'),(47,50,'E'),(51,59,'F'),(60,62,'G'),
-       (63,65,'H'),(66,67,'I'),(68,71,'J'),(72,72,'K'),(73,74,'L'),(75,78,'M'),(79,81,'N'),
-       (82,83,'O'),(84,84,'P'),(85,87,'Q'),(88,92,'R'),(93,97,'S')]
-    for a,b,L in R:
-        if a<=c<=b: return L
+    R=[(1,5,0),(6,12,1),(13,43,2),(44,46,3),(47,50,4),
+       (63,65,5),   # 批发零售 -> F(idx5)
+       (51,59,6),   # 交通运输 -> G(idx6)
+       (66,67,7),   # 住宿餐饮 -> H(idx7)
+       (60,62,8),   # 信息传输 -> I(idx8)
+       (68,71,9),(72,72,10),(73,74,11),(75,78,12),(79,81,13),
+       (82,83,14),(84,84,15),(85,87,16),(88,92,17),(93,97,18)]
+    for a,b,i in R:
+        if a<=c<=b: return i
     return None
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     g = np.load(GRID, allow_pickle=True)
     dn = [str(x) for x in g["district_names"]]; name2idx = {n:i for i,n in enumerate(dn)}
-    let2idx = {L:i for i,L in enumerate(IND_LETTERS)}
 
     d = pd.read_stata(DTA, columns=["国民经济行业代码","行政区划代码","街道办事处","年末从业人员合计_总计"])
     d["adm"] = d["行政区划代码"].astype(str).str.replace(r"\.0$","",regex=True)
@@ -49,8 +55,7 @@ def main():
     d["street"] = d["adm"].str[:9]
     d["didx"] = d["dcode"].map(lambda c: name2idx.get(CODE2NAME.get(c)))
     d = d[d["didx"].notna()].copy(); d["didx"] = d["didx"].astype(int)
-    d["indL"] = d["国民经济行业代码"].astype(str).str.replace(r"\.0$","",regex=True).str[:2].map(cz2letter)
-    d["iidx"] = d["indL"].map(let2idx)
+    d["iidx"] = d["国民经济行业代码"].astype(str).str.replace(r"\.0$","",regex=True).str[:2].map(cz2idx)
     d = d[d["iidx"].notna()].copy(); d["iidx"] = d["iidx"].astype(int)
     d["emp"] = pd.to_numeric(d["年末从业人员合计_总计"], errors="coerce").fillna(0).clip(lower=0)
 
