@@ -86,17 +86,16 @@ def main():
             script = (
                 "#!/bin/bash\n"
                 f"cd {RDIR}\n"
+                "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
                 "mkdir -p evaluation_outputs logs\n"
+                # 完整模型: mode双锚 + typed-mass occupation + NN + 筛选 + soc, 3-seed
                 "for s in 0 1 2; do\n"
                 "  python experiments/train_beijing.py --epochs 300 --device cuda --seed $s "
-                "--use-nn --use-consideration --gnn-mode residual --residual-scale-init 0.1 "
-                "--out evaluation_outputs/v4_full_s$s.pt\n"
+                "--use-nn --use-consideration --use-soc-mixture --typed-mass-occ "
+                "--anchor-transit --anchor-share --gnn-mode residual "
+                "--origin-chunks 16 --lr 0.03 "
+                "--out evaluation_outputs/v4_full_anchored_s$s.pt\n"
                 "done\n"
-                "python experiments/train_beijing.py --epochs 300 --device cuda --seed 0 "
-                "--out evaluation_outputs/v4_rum_s0.pt\n"
-                "python experiments/train_beijing.py --epochs 300 --device cuda --seed 0 "
-                "--use-nn --use-consideration --use-soc-mixture --gnn-mode residual "
-                "--out evaluation_outputs/v4_socfull_s0.pt\n"
                 "echo ALL_DONE\n"
             )
             import io

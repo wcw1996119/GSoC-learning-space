@@ -38,7 +38,8 @@ def main():
 
     head = BeijingNestedHead(n_districts=16, use_self_loop=not a.get("no_self_loop", False),
                              use_consideration=a.get("use_consideration", False),
-                             use_soc_mixture=use_soc, gnn_mode=a.get("gnn_mode", "residual"))
+                             use_soc_mixture=use_soc, gnn_mode=a.get("gnn_mode", "residual"),
+                             use_typed_mass=a.get("typed_mass_occ", False))
     head.load_state_dict(ck["head_state"]); head.eval()
     enc = None
     if a.get("use_nn", False):
