@@ -31,8 +31,10 @@ def main():
     print(f"=== {Path(args.pt).name}  (best CPC {ck['best_cpc']:.4f}) ===\n")
 
     # 重建数据 (复用 trainer build_data)
+    dyn = a.get("use_dynamic", False)
     da = SimpleNamespace(smoke_cells=0, use_nn=a.get("use_nn", False), seed=a["seed"],
-                         val_frac=a["val_frac"], device="cpu")
+                         val_frac=a["val_frac"], device="cpu",
+                         use_dynamic=dyn, road_graph=a.get("road_graph", False))
     data = build_data(da)
     use_soc = a.get("use_soc_mixture", False)
 
@@ -43,8 +45,21 @@ def main():
     head.load_state_dict(ck["head_state"]); head.eval()
     enc = None
     if a.get("use_nn", False):
-        enc = BeijingPairEncoder(in_dim=data["Xnode"].shape[1])
+        if dyn:
+            from beijing_model import BeijingDualBranchEncoder
+            enc = BeijingDualBranchEncoder(static_dim=data["Xnode"].shape[1],
+                                           dyn_dim=data["Xdyn"].shape[2])
+        else:
+            enc = BeijingPairEncoder(in_dim=data["Xnode"].shape[1])
         enc.load_state_dict(ck["enc_state"]); enc.eval()
+
+    def embed():
+        if enc is None: return None, None
+        ew = data.get("edge_weight")
+        if dyn:
+            return enc.node_embed(data["Xnode"], data["Xdyn"], data["edge_index"],
+                                  data["N"], data["hour2period"], edge_weight=ew)
+        return enc.node_embed(data["Xnode"], data["edge_index"], data["N"], edge_weight=ew)
 
     # ---- 1. 参数解读 ----
     pr = head.param_report()
@@ -75,9 +90,7 @@ def main():
     tier_min = np.zeros(3); tier_pd = np.zeros(3); tier_ob = np.zeros(3)
     tier_props_all = data["tier_props"]
     with torch.no_grad():
-        e_o = e_d = None
-        if enc is not None:
-            e_o, e_d = enc.node_embed(data["Xnode"], data["edge_index"], data["N"])
+        e_o, e_d = embed()
         for (e0, e1, sb, ns) in chunks:
             o = data["o"][e0:e1]; d = data["d"][e0:e1]
             hav = (data["hav_km"][e0:e1] if "hav_km" in data else torch.exp(data["log_d"][e0:e1]))
@@ -85,7 +98,8 @@ def main():
             inc_o = data["income"][o]
             for p in range(4):
                 batch = make_batch(data, p, use_soc, e0, e1, sb, ns)
-                v_nn = enc.edge_vnn(e_o, e_d, o, d) if enc is not None else None
+                v_nn = (enc.edge_vnn(e_o, e_d, p, o, d) if dyn else enc.edge_vnn(e_o, e_d, o, d)) \
+                       if enc is not None else None
                 logP = head(batch, v_nn=v_nn)
                 fp = data["flow"][e0:e1, p]
                 otot = segment_sum(fp, batch["seg_id"], ns)

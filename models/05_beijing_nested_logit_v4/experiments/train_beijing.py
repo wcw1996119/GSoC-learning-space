@@ -46,9 +46,13 @@ def build_data(args):
     log_M = aux["log_M_z"].astype(np.float32); log_W = aux["log_W_z"].astype(np.float32)
     log_D = aux["log_D_z"].astype(np.float32); income = aux["income_z"].astype(np.float32)
     tier_props = aux["income_tier_props"].astype(np.float32)
+    if getattr(args, "use_education", False):   # 教育替收入: 异质维度换成教育档(信号干净可锚)
+        tier_props = np.load(PROC / "beijing_edu_hukou.npz")["education_tier_props"].astype(np.float32)
     match = aux["match"].astype(np.float32)
     soc_props = aux["soc_props"].astype(np.float32)
     demand_share = aux["demand_share"].astype(np.float32)
+    occ_mask = (np.load(PROC / "beijing_occ_mask.npz")["occ_mask"].astype(np.float32)
+                if getattr(args, "use_frozen_occ_mask", False) else None)
     district = grid["district_idx"].astype(np.int64)
     xy = grid["xy_m"].astype(np.float32)
     jobs = grid["jobs"]; residents = grid["residents"]
@@ -75,6 +79,20 @@ def build_data(args):
         print(f"  anchor: 刷卡公交命中 {int((obs_transit>0).sum()):,}/{len(o):,} edges, "
               f"覆盖公交出行 {obs_transit.sum()/tv.sum()*100:.0f}%")
 
+    # 微观 方式×距离 矩 (2015 1% 个体 mode+工作区 -> 区中心距离档分担; 钉 β_t 距离梯度)
+    modedist_band = None; modedist_target = None
+    if getattr(args, "anchor_mode_dist", False):
+        mm = np.load(PROC / "beijing_micro_moments.npz")
+        cent = mm["district_centroids"].astype(np.float64)        # (16,2) m, 跟 grid 16 区同序
+        dist_ub = mm["dist_bands"].astype(np.float64)             # 上界 km, 如 [1,5,15,100]
+        modedist_target = mm["mode_by_dist"].astype(np.float32)   # (nbands,3) [车,公交,步]
+        dd = np.linalg.norm(cent[district[o]] - cent[district[d]], axis=1) / 1000.0
+        modedist_band = np.clip(np.searchsorted(dist_ub, dd, side="right"),
+                                0, len(dist_ub) - 1).astype(np.int64)
+        t = modedist_target
+        print(f"  anchor mode×dist: {len(dist_ub)}档 target "
+              f"近[车{t[0,0]:.2f}公交{t[0,1]:.2f}步{t[0,2]:.2f}] 远[车{t[-1,0]:.2f}公交{t[-1,1]:.2f}步{t[-1,2]:.2f}]")
+
     # CSR: 边已按 o 排序; seg_id + seg_starts (各出发地首边)
     origin_ids, seg_starts = np.unique(o, return_index=True)
     O = len(origin_ids)
@@ -82,15 +100,38 @@ def build_data(args):
     seg_starts = np.append(seg_starts, len(o)).astype(np.int64)   # (O+1,)
     t_car = {0: t_obs, 1: t_obs, 2: (0.5*(t_obs+t_ff)).astype(np.float32), 3: t_ff}
 
-    Xnode = np.stack([log_M, log_D, income, log_W, zlog(jobs), zlog(residents),
-                      (xy[:,0]/1e5), (xy[:,1]/1e5)], axis=1).astype(np.float32)
-    edge_index = None
+    # NN 静态特征; --nn-exclude-jobs: 去掉岗位(log_M + zlog jobs), 让 NN 不见政策杠杆 -> 反事实不外推
+    if getattr(args, "nn_exclude_jobs", False):
+        nn_feats = [log_D, income, log_W, zlog(residents), (xy[:,0]/1e5), (xy[:,1]/1e5)]
+    else:
+        nn_feats = [log_M, log_D, income, log_W, zlog(jobs), zlog(residents), (xy[:,0]/1e5), (xy[:,1]/1e5)]
+    Xnode = np.stack(nn_feats, axis=1).astype(np.float32)
+    edge_index = None; edge_weight = None
     if args.use_nn:
-        from scipy.spatial import cKDTree
-        k = 8
-        _, nn = cKDTree(xy).query(xy, k=k+1)
-        src = np.repeat(np.arange(N), k); dst = nn[:, 1:].reshape(-1)
-        edge_index = np.stack([np.concatenate([src, dst]), np.concatenate([dst, src])], axis=0).astype(np.int64)
+        if getattr(args, "road_graph", False):
+            rg = np.load(PROC / "beijing_road_graph.npz")
+            edge_index = rg["edge_index"].astype(np.int64)
+            edge_weight = np.log1p(rg["edge_weight"].astype(np.float32))   # log 压缩边权(跨界路段数)
+            print(f"  road-graph: {edge_index.shape[1]:,} 有向边, 加权 log1p(跨界路段数)")
+        else:
+            from scipy.spatial import cKDTree
+            k = 8
+            _, nn = cKDTree(xy).query(xy, k=k+1)
+            src = np.repeat(np.arange(N), k); dst = nn[:, 1:].reshape(-1)
+            edge_index = np.stack([np.concatenate([src, dst]), np.concatenate([dst, src])], axis=0).astype(np.int64)
+
+    # 动态时空特征 (双路 ST-GNN 动态腿): 逐小时 pop + 拥堵 -> Xdyn (24,N,Fd)
+    Xdyn = None; hour2period = None
+    if getattr(args, "use_dynamic", False):
+        pop = np.load(PROC / "beijing_dynamic_pop.npz")["pop_hourly"].astype(np.float64)   # (N,24)
+        cg = np.load(PROC / "beijing_dynamic_cong.npz")["cong_frac_hourly"].astype(np.float32)  # (N,24)
+        pop_z = ((np.log(pop + 1.0) - np.log(pop + 1.0).mean()) /
+                 (np.log(pop + 1.0).std() + 1e-9)).astype(np.float32)   # 全局 z(留时序变化)
+        Xdyn = np.stack([pop_z.T, cg.T], axis=-1).astype(np.float32)    # (24,N,2)
+        h2p = np.array([0 if 7 <= h <= 9 else 1 if 17 <= h <= 19 else 2 if 10 <= h <= 16 else 3
+                        for h in range(24)], dtype=np.int64)
+        hour2period = h2p
+        print(f"  dynamic: Xdyn {Xdyn.shape} (pop+拥堵逐小时), hour->period {h2p.tolist()}")
 
     dev = args.device
     to = lambda a: torch.from_numpy(np.ascontiguousarray(a)).to(dev)
@@ -102,9 +143,17 @@ def build_data(args):
         tier_props=to(tier_props), district=to(district),
         soc_props=to(soc_props), demand_share=to(demand_share),
         Xnode=to(Xnode), edge_index=to(edge_index) if edge_index is not None else None,
+        edge_weight=to(edge_weight) if edge_weight is not None else None,
+        Xdyn=to(Xdyn) if Xdyn is not None else None,
+        hour2period=to(hour2period) if hour2period is not None else None,
         flow_tot=to(flow.sum(1)),
         obs_transit=to(obs_transit) if obs_transit is not None else None,
+        modedist_band=to(modedist_band) if modedist_band is not None else None,
+        modedist_target=(torch.from_numpy(modedist_target).to(dev)
+                         if modedist_target is not None else None),
     )
+    if occ_mask is not None:
+        data["occ_mask"] = to(occ_mask)            # (N,7) 外生硬职业 mask
     rng = np.random.RandomState(args.seed)
     val_seg = np.zeros(O, bool); val_seg[rng.permutation(O)[:int(O*args.val_frac)]] = True
     data["edge_is_val"] = to(val_seg[seg_id]); data["edge_is_train"] = to(~val_seg[seg_id])
@@ -127,6 +176,29 @@ def make_batch(data, period, use_soc, e0, e1, seg_base, n_seg):
     if use_soc:
         b["soc_props_o"] = data["soc_props"][o]
         b["demand_share_d"] = data["demand_share"][d]
+        if "occ_mask" in data:
+            b["occ_mask_d"] = data["occ_mask"][d]
+    return b
+
+
+def make_batch_idx(data, period, use_soc, idx, seg_id, n_seg):
+    """像 make_batch 但用任意边索引 idx (非连续, 给 origin-sampled 矩用); seg_id 已 0..K-1。"""
+    o = data["o"][idx]; d = data["d"][idx]
+    t_car = data["t_car"][period][idx]
+    t_transit = data["t_transit"][idx]; t_walk = data["t_walk"][idx]
+    t_min = torch.minimum(torch.minimum(t_car, t_transit), t_walk)
+    b = dict(
+        seg_id=seg_id, num_seg=n_seg, t_car=t_car, t_transit=t_transit, t_walk=t_walk,
+        log_d=data["log_d"][idx], t_min=t_min,
+        log_M_d=data["log_M"][d], log_W_d=data["log_W"][d], log_D_d=data["log_D"][d],
+        match=data["match"][idx], income_o=data["income"][o], tier_props_o=data["tier_props"][o],
+        district_o=data["district"][o], is_self=(o == d), period=period,
+    )
+    if use_soc:
+        b["soc_props_o"] = data["soc_props"][o]
+        b["demand_share_d"] = data["demand_share"][d]
+        if "occ_mask" in data:
+            b["occ_mask_d"] = data["occ_mask"][d]
     return b
 
 
@@ -151,10 +223,26 @@ def main():
     ap.add_argument("--smoke-cells", type=int, default=0)
     ap.add_argument("--no-self-loop", action="store_true")
     ap.add_argument("--use-nn", action="store_true")
+    ap.add_argument("--use-dynamic", action="store_true",
+                    help="双路 ST-GNN 动态腿(逐小时 pop+拥堵 GRU/TCN); 需 beijing_dynamic_{pop,cong}.npz + --use-nn")
+    ap.add_argument("--road-graph", action="store_true",
+                    help="GNN 图用路网连通图(加权)替代空间kNN; 需 beijing_road_graph.npz")
+    ap.add_argument("--nn-exclude-jobs", action="store_true",
+                    help="NN 输入去掉岗位特征(log_M+zlog jobs), RUM 仍用岗位 -> 反事实时 NN 不外推政策杠杆")
     ap.add_argument("--use-consideration", action="store_true")
     ap.add_argument("--use-soc-mixture", action="store_true")
     ap.add_argument("--typed-mass-occ", action="store_true",
                     help="引力作用在本职业岗位 M_j^o(不混总数, 需 soc-mixture + cell级demand)")
+    ap.add_argument("--no-match-filter", action="store_true",
+                    help="ablation: 关掉 L1 词典筛选职业匹配门(保留 L2 成本/L3 时间门), 测匹配门单独贡献")
+    ap.add_argument("--use-frozen-occ-mask", action="store_true",
+                    help="外生硬职业 mask(非补偿考虑集筛选, 需 beijing_occ_mask.npz + soc-mixture); 建议配 --no-match-filter")
+    ap.add_argument("--soft-lex-match", action="store_true",
+                    help="soft-lexicographic 职业门(伦敦 winning 设计): τ_s≥floor + k_s≥k_min, 防塌陷防糊, 自动学每职业筛多少")
+    ap.add_argument("--tau-match-floor-mult", type=float, default=0.5,
+                    help="τ_s ≥ mult × mean(demand_share[:,s]) (soft-lex floor)")
+    ap.add_argument("--k-match-min", type=float, default=20.0,
+                    help="k_s 锐度下限 (soft-lex, 防 sigmoid 糊成不筛)")
     ap.add_argument("--gnn-mode", default="residual")
     ap.add_argument("--residual-scale-init", type=float, default=0.1)
     ap.add_argument("--origin-chunks", type=int, default=1)
@@ -166,6 +254,15 @@ def main():
     ap.add_argument("--share-target", default="0.21,0.35,0.44",
                     help="目标 [车,公交,步行+自行车], 默认=2015 1%微观北京通勤 ground truth (车21/公交35/慢行44)")
     ap.add_argument("--share-weight", type=float, default=2.0)
+    ap.add_argument("--anchor-mode-dist", action="store_true",
+                    help="微观 方式×距离 矩(钉 β_t 距离梯度: 短途步行/长途公交); 需 beijing_micro_moments.npz")
+    ap.add_argument("--mode-dist-weight", type=float, default=2.0)
+    ap.add_argument("--use-education", action="store_true",
+                    help="教育替收入: 异质档=教育(信号干净可锚), 锚=教育通勤[20.8,33.6,44.4]; 需 beijing_edu_hukou.npz")
+    ap.add_argument("--anchor-income-time", action="store_true",
+                    help="CFPS 真收入×通勤时间矩(钉收入档拆分 γ_M/T_max); 需 beijing_cfps_income_moment.npz")
+    ap.add_argument("--income-time-weight", type=float, default=2.0)
+    ap.add_argument("--income-sample-origins", type=int, default=2500)
     ap.add_argument("--out", default=str(ROOT / "evaluation_outputs" / "v4_run.pt"))
     ap.add_argument("--anchor-sample", type=int, default=2000000,
                     help="锚在多少条边的采样上算(脱离chunks=1, 兼容chunking/24GB)")
@@ -183,7 +280,8 @@ def main():
     print(f"  data built {time.time()-t0:.1f}s  edges={data['o'].shape[0]:,} origins={O:,} chunks={len(chunks)}")
 
     # 锚采样 (脱离 chunks=1: 在固定边采样上算 mode 锚, 兼容 chunking)
-    anchor_on = args.anchor_transit or args.anchor_share
+    anchor_on = (args.anchor_transit or args.anchor_share or args.anchor_mode_dist
+                 or args.anchor_income_time)
     asb = None
     if anchor_on:
         E = data["o"].shape[0]
@@ -196,20 +294,74 @@ def main():
             obs_transit=(data["obs_transit"][si] if data.get("obs_transit") is not None else None),
             tgt=torch.tensor([float(x) for x in args.share_target.split(",")], device=args.device),
         )
-        print(f"  anchor 采样 {len(si):,} 边 (transit={args.anchor_transit} share={args.anchor_share})")
+        if data.get("modedist_band") is not None:
+            asb["modedist_band"] = data["modedist_band"][si]
+            asb["modedist_target"] = data["modedist_target"]
+        print(f"  anchor 采样 {len(si):,} 边 (transit={args.anchor_transit} share={args.anchor_share} "
+              f"mode_dist={args.anchor_mode_dist})")
+
+    # CFPS 收入×通勤时间矩: 采样 K 个出发地(全候选集), origin-sampled forward
+    inc = None
+    if args.anchor_income_time:
+        ss = data["seg_starts"]   # numpy (O+1,)
+        rng2 = np.random.RandomState(args.seed + 7)
+        Ko = min(args.income_sample_origins, O)
+        oids = rng2.choice(O, Ko, replace=False)
+        idx_l, seg_l = [], []
+        for k, oi in enumerate(oids):
+            a, bb = int(ss[oi]), int(ss[oi + 1])
+            idx_l.append(np.arange(a, bb)); seg_l.append(np.full(bb - a, k, np.int64))
+        inc_idx = torch.from_numpy(np.concatenate(idx_l)).to(args.device)
+        inc_seg = torch.from_numpy(np.concatenate(seg_l)).to(args.device)
+        if getattr(args, "use_education", False):   # 锚换成教育通勤目标[20.8,33.6,44.4]
+            tgt = np.load(PROC / "beijing_edu_hukou.npz")["ct_by_edu"]
+        else:
+            tgt = np.load(PROC / "beijing_cfps_income_moment.npz")["target_ct"]
+        inc = dict(idx=inc_idx, seg=inc_seg, nseg=Ko,
+                   target=torch.tensor(tgt, device=args.device),
+                   oi=data["o"][inc_idx], di=data["d"][inc_idx])
+        print(f"  {'edu' if getattr(args,'use_education',False) else 'income'}-time 矩: 采样 {Ko} 出发地 → {len(inc_idx):,} 边, "
+              f"目标通勤[低,中,高]={[round(float(x),1) for x in tgt]}min")
 
     head = BeijingNestedHead(n_districts=16, use_self_loop=not args.no_self_loop,
                              use_consideration=args.use_consideration,
                              use_soc_mixture=args.use_soc_mixture,
                              gnn_mode=args.gnn_mode,
                              residual_scale_init=args.residual_scale_init,
-                             use_typed_mass=args.typed_mass_occ).to(args.device)
+                             use_typed_mass=args.typed_mass_occ,
+                             use_match_filter=not args.no_match_filter,
+                             use_frozen_occ_mask=args.use_frozen_occ_mask,
+                             soft_lex_match=args.soft_lex_match,
+                             k_match_min=args.k_match_min).to(args.device)
+    if args.soft_lex_match and args.use_soc_mixture:
+        floor = args.tau_match_floor_mult * data["demand_share"].mean(0)   # (S,) floor = mult×mean
+        head.set_tau_match_floor(floor)
+        print(f"  soft-lex match: k_min={args.k_match_min}, "
+              f"τ floor = {[round(float(x),4) for x in floor]}")
     params = list(head.parameters())
-    enc = None
+    enc = None; dyn = args.use_dynamic
     if args.use_nn:
-        enc = BeijingPairEncoder(in_dim=data["Xnode"].shape[1]).to(args.device)
+        if dyn:
+            from beijing_model import BeijingDualBranchEncoder
+            enc = BeijingDualBranchEncoder(static_dim=data["Xnode"].shape[1],
+                                           dyn_dim=data["Xdyn"].shape[2]).to(args.device)
+        else:
+            enc = BeijingPairEncoder(in_dim=data["Xnode"].shape[1]).to(args.device)
         params += list(enc.parameters())
     opt = torch.optim.Adam(params, lr=args.lr)
+
+    def embed():
+        if enc is None: return None, None
+        ew = data.get("edge_weight")
+        if dyn:
+            return enc.node_embed(data["Xnode"], data["Xdyn"], data["edge_index"],
+                                  data["N"], data["hour2period"], edge_weight=ew)
+        return enc.node_embed(data["Xnode"], data["edge_index"], data["N"], edge_weight=ew)
+
+    def vnn(e_o, e_d, p, e0, e1):
+        if enc is None: return None
+        o_c, d_c = data["o"][e0:e1], data["d"][e0:e1]
+        return enc.edge_vnn(e_o, e_d, p, o_c, d_c) if dyn else enc.edge_vnn(e_o, e_d, o_c, d_c)
 
     flow_all = data["flow"]; train_m = data["edge_is_train"]
     flow_train_sum = (flow_all * train_m.unsqueeze(1)).sum().clamp_min(1.0)
@@ -220,14 +372,12 @@ def main():
         head.train()
         if enc: enc.train()
         opt.zero_grad()
-        e_o = e_d = None
-        if enc is not None:
-            e_o, e_d = enc.node_embed(data["Xnode"], data["edge_index"], data["N"])
+        e_o, e_d = embed()
         loss_val = 0.0; bi = 0
         for (e0, e1, sb, ns) in chunks:
             for p in range(4):
                 batch = make_batch(data, p, args.use_soc_mixture, e0, e1, sb, ns)
-                v_nn = enc.edge_vnn(e_o, e_d, data["o"][e0:e1], data["d"][e0:e1]) if enc is not None else None
+                v_nn = vnn(e_o, e_d, p, e0, e1)
                 logP = head(batch, v_nn=v_nn)
                 loss_p = -(flow_all[e0:e1, p] * train_m[e0:e1] * logP).sum() / flow_train_sum
                 bi += 1
@@ -246,6 +396,34 @@ def main():
             if args.anchor_share:
                 ms = (Pm * asb["flow_tot"]).sum(1) / asb["flow_tot"].sum()
                 a_loss = a_loss + args.share_weight * (-(asb["tgt"] * torch.log(ms.clamp_min(1e-9))).sum())
+            if args.anchor_mode_dist and asb.get("modedist_band") is not None:
+                band = asb["modedist_band"]; tgt = asb["modedist_target"]; w = asb["flow_tot"]
+                md_loss = 0.0
+                for b in range(tgt.shape[0]):
+                    m = (band == b)
+                    if m.any():
+                        wm = w[m]
+                        sh = (Pm[:, m] * wm).sum(1) / wm.sum().clamp_min(1e-9)   # (3,) 流量加权方式分担
+                        md_loss = md_loss - (tgt[b] * torch.log(sh.clamp_min(1e-9))).sum()
+                a_loss = a_loss + args.mode_dist_weight * md_loss
+            # CFPS 收入×通勤时间矩 (origin-sampled, 需 segment softmax -> 单独 forward)
+            if args.anchor_income_time and inc is not None:
+                bi = make_batch_idx(data, 0, args.use_soc_mixture, inc["idx"], inc["seg"], inc["nseg"])
+                if enc is not None:
+                    vnn_i = (enc.edge_vnn(e_o, e_d, 0, inc["oi"], inc["di"]) if dyn
+                             else enc.edge_vnn(e_o, e_d, inc["oi"], inc["di"])).detach()
+                else:
+                    vnn_i = None
+                logP_i = head(bi, v_nn=vnn_i)
+                otot_i = segment_sum(flow_all[inc["idx"], 0], bi["seg_id"], inc["nseg"])
+                pred_i = logP_i.exp() * otot_i[bi["seg_id"]]      # 预测流 (period 0)
+                tmin_i = bi["t_min"]; tpr_i = bi["tier_props_o"]
+                it_loss = 0.0
+                for T in range(3):
+                    wT = pred_i * tpr_i[:, T]                     # 收入档 T 权重的预测流
+                    mct = (wT * tmin_i).sum() / wT.sum().clamp_min(1e-6)   # 档 T 预测平均通勤时间
+                    it_loss = it_loss + ((mct - inc["target"][T]) / inc["target"][T]) ** 2
+                a_loss = a_loss + args.income_time_weight * it_loss
             a_loss.backward()
             loss_val += float(a_loss)
         torch.nn.utils.clip_grad_norm_(params, 5.0)
@@ -256,14 +434,12 @@ def main():
             if enc: enc.eval()
             num = [0.0]*4; den = [0.0]*4
             with torch.no_grad():
-                e_o2 = e_d2 = None
-                if enc is not None:
-                    e_o2, e_d2 = enc.node_embed(data["Xnode"], data["edge_index"], data["N"])
+                e_o2, e_d2 = embed()
                 for (e0, e1, sb, ns) in chunks:
                     vm = data["edge_is_val"][e0:e1]
                     for p in range(4):
                         batch = make_batch(data, p, args.use_soc_mixture, e0, e1, sb, ns)
-                        v_nn = enc.edge_vnn(e_o2, e_d2, data["o"][e0:e1], data["d"][e0:e1]) if enc is not None else None
+                        v_nn = vnn(e_o2, e_d2, p, e0, e1)
                         logP = head(batch, v_nn=v_nn)
                         fp = flow_all[e0:e1, p]
                         otot = segment_sum(fp, batch["seg_id"], ns)

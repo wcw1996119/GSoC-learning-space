@@ -5,6 +5,8 @@
 data/processed/
 data/raw/
 data/cache/
+data/_cfps_tmp/
+data/autodl_bundle/
 
 # 数据文件类型 (北京 OD / 时间矩阵 / 职业 / 房价派生)
 *.npz
@@ -16,6 +18,10 @@ data/cache/
 *.tar.gz
 *.tar
 *.zip
+*.dta
+
+# 工具二进制 (UnRAR 等)
+*.exe
 
 # 评估/训练输出
 evaluation_outputs/

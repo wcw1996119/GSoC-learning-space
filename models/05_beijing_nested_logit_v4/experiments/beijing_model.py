@@ -41,13 +41,18 @@ def segment_logsumexp(values, seg_id, num_seg):
     return m_safe + se.clamp_min(1e-38).log()
 
 
-def scatter_mean(src, index, dim_size):
-    """src (E,F), index (E,) -> (dim_size,F) 邻居均值聚合。"""
+def scatter_mean(src, index, dim_size, weight=None):
+    """src (E,F), index (E,) -> (dim_size,F) 邻居聚合。weight (E,) 给则加权 mean(路网边权)。"""
     out = torch.zeros(dim_size, src.shape[1], device=src.device, dtype=src.dtype)
-    out.index_add_(0, index, src)
-    cnt = torch.zeros(dim_size, device=src.device, dtype=src.dtype)
-    cnt.index_add_(0, index, torch.ones(index.shape[0], device=src.device, dtype=src.dtype))
-    return out / cnt.clamp_min(1.0).unsqueeze(1)
+    if weight is None:
+        out.index_add_(0, index, src)
+        cnt = torch.zeros(dim_size, device=src.device, dtype=src.dtype)
+        cnt.index_add_(0, index, torch.ones(index.shape[0], device=src.device, dtype=src.dtype))
+        return out / cnt.clamp_min(1.0).unsqueeze(1)
+    out.index_add_(0, index, src * weight.unsqueeze(1))
+    wsum = torch.zeros(dim_size, device=src.device, dtype=src.dtype)
+    wsum.index_add_(0, index, weight)
+    return out / wsum.clamp_min(1e-6).unsqueeze(1)
 
 
 class SageLayer(nn.Module):
@@ -56,9 +61,9 @@ class SageLayer(nn.Module):
         self.w_self = nn.Linear(in_dim, out_dim)
         self.w_neigh = nn.Linear(in_dim, out_dim)
 
-    def forward(self, h, edge_index, N):
+    def forward(self, h, edge_index, N, edge_weight=None):
         src, dst = edge_index[0], edge_index[1]
-        agg = scatter_mean(h[src], dst, N)
+        agg = scatter_mean(h[src], dst, N, weight=edge_weight)
         return self.w_self(h) + self.w_neigh(agg)
 
 
@@ -71,20 +76,96 @@ class BeijingPairEncoder(nn.Module):
         self.origin_head = nn.Linear(hid, emb)
         self.dest_head = nn.Linear(hid, emb)
 
-    def node_embed(self, x, edge_index, N):
+    def node_embed(self, x, edge_index, N, edge_weight=None):
         h = F.relu(self.lin_in(x))
         for layer in self.sage:
-            h = F.relu(layer(h, edge_index, N))
+            h = F.relu(layer(h, edge_index, N, edge_weight))
         return self.origin_head(h), self.dest_head(h)   # (N,emb), (N,emb)
 
     def edge_vnn(self, e_o, e_d, o_idx, d_idx):
         return (e_o[o_idx] * e_d[d_idx]).sum(-1)        # (E,)
 
 
+class _MultiScaleTCN(nn.Module):
+    """沿时间轴的多尺度 1D 卷积 (kernels 3/5/7, circular padding 让 24h 环绕)。
+    输入 (Th,N,C) -> (N,C,Th) conv -> (Th,N,C)。"""
+    def __init__(self, hid, kernels=(3, 5, 7)):
+        super().__init__()
+        self.convs = nn.ModuleList([nn.Conv1d(hid, hid, k, padding=k // 2,
+                                              padding_mode="circular") for k in kernels])
+        self.proj = nn.Linear(hid * len(kernels), hid)
+
+    def forward(self, h_seq):                            # (Th,N,C)
+        x = h_seq.permute(1, 2, 0)                       # (N,C,Th)
+        outs = [F.relu(c(x)) for c in self.convs]
+        cat = torch.cat(outs, dim=1).permute(2, 0, 1)    # (Th,N,C*K)
+        return self.proj(cat)                            # (Th,N,C)
+
+
+class BeijingDualBranchEncoder(nn.Module):
+    """双路 ST-GNN: 静态空间 GraphSAGE + 动态(per-hour SAGE + GRU + 多尺度TCN)。
+    细特征逐小时进 -> 输出端池化到 4 时段 -> 每时段 origin/dest 嵌入 -> 候选 edge bilinear V_NN[period]。
+    分工: 静态腿吃空间结构特征, 动态腿吃 pop/拥堵逐小时序列, RUM 头吃决策变量(外部, 不在这)。"""
+    def __init__(self, static_dim, dyn_dim, hid=32, emb=16, gru_hidden=32,
+                 n_layers=2, tcn_kernels=(3, 5, 7), n_periods=4):
+        super().__init__()
+        self.n_periods = n_periods
+        # 静态腿
+        self.s_in = nn.Linear(static_dim, hid)
+        self.s_sage = nn.ModuleList([SageLayer(hid, hid) for _ in range(n_layers)])
+        # 动态腿
+        self.d_in = nn.Linear(dyn_dim, hid)
+        self.d_sage = nn.ModuleList([SageLayer(hid, hid) for _ in range(n_layers)])
+        self.gru = nn.GRU(hid, gru_hidden, batch_first=False)
+        self.tcn = _MultiScaleTCN(hid, tcn_kernels)
+        self.dfuse = nn.Linear(gru_hidden + hid, hid)
+        # 静态+动态 -> 逐时段 origin/dest 嵌入
+        self.origin_head = nn.Linear(hid * 2, emb)
+        self.dest_head = nn.Linear(hid * 2, emb)
+
+    def node_embed(self, Xstatic, Xdyn, edge_index, N, hour2period, edge_weight=None):
+        """Xstatic (N,Fs); Xdyn (Th,N,Fd); hour2period (Th,) long; edge_weight (E,) 路网边权。
+        返回 e_o, e_d 各 (P,N,emb)。"""
+        # 静态
+        hs = F.relu(self.s_in(Xstatic))
+        for l in self.s_sage:
+            hs = F.relu(l(hs, edge_index, N, edge_weight))   # (N,hid)
+        # 动态 per hour SAGE
+        Th = Xdyn.shape[0]
+        hl = []
+        for t in range(Th):
+            h = F.relu(self.d_in(Xdyn[t]))
+            for l in self.d_sage:
+                h = F.relu(l(h, edge_index, N, edge_weight))
+            hl.append(h)
+        hstack = torch.stack(hl, 0)                       # (Th,N,hid)
+        gru_out, _ = self.gru(hstack)                     # (Th,N,gru_hidden)
+        tcn_out = self.tcn(hstack)                        # (Th,N,hid)
+        hd = F.relu(self.dfuse(torch.cat([gru_out, tcn_out], -1)))   # (Th,N,hid)
+        # 小时 -> 时段 池化 (均值)
+        P = self.n_periods
+        hd_p = torch.zeros(P, hd.shape[1], hd.shape[2], device=hd.device, dtype=hd.dtype)
+        cnt = torch.zeros(P, device=hd.device, dtype=hd.dtype)
+        hd_p.index_add_(0, hour2period, hd)
+        cnt.index_add_(0, hour2period, torch.ones(Th, device=hd.device, dtype=hd.dtype))
+        hd_p = hd_p / cnt.clamp_min(1).view(P, 1, 1)
+        # 逐时段 origin/dest 嵌入
+        e_o, e_d = [], []
+        for p in range(P):
+            comb = torch.cat([hs, hd_p[p]], -1)           # (N, hid*2)
+            e_o.append(self.origin_head(comb)); e_d.append(self.dest_head(comb))
+        return torch.stack(e_o, 0), torch.stack(e_d, 0)   # (P,N,emb), (P,N,emb)
+
+    def edge_vnn(self, e_o, e_d, period, o_idx, d_idx):
+        return (e_o[period][o_idx] * e_d[period][d_idx]).sum(-1)     # (E,)
+
+
 class BeijingNestedHead(nn.Module):
     def __init__(self, n_modes=3, n_tiers=3, n_soc=7, n_districts=16, n_periods=4,
                  use_self_loop=True, use_consideration=False, use_soc_mixture=False,
-                 gnn_mode="residual", residual_scale_init=0.1, use_typed_mass=False):
+                 gnn_mode="residual", residual_scale_init=0.1, use_typed_mass=False,
+                 use_match_filter=True, use_frozen_occ_mask=False,
+                 soft_lex_match=False, k_match_min=20.0):
         super().__init__()
         self.M, self.K, self.S = n_modes, n_tiers, n_soc
         self.n_districts, self.n_periods = n_districts, n_periods
@@ -92,6 +173,11 @@ class BeijingNestedHead(nn.Module):
         self.use_consideration = use_consideration
         self.use_soc_mixture = use_soc_mixture
         self.use_typed_mass = use_typed_mass
+        self.use_match_filter = use_match_filter   # L1 词典筛选职业匹配门 (ablation 可关, 默认 on)
+        self.use_frozen_occ_mask = use_frozen_occ_mask  # L1b 外生硬职业 mask (非补偿考虑集筛选, 跟 typed-mass 引力分工)
+        self.soft_lex_match = soft_lex_match   # soft-lexicographic: τ_s≥floor + k_s≥k_min (防塌陷防糊, 伦敦 winning 设计)
+        self.k_match_min = float(k_match_min)
+        self.tau_match_floor = None            # (S,) floor = mult×mean(demand_share[:,s]); trainer 经 set_tau_match_floor 填
         self.gnn_mode = gnn_mode
         self.lam_eps = 0.05
         self.n_classes = (n_tiers * n_soc) if use_soc_mixture else n_tiers
@@ -123,7 +209,9 @@ class BeijingNestedHead(nn.Module):
             # L1 match filter (per soc 若 soc 混合, 否则全局)
             n_mf = n_soc if use_soc_mixture else 1
             self.raw_k_match = nn.Parameter(torch.full((n_mf,), _inv_softplus(10.0)))
-            self.match_thresh = nn.Parameter(torch.full((n_mf,), 0.0))
+            # soft-lex 时 τ=floor+softplus(raw), raw 初值取 softplus≈0.01 让 τ≈floor 起步; 否则旧版 τ=raw(init 0)
+            self.match_thresh = nn.Parameter(torch.full((n_mf,),
+                _inv_softplus(0.01) if soft_lex_match else 0.0))
             # L2 cost filter (per tier)
             self.raw_theta_t_cost = nn.Parameter(torch.tensor(_inv_softplus(0.05)))
             self.raw_theta_d_cost = nn.Parameter(torch.tensor(_inv_softplus(0.10)))
@@ -133,6 +221,9 @@ class BeijingNestedHead(nn.Module):
             # L3 time gate (per tier) — Bhat 通勤忍受度 T_max
             self.raw_T_max = nn.Parameter(torch.tensor([_inv_softplus(v) for v in (40., 60., 90.)]))
             self.raw_k_time = nn.Parameter(torch.tensor(_inv_softplus(0.2)))
+
+    def set_tau_match_floor(self, floor):   # soft-lex: 由 trainer 用 mult×mean(demand_share) 填
+        self.tau_match_floor = floor
 
     # sign-constrained 读出
     @property
@@ -157,13 +248,23 @@ class BeijingNestedHead(nn.Module):
     def _consideration_mask(self, k_tier, soc_idx, batch):
         """返回该 class 的 log-mask (E,) (词典筛选三层之和)。"""
         log_mask = 0.0
-        # L1 match
-        if self.use_soc_mixture:
-            sig = batch["demand_share_d"][:, soc_idx]            # (E,)
-            km = F.softplus(self.raw_k_match[soc_idx]); tau = self.match_thresh[soc_idx]
-        else:
-            sig = batch["match"]; km = F.softplus(self.raw_k_match[0]); tau = self.match_thresh[0]
-        log_mask = log_mask + F.logsigmoid(km * (sig - tau))
+        # L1 match (职业匹配筛选门; ablation --no-match-filter 可关, 保留 L2/L3)
+        if self.use_match_filter:
+            mi = soc_idx if self.use_soc_mixture else 0
+            sig = batch["demand_share_d"][:, soc_idx] if self.use_soc_mixture else batch["match"]
+            km = F.softplus(self.raw_k_match[mi])
+            if self.soft_lex_match:                                  # 防糊: k 强制锐利
+                km = km.clamp(min=self.k_match_min)
+                tau = F.softplus(self.match_thresh[mi])              # 防塌陷: τ = floor + softplus(raw) ≥ floor
+                if self.tau_match_floor is not None:
+                    tau = tau + self.tau_match_floor[mi]
+            else:
+                tau = self.match_thresh[mi]                          # 旧版自由阈值(会塌陷到不筛)
+            log_mask = log_mask + F.logsigmoid(km * (sig - tau))
+        # L1b 外生硬职业 mask: 占本职业岗位太少的目的地直接踢出考虑集(非补偿, typed-mass 连续 log 做不到)
+        if self.use_frozen_occ_mask and self.use_soc_mixture and "occ_mask_d" in batch:
+            elig = batch["occ_mask_d"][:, soc_idx]            # (E,) 1 可去 / 0 不可去
+            log_mask = log_mask + (elig - 1.0) * 30.0          # 可去 +0, 不可去 -30 (硬; 全筛段 softmax 自愈)
         # L2 cost
         t_min = batch["t_min"]; log_d = batch["log_d"]
         cost = F.softplus(self.raw_theta_t_cost) * t_min + F.softplus(self.raw_theta_d_cost) * log_d

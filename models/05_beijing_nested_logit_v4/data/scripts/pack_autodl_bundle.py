@@ -15,6 +15,8 @@ OUT = ROOT / "data" / "v4_beijing_bundle.tar.gz"
 INCLUDE = [
     "experiments/beijing_model.py",
     "experiments/train_beijing.py",
+    "experiments/beijing_model_B.py",     # 架构 B: GNN吸引力 + 异质RUM
+    "experiments/train_beijing_B.py",     # 架构 B 训练器
     "data/processed/beijing_grid.npz",
     "data/processed/beijing_edges.npz",
     "data/processed/beijing_modes.npz",
@@ -22,6 +24,10 @@ INCLUDE = [
     "data/processed/beijing_income.npz",
     "data/processed/beijing_occupation.npz",
     "data/processed/beijing_transit_od.npz",   # 刷卡锚需要
+    "data/processed/beijing_micro_moments.npz",  # --anchor-mode-dist (微观方式×距离矩)
+    "data/processed/beijing_dynamic_pop.npz",    # 动态腿: 逐小时人口(热力)
+    "data/processed/beijing_dynamic_cong.npz",   # 动态腿: 逐小时拥堵(路况)
+    "data/processed/beijing_road_graph.npz",     # 路网连通图(替空间kNN)
     "AUTODL_RUN.md",
 ]
 
