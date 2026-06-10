@@ -167,6 +167,9 @@ V_dest  = V_M + V_other + λ · log_iv                                    # (:23
 
 **词典筛选三层**(`_consideration_mask`, `:157-177`),每层一个软 sigmoid 的 log-mask 相加:
 - **L1 匹配门**:`logsigmoid(k_match·(职业需求信号 - τ))` —— 职业不匹配的目的地被软压。
+  - ⚠ 自由阈值会塌陷到不筛(冗余, 被 typed-mass 引力吃掉)。**主 spec 用 soft-lex**(`--soft-lex-match`: τ_s≥floor=0.5×mean + k_s≥20),
+    3-seed 学出差异化筛除(蓝领制造 68-82% / 白领~0%, CPC 中性) → 职业筛选才真工作。见 [01_identifiability §7.5]。
+  - 职业**双机制**: 排序(typed-mass 引力 §4.2, 全职业) + 筛选(本门 soft-lex, 仅蓝领), 不重复。
 - **L2 成本门**:`cost = θ_t·t_min + θ_d·log_d`,`logsigmoid(k_cost·(阈 - cost/budget_tier))` —— 太贵的软压。
 - **L3 时间门**:`logsigmoid(k_time·(T_max_tier - t_min))` —— 超过通勤忍受度 `T_max`(Bhat 三档 ~40/60/90 起)软压。
 
