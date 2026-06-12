@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Beijing v4 — Model Architecture</title>
+<style>
+  /* ---- edit colors / sizes here ---- */
+  :root{
+    --beh-bg:#eef5ec; --beh-bd:#7aa37a; --beh-hd:#3f7d4f;
+    --nn-bg:#e9eef7;  --nn-bd:#7e93c4;  --nn-hd:#3f5e9e;
+    --gate-bg:#f8f1df; --gate-bd:#c9a84a; --gate-hd:#9a7d1f;
+    --in-bg:#eef1ee;  --in-bd:#9aa6a0;  --in-hd:#4d6356;
+    --tr-bg:#f4f4f5;  --tr-bd:#bdbdbd;
+    --tensor:#cfe0f3; --tensorbd:#5e7891;
+    --ink:#222; --mute:#7a7a7a; --shp:#8090a0;
+  }
+  *{box-sizing:border-box;}
+  body{font-family:Arial,Helvetica,sans-serif;color:var(--ink);background:#fff;margin:0;padding:18px;}
+  .fig-title{text-align:center;font-weight:700;font-size:16px;margin:4px 0 14px;}
+  .canvas{min-width:1480px;}
+  .row{display:flex;align-items:stretch;gap:10px;}
+  .panel{border:1.4px solid;border-radius:9px;padding:8px 10px;}
+  .hd{font-weight:700;font-size:12px;margin-bottom:6px;text-transform:uppercase;letter-spacing:.3px;}
+  .sub{font-size:11px;color:var(--mute);font-style:italic;}
+  .box{background:#fff;border:1.1px solid #9aa;border-radius:7px;padding:5px 8px;font-size:11px;text-align:center;}
+  .box b{font-size:11.5px;}
+  .shp{font-size:9.5px;color:var(--shp);font-style:italic;margin-top:2px;}
+  .lab{font-size:11px;color:var(--ink);}
+  .arrow{align-self:center;color:#666;font-size:18px;padding:0 2px;}
+  .arrow.v{transform:rotate(90deg);}
+  .col{display:flex;flex-direction:column;gap:8px;}
+  .stage{display:flex;flex-direction:column;align-items:center;gap:6px;justify-content:center;}
+  /* panel color themes */
+  .beh{background:var(--beh-bg);border-color:var(--beh-bd);} .beh .hd{color:var(--beh-hd);}
+  .nn{background:var(--nn-bg);border-color:var(--nn-bd);}   .nn .hd{color:var(--nn-hd);}
+  .gate{background:var(--gate-bg);border-color:var(--gate-bd);} .gate .hd{color:var(--gate-hd);}
+  .inp{background:var(--in-bg);border-color:var(--in-bd);}  .inp .hd{color:var(--in-hd);}
+  .train{background:var(--tr-bg);border-color:var(--tr-bd);}
+  .mode-row{display:flex;align-items:center;gap:6px;font-size:11px;margin:2px 0;}
+  .ftable{font-size:10.5px;line-height:1.5;}
+  .ftable td{padding:1px 6px 1px 0;vertical-align:top;}
+  .ftable .k{color:var(--nn-hd);font-weight:600;white-space:nowrap;}
+  .merge-plus{width:30px;height:30px;border-radius:50%;border:1.6px solid #555;display:flex;
+              align-items:center;justify-content:center;font-size:18px;background:#fff;align-self:center;}
+  .legend{display:flex;gap:12px;font-size:10.5px;margin-top:5px;}
+  .sw{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;margin-right:3px;}
+  svg{display:block;}
+</style>
+</head>
+<body>
+<div class="fig-title">Origin-conditional structured choice model for commuting&nbsp;&mdash;&nbsp;per-origin softmax over candidate (destination &times; mode)</div>
+
+<div class="canvas">
+<div class="row" style="align-items:flex-start;">
+
+  <!-- ================= INPUT ================= -->
+  <div class="panel inp" style="width:215px;">
+    <div class="hd">Input</div>
+    <div class="box" style="text-align:left;">
+      <b>Origin cell&nbsp;o&nbsp;at time&nbsp;t</b>
+      <!-- small grid: origin + sparse candidates -->
+      <svg width="190" height="110" viewBox="0 0 190 110">
+        <g stroke="#c9c9c9" stroke-width="1">
+          <!-- grid -->
+          <g>
+            <line x1="10" y1="10" x2="180" y2="10"/><line x1="10" y1="30" x2="180" y2="30"/>
+            <line x1="10" y1="50" x2="180" y2="50"/><line x1="10" y1="70" x2="180" y2="70"/>
+            <line x1="10" y1="90" x2="180" y2="90"/>
+            <line x1="10" y1="10" x2="10" y2="90"/><line x1="44" y1="10" x2="44" y2="90"/>
+            <line x1="78" y1="10" x2="78" y2="90"/><line x1="112" y1="10" x2="112" y2="90"/>
+            <line x1="146" y1="10" x2="146" y2="90"/><line x1="180" y1="10" x2="180" y2="90"/>
+          </g>
+        </g>
+        <!-- candidate destinations -->
+        <g fill="#9bb4dd"><rect x="50" y="16" width="12" height="12" rx="2"/>
+          <rect x="150" y="36" width="12" height="12" rx="2"/><rect x="20" y="60" width="12" height="12" rx="2"/>
+          <rect x="120" y="74" width="12" height="12" rx="2"/><rect x="86" y="20" width="12" height="12" rx="2"/></g>
+        <!-- dashed links from origin -->
+        <g stroke="#9aa" stroke-width="0.8" stroke-dasharray="3 2">
+          <line x1="95" y1="55" x2="56" y2="22"/><line x1="95" y1="55" x2="156" y2="42"/>
+          <line x1="95" y1="55" x2="26" y2="66"/><line x1="95" y1="55" x2="126" y2="80"/>
+        </g>
+        <circle cx="95" cy="55" r="6" fill="#5aa469"/>
+      </svg>
+      <div class="legend">
+        <span><span class="sw" style="background:#5aa469;border-radius:50%;"></span>Origin&nbsp;o</span>
+        <span><span class="sw" style="background:#9bb4dd;"></span>Candidates&nbsp;D<sub>o</sub></span>
+      </div>
+    </div>
+    <div class="box" style="text-align:left;margin-top:8px;">
+      <b>Per candidate&nbsp;d&nbsp;&isin;&nbsp;D<sub>o</sub></b>
+      <table class="ftable">
+        <tr><td class="k">travel time</td><td>by mode (car/transit/walk)</td></tr>
+        <tr><td class="k">distance</td><td>origin&ndash;destination (km)</td></tr>
+        <tr><td class="k">income</td><td>origin</td></tr>
+        <tr><td class="k">jobs</td><td>destination</td></tr>
+        <tr><td class="k">wage</td><td>destination</td></tr>
+        <tr><td class="k">competition</td><td>labour supply</td></tr>
+        <tr><td class="k">time period</td><td>peak / off-peak, day, season</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <div class="arrow">&#10148;</div>
+
+  <!-- ================= TWO BRANCHES ================= -->
+  <div class="col" style="flex:0 0 600px;">
+
+    <!-- behavioral branch -->
+    <div class="panel beh">
+      <div class="hd">Interpretable utility (behavioural) branch &middot; nested logit</div>
+      <div class="row">
+        <div class="stage">
+          <div class="sub">mode utilities</div>
+          <div class="box" style="text-align:left;">
+            <div class="mode-row">🚗&nbsp;<b>Car</b></div>
+            <div class="mode-row">🚆&nbsp;<b>Transit</b></div>
+            <div class="mode-row">🚶&nbsp;<b>Walk</b></div>
+            <div class="lab" style="margin-top:3px;">utility&nbsp;&larr;&nbsp;travel&nbsp;time&nbsp;&middot;&nbsp;distance&nbsp;&middot;&nbsp;cost</div>
+          </div>
+        </div>
+        <div class="arrow">&#10148;</div>
+        <div class="stage">
+          <div class="box"><b>Inclusive value</b><div class="lab">mode nest<br>(log-sum over car/transit/walk)</div></div>
+        </div>
+        <div class="arrow">&#10148;</div>
+        <div class="stage">
+          <div class="box"><b>Gravity term</b><div class="lab">destination attractiveness:<br>jobs &middot; wage &middot; competition &middot; distance</div></div>
+        </div>
+      </div>
+      <div class="stage" style="margin-top:6px;">
+        <div class="arrow v">&#10148;</div>
+        <div class="box" style="background:#dcebd9;"><b>Structural utility&nbsp;V<sub>dest</sub></b></div>
+        <div class="sub">sign-constrained (time/distance/cost&nbsp;&minus;,&nbsp;jobs/wage&nbsp;+)</div>
+      </div>
+    </div>
+
+    <!-- neural branch -->
+    <div class="panel nn">
+      <div class="hd">Neural spatio-temporal branch (learned)</div>
+      <!-- dynamic row -->
+      <div class="row" style="align-items:center;">
+        <div class="stage">
+          <!-- tensor cuboid -->
+          <svg width="58" height="48" viewBox="0 0 58 48">
+            <polygon points="8,14 40,14 50,6 18,6" fill="#bcd2ee" stroke="#5e7891"/>
+            <polygon points="40,14 50,6 50,38 40,46" fill="#a9c4e6" stroke="#5e7891"/>
+            <rect x="8" y="14" width="32" height="32" fill="#cfe0f3" stroke="#5e7891"/>
+            <line x1="18" y1="14" x2="18" y2="46" stroke="#5e7891" stroke-width="0.5"/>
+            <line x1="29" y1="14" x2="29" y2="46" stroke="#5e7891" stroke-width="0.5"/>
+          </svg>
+          <div class="box"><b>Spatio-temporal tensor</b></div>
+          <div class="shp">[T, N, C]</div>
+        </div>
+        <div class="arrow">&#10148;</div>
+        <div class="stage">
+          <div class="box"><b>Spatial GNN</b><div class="lab">GraphSAGE &middot; k-NN (k=8)</div></div>
+          <div class="shp">[T, N, H]</div>
+        </div>
+        <div class="arrow">&#10148;</div>
+        <div class="stage">
+          <div class="box"><b>Temporal block</b><div class="lab">GRU&nbsp;+&nbsp;multi-scale TCN<br>(kernels 3 / 5 / 7)</div></div>
+          <div class="shp">[T, N, H]</div>
+        </div>
+        <div class="arrow">&#10148;</div>
+        <div class="stage">
+          <div class="box"><b>Temporal pooling</b><div class="lab">mean over time</div></div>
+          <div class="shp">[N, H]</div>
+        </div>
+      </div>
+      <!-- static row -->
+      <div class="row" style="align-items:center;margin-top:8px;">
+        <div class="stage">
+          <div class="box"><b>Static node features</b><div class="lab">land use, zoning, POIs, demographics</div></div>
+          <div class="shp">[N, F]</div>
+        </div>
+        <div class="arrow">&#10148;</div>
+        <div class="stage"><div class="box"><b>GraphSAGE &times;2</b><div class="lab">residual</div></div><div class="shp">[N, H]</div></div>
+        <div class="arrow">&#10148;</div>
+        <div class="stage"><div class="box" style="background:#dfe7d6;"><b>Node embeddings</b><div class="lab">concatenate</div></div><div class="shp">[N, H]</div></div>
+        <div class="arrow">&#10148;</div>
+        <div class="stage"><div class="box" style="background:#e7e2f3;"><b>Bilinear edge score&nbsp;V<sub>NN</sub></b>
+          <div class="lab">origin &times; destination embeddings</div></div><div class="shp">one score / candidate</div></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ================= MERGE ================= -->
+  <div class="stage" style="flex:0 0 110px;">
+    <div class="merge-plus">+</div>
+    <div class="box" style="background:#eef0f4;"><b>Total utility</b><div class="lab">one score per candidate</div></div>
+    <div class="shp">[ |D<sub>o</sub>| ]</div>
+  </div>
+
+  <div class="arrow">&#10148;</div>
+
+  <!-- ================= GATE ================= -->
+  <div class="panel gate" style="flex:0 0 170px;">
+    <div class="hd">Consideration-set screening gate</div>
+    <div class="sub">conditioned on</div>
+    <ul style="font-size:11px;margin:4px 0 6px 16px;padding:0;">
+      <li>occupation match</li><li>travel cost</li><li>commute-time tolerance</li>
+    </ul>
+    <div class="stage">
+      <!-- funnel -->
+      <svg width="90" height="70" viewBox="0 0 90 70">
+        <polygon points="14,8 76,8 52,40 52,60 38,60 38,40" fill="#fff" stroke="#c9a84a" stroke-width="1.4"/>
+        <g fill="#bdbdbd"><circle cx="26" cy="16" r="2.6"/><circle cx="40" cy="14" r="2.6"/>
+          <circle cx="54" cy="16" r="2.6"/><circle cx="64" cy="14" r="2.6"/><circle cx="34" cy="22" r="2.6"/><circle cx="48" cy="22" r="2.6"/></g>
+        <circle cx="45" cy="66" r="3" fill="#9a7d1f"/>
+      </svg>
+      <div class="lab"><b>keep top-K candidates</b></div>
+    </div>
+  </div>
+
+  <div class="arrow">&#10148;</div>
+
+  <!-- ================= SOFTMAX + OUTPUT ================= -->
+  <div class="col" style="flex:0 0 200px;">
+    <div class="panel gate">
+      <div class="hd">Per-origin softmax</div>
+      <div class="sub">over surviving candidates &middot; per mode (car / transit / walk)</div>
+      <div class="box" style="margin-top:6px;">normalised choice probability across the screened set</div>
+    </div>
+    <div class="panel" style="border-color:#9aa6a0;background:#fbfbfb;">
+      <div class="hd" style="color:#444;">Output</div>
+      <div class="sub">predicted choice probabilities (destination, mode)</div>
+      <svg width="180" height="92" viewBox="0 0 180 92" style="margin-top:4px;">
+        <g stroke="#d2d2d2" stroke-width="0.8" fill="none">
+          <rect x="6" y="6" width="150" height="80"/>
+          <line x1="6" y1="26" x2="156" y2="26"/><line x1="6" y1="46" x2="156" y2="46"/><line x1="6" y1="66" x2="156" y2="66"/>
+          <line x1="36" y1="6" x2="36" y2="86"/><line x1="66" y1="6" x2="66" y2="86"/><line x1="96" y1="6" x2="96" y2="86"/><line x1="126" y1="6" x2="126" y2="86"/>
+        </g>
+        <rect x="68" y="48" width="26" height="16" fill="#7fae8a"/>
+        <rect x="98" y="28" width="26" height="16" fill="#9fbce0"/>
+        <rect x="38" y="68" width="26" height="16" fill="#cdd6ea"/>
+        <circle cx="81" cy="56" r="4" fill="#5aa469"/>
+        <!-- colorbar -->
+        <defs><linearGradient id="cb" x1="0" y1="1" x2="0" y2="0">
+          <stop offset="0" stop-color="#eef3fb"/><stop offset="1" stop-color="#2f6fb0"/></linearGradient></defs>
+        <rect x="164" y="10" width="8" height="64" fill="url(#cb)" stroke="#bbb" stroke-width="0.5"/>
+      </svg>
+      <div class="legend">
+        <span><span class="sw" style="background:#7fae8a;"></span>car</span>
+        <span><span class="sw" style="background:#9fbce0;"></span>transit</span>
+        <span><span class="sw" style="background:#e2b85a;"></span>walk</span>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /main row -->
+
+<!-- ================= TRAINING & EVALUATION ================= -->
+<div class="panel train" style="margin-top:12px;">
+  <div class="hd" style="color:#555;">Training &amp; evaluation</div>
+  <div class="row" style="align-items:stretch;">
+    <div class="box" style="flex:1;"><b>Primary objective</b><div class="lab">flow-weighted cross-entropy on observed commuting flows</div></div>
+    <div class="arrow">+</div>
+    <div class="box" style="flex:1;"><b>External anchors</b><div class="lab">smart-card transit anchor&nbsp;&middot;&nbsp;target modal-share anchor</div></div>
+    <div class="arrow">+</div>
+    <div class="box" style="flex:1;"><b>Total loss</b><div class="lab">optimised end-to-end</div></div>
+    <div class="arrow">&#10148;</div>
+    <div class="box" style="flex:1;"><b>Evaluation</b><div class="lab">flow-similarity: R&sup2; / RMSE / KL (observed vs predicted)</div></div>
+  </div>
+</div>
+
+</div><!-- /canvas -->
+</body>
+</html>
