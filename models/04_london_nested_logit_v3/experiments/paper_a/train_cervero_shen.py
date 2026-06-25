@@ -98,6 +98,22 @@ def forward_cs(
                                                             # it (not the full IV_mode) inside V_dest.
                                                             # Mode probability P(m|i,j) STILL uses
                                                             # the full IV_mode with raw time.
+    tier_commute_probe: bool = False,                       # if True, accumulate per-income-tier
+                                                            # predicted mean commute time (min, off-
+                                                            # diagonal, hour-weighted) from each
+                                                            # class's exp(log pi_c + log P_c). Used
+                                                            # by the income x commute moment injection.
+    soc_dest_probe: bool = False,                           # if True, accumulate per-SOC predicted
+                                                            # destination flow (N,), off-diagonal,
+                                                            # hour-weighted, from each class's
+                                                            # exp(log pi_c + log P_c). Used by the
+                                                            # occupation x industry moment injection
+                                                            # to re-identify delta_match.
+    force_no_ckpt: bool = False,                            # disable gradient checkpointing in the
+                                                            # class loop. Windows-CPU torch SEGFAULTs
+                                                            # in checkpointed backward; the moment
+                                                            # injections (few params) fit in RAM
+                                                            # without checkpointing, so set True there.
 ):
     _V_gnn_raw = encoder(X_static, X_dynamic, edge_index)
     # Encoder may return (T, N) [legacy per-grid] or (T, N, N) [pair-aware NN]
@@ -209,6 +225,7 @@ def forward_cs(
         log_cost_pass_per_tier = None
 
     log_iv_quality = None  # only used when strip_time_from_vdest_iv=True
+    _scaled_list = []      # per-mode V_lower/λ, for exposing mode log-probs (identifiability diag)
     for m_idx, name in enumerate(mode_names):
         t_m = t_per_mode[name]                                        # (T, N, N)
         # β_t_m(d) = β_t_m,0 + β_t_m,1 · log_d_ij  → per-pair time-disutility coeff
@@ -221,6 +238,7 @@ def forward_cs(
                      + asc[m_idx]
                      + agent_term)                                     # (T, N, N)
         scaled = V_lower_m / lam_view                                  # (T, N, N)
+        _scaled_list.append(scaled)
         if log_iv is None:
             log_iv = scaled
         else:
@@ -245,6 +263,7 @@ def forward_cs(
 
     IV_mode = log_iv                                                   # (T, N, N)
     ce_mode_per_ijt = IV_mode - ce_accum                               # (T, N, N)
+    log_P_m = torch.stack(_scaled_list, dim=-1) - IV_mode.unsqueeze(-1)  # (T,N,N,M) mode log-probs
     # IV used inside V_dest: full (with time) by default, quality-only when stripping.
     IV_for_V_dest = log_iv_quality if strip_time_from_vdest_iv else IV_mode
 
@@ -328,6 +347,7 @@ def forward_cs(
     else:
         V_busy_dest = None
 
+    soc_dest_flow = None   # (S, N) per-SOC predicted dest flow when soc_dest_probe (else None)
     if rum.use_tier_mixture:
         # ---- Latent-class mixture: K = n_classes (27 if SOC×tier; else 3) ----
         # Each class c has its own complete utility-function parameter set.
@@ -389,7 +409,7 @@ def forward_cs(
             _gnn_g = None
 
         from torch.utils.checkpoint import checkpoint as _ckpt
-        use_ckpt = rum.training or any(p.requires_grad for p in rum.parameters())
+        use_ckpt = (rum.training or any(p.requires_grad for p in rum.parameters())) and not force_no_ckpt
 
         # Pre-extract per-class kink params as tensors (small) so checkpoint can take them.
         # The actual (T, N, N) kink_term is computed inside the checkpoint to avoid saving 27 of them.
@@ -432,11 +452,46 @@ def forward_cs(
                 V_dest_c = (V_rum_c if _gnn_blend is None
                             else (1.0 - _gnn_blend) * V_rum_c + V_nn_scaled)
             log_P_c = F.log_softmax(V_dest_c, dim=-1)
-            return log_pi_c_row.view(1, N, 1) + log_P_c
+            weighted = log_pi_c_row.view(1, N, 1) + log_P_c
+            # Per-tier commute-time probe contributions, computed INSIDE the checkpoint so
+            # the (T,N,N) intermediates are recomputed in backward, not stored (bounds mem).
+            if tier_commute_probe or soc_dest_probe:
+                _pf = weighted.exp() * _otot * _offd * _hw                   # (T,N,N) flow contrib
+                _ctn = (_pf * t_min_per_pair).sum() if tier_commute_probe else weighted.new_zeros(())
+                _ctd = _pf.sum() if tier_commute_probe else weighted.new_zeros(())
+                _df = _pf.sum(dim=(0, 1)) if soc_dest_probe else weighted.new_zeros(N)  # (N,)
+                return weighted, _ctn, _ctd, _df
+            return (weighted, weighted.new_zeros(()), weighted.new_zeros(()),
+                    weighted.new_zeros(N))
 
         log_P_accum = None
         V_rum_dest_avg = torch.zeros(T, N, N, device=V_gnn.device)
         has_kink = rum.use_tier_threshold
+        # Optional per-tier commute-time probe (differentiable, memory-bounded): for each
+        # income tier, accumulate sum of predicted off-diagonal flow * t_min and the flow
+        # normalizer, using each class's contribution exp(log pi_c + log P_c).
+        # Optional per-SOC destination-flow probe (differentiable, memory-bounded):
+        # for each occupation, accumulate predicted off-diagonal, hour-weighted flow to
+        # each destination from each class's contribution exp(log pi_c + log P_c), grouped
+        # by soc_idx (= c % S). The (T,N,N) flow tensor is built INSIDE the checkpoint (see
+        # _class_logp_step) so it is recomputed in backward, not stored x27 (that was a
+        # SEGFAULT). Used to build the predicted occupation->industry landing table for the
+        # occupation x industry moment injection (delta_match).
+        _tcp = bool(tier_commute_probe)
+        _sdp = bool(soc_dest_probe)
+        if _sdp:
+            assert rum.use_soc_mixture, "soc_dest_probe requires --use-soc-mixture"
+            _Ns = rum.n_soc
+            _sf = [None] * _Ns
+        if _tcp:
+            _Kt = rum.n_income_tiers
+            _tnum = [None] * _Kt
+            _tden = [None] * _Kt
+        if _tcp or _sdp:   # shared probe weights (off-diagonal, observed production, hour)
+            _otot = observed_OD.sum(dim=2, keepdim=True)                     # (T,N,1)
+            _offd = (1.0 - torch.eye(N, device=V_gnn.device)).view(1, N, N)  # zero diagonal
+            _hw = (hour_weights.view(-1, 1, 1) if hour_weights is not None
+                   else torch.ones(T, 1, 1, device=V_gnn.device))
         for c in range(K):
             # Structured-heterogeneity lookup:
             #   tier_idx selects tier-only params (α_W, ν_D, T, β_kink, k_sharp)
@@ -454,6 +509,14 @@ def forward_cs(
                     delta_m_eff = delta_m[soc_idx] * exp_d_d_attn                    # (N,)
                     V_M_c = (gamma_M_eff.view(N, 1) * (log_M_j.view(1, N) + log_cosine_match)
                              + delta_m_eff.view(N, 1) * log_dshare_for_c.view(1, N))  # (N, N)
+                elif getattr(rum, "use_occ_specific_mass", False):
+                    # Occupation-specific job mass M_{j,s} = M_j × demand_share[s,j].
+                    # log M_{j,s} = log_M_j + log_dshare_for_c. Occupation is baked INTO
+                    # gravity with the full γ_M weight (no separate small δ_match add-on),
+                    # so destinations attract worker class c by their OCCUPATION-MATCHED
+                    # job count, not total job mass. Tests whether aggregate flows reward
+                    # occupation matching when it carries gravity-strength weight.
+                    V_M_c = gamma_M[c] * (log_M_j.view(1, N) + log_dshare_for_c.view(1, N))  # (N, N)
                 else:
                     V_M_c = (gamma_M[c] * (log_M_j.view(1, N) + log_cosine_match)
                              + delta_m[soc_idx] * log_dshare_for_c.view(1, N))        # (N, N)
@@ -536,18 +599,24 @@ def forward_cs(
                 match_term_c = None
                 cost_term_c = None
             if use_ckpt:
-                weighted_c = _ckpt(_class_logp_step,
+                weighted_c, _nc, _dc, _fc = _ckpt(_class_logp_step,
                                    V_M_c, V_other_c, log_joint_per_class[c],
                                    T_c, bk_c, ks_c, has_kink,
                                    filter_term_c, match_term_c, cost_term_c,
                                    use_reentrant=False)
             else:
-                weighted_c = _class_logp_step(V_M_c, V_other_c,
+                weighted_c, _nc, _dc, _fc = _class_logp_step(V_M_c, V_other_c,
                                               log_joint_per_class[c],
                                               T_c, bk_c, ks_c, has_kink,
                                               filter_term_c, match_term_c, cost_term_c)
             log_P_accum = (weighted_c if log_P_accum is None
                            else torch.logaddexp(log_P_accum, weighted_c))
+            if _tcp:  # per-tier commute-time accumulation (scalars from inside checkpoint)
+                _tnum[tier_idx] = _nc if _tnum[tier_idx] is None else _tnum[tier_idx] + _nc
+                _tden[tier_idx] = _dc if _tden[tier_idx] is None else _tden[tier_idx] + _dc
+            if _sdp:  # per-SOC destination flow (N,) — from inside checkpoint, memory-bounded
+                _si = c % S
+                _sf[_si] = _fc if _sf[_si] is None else _sf[_si] + _fc
             # Detached diagnostic accumulator
             with torch.no_grad():
                 V_rum_c_diag = (V_M_c + V_other_c).unsqueeze(0) + lam_view * IV_for_V_dest
@@ -565,7 +634,15 @@ def forward_cs(
                 V_rum_dest_avg = V_rum_dest_avg + V_rum_c_diag / K
         log_P_D = log_P_accum
         V_rum_dest = V_rum_dest_avg
+        if _tcp:
+            tier_commute_time = torch.stack([_tnum[k] / _tden[k].clamp_min(1e-6)
+                                             for k in range(_Kt)])           # (K_tier,) minutes
+        else:
+            tier_commute_time = None
+        if _sdp:
+            soc_dest_flow = torch.stack([_sf[s] for s in range(_Ns)])       # (S, N)
     else:
+        tier_commute_time = None
         # single-RUM path (original)
         # gamma_M / alpha_w / nu_D / delta_m are scalars here (shape (1,) or 0-dim).
         # With attribute attention they become per-origin via modulator.
@@ -863,11 +940,17 @@ def forward_cs(
         "log_P_D": log_P_D,
         "nll_dest": nll_dest,
         "ce_mode": ce_mode,
+        "ce_mode_per_ijt": ce_mode_per_ijt,
+        "log_P_m": log_P_m,
+        "flow": flow,
+        "flow_sum": flow_sum,
         "nn_norm_sq": nn_norm_sq,
         "ortho_cos_sq": ortho_cos_sq,
         "match_ortho_cos_sq": match_ortho_cos_sq,
         "iv_share_across_j": iv_share_across_j,
         "diagnostic": diagnostic,
+        "tier_commute_time": tier_commute_time,
+        "soc_dest_flow": soc_dest_flow,
     }
 
 
@@ -911,6 +994,20 @@ def main():
     ap.add_argument("--gnn-residual-scale-init", type=float, default=0.1)
     ap.add_argument("--lambda-nn-norm", type=float, default=0.0,
                     help="L2 penalty on ‖V_NN‖² to enforce Wang Path A (δ_measured < 0.30)")
+    ap.add_argument("--lambda-occ-penalty", type=float, default=0.0,
+                    help="Ben-Akiva-Morikawa in-loss external-moment penalty: anchors per-SOC "
+                         "delta_match (z-scored pattern) to WU07AUK occupation sorting. Sweep λ to "
+                         "show external data narrows the (aggregate-OD-flat) heterogeneity solution set.")
+    ap.add_argument("--occ-ext-delta", type=str,
+                    default="0.033,0.130,0.077,-0.019,0.252,0.244,0.435,0.337,0.382",
+                    help="WU07AUK per-SOC occupation-sorting delta (external moment target, soc1..9).")
+    ap.add_argument("--lambda-class-penalty", type=float, default=0.0,
+                    help="Ben-Akiva-Morikawa in-loss external-moment penalty on income/class: anchors "
+                         "per-tier alpha_wage (z-scored) to NS-SeC class-wage sorting (monotone increasing: "
+                         "higher income tier -> higher-wage destinations). Sweep λ to narrow.")
+    ap.add_argument("--class-ext-pattern", type=str, default="mono",
+                    help="Income/class external target: 'mono' = monotone increasing wage attraction "
+                         "by tier (NS-SeC); or comma-sep z-target values matching n_income_tiers.")
     ap.add_argument("--lambda-ortho", type=float, default=0.0,
                     help="Aggregate orthogonality penalty: cos²(V_NN, V_RUM aggregate). "
                          "Encourages NN to learn signal RUM structurally cannot express. "
@@ -1200,6 +1297,101 @@ def main():
     ap.add_argument("--aux-path", default="data/processed/paperA_v3_aux_cervero.npz")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--out", default="evaluation_outputs/paper_a/cervero_shen_smoke.json")
+    # --- Profile-likelihood / eval-only mode (2026-05-26) ---
+    # Load a trained .pt, skip training, scan each parameter on a grid and record
+    # how val NLL / CPC respond. Sharp response = data-identified; flat = not.
+    # Default-off: when --load-pt is unset, training behaviour is unchanged.
+    ap.add_argument("--load-pt", type=str, default=None,
+                    help="Profile mode: path to trained .pt. Skips training, runs "
+                         "profile-likelihood scan, writes --profile-out.")
+    ap.add_argument("--profile-out", type=str, default=None,
+                    help="Output JSON path for profile-likelihood results "
+                         "(relative to v3 root). Required with --load-pt.")
+    ap.add_argument("--profile-refit-epochs", type=int, default=0,
+                    help="If >0, after fixing the scanned param, re-optimise all OTHER "
+                         "params for this many epochs (true profile likelihood). "
+                         "0 = cheap slice (no refit).")
+    ap.add_argument("--profile-params", type=str, default="all",
+                    help="Comma-separated param tags to scan (T_max,alpha_W,nu_D,"
+                         "gamma_decay,delta_match,match_thresh,gamma_M_tier), or 'all'.")
+    ap.add_argument("--use-occ-specific-mass", action="store_true",
+                    help="Replace γ_M·log_M_j + δ_match·log_dshare with γ_M·log(M_j·dshare_s) "
+                         "= occupation-specific job mass as the gravity attractor. Requires "
+                         "--use-soc-mixture. Tests whether occupation matching, given full "
+                         "gravity weight, helps or hurts aggregate flow prediction.")
+    ap.add_argument("--profile-zero-nn", action="store_true",
+                    help="Before profiling, set the GNN residual/blend scale to ~0 "
+                         "(remove V_NN from V_dest). Tests whether the NN was absorbing "
+                         "the structural signal that would otherwise identify RUM params.")
+    # --- Income x commute MOMENT INJECTION (2026-06-18, SIGSPATIAL positive result) ---
+    # Aggregate OD leaves per-tier commute-tolerance T_max FLAT (unidentified). Inject an
+    # EXTERNAL income x commute-time moment (NTS, 3 numbers = mean commute minutes per
+    # income tier) and re-identify raw_T_max_per_tier from it: freeze everything else
+    # (incl. gamma_M and the NN), fit only T_max so predicted per-tier commute time
+    # matches the target. Constructive half of the conditions-for-identifiability story.
+    ap.add_argument("--inject-income-moment", type=str, default=None,
+                    help="Path to .npz with key 'target_min' (K_tier mean commute minutes "
+                         "by income tier). Freezes all params except raw_T_max_per_tier and "
+                         "fits it to match predicted per-tier commute time. Requires --load-pt.")
+    ap.add_argument("--inject-param", type=str, default="decay",
+                    choices=["gammaM", "decay", "tmin", "kink", "tmax"],
+                    help="Per-tier lever to fit to the moment: decay=raw_gamma_decay "
+                         "(Hansen distance decay, continuous, default), tmin=raw_beta_tmin, "
+                         "kink=raw_beta_t_kink_per_tier, tmax=raw_T_max_per_tier "
+                         "(saturated hard gate, diagnostic only).")
+    ap.add_argument("--inject-steps", type=int, default=300)
+    ap.add_argument("--inject-lr", type=float, default=0.05)
+    ap.add_argument("--inject-out", type=str, default=None,
+                    help="Output JSON for injection result (relative to v3 root).")
+    # --- Occupation x industry MOMENT INJECTION (2026-06-22, SIGSPATIAL positive result) ---
+    # Aggregate OD leaves occupation matching delta_match FLAT (occupation-blind flows).
+    # Inject an EXTERNAL, published, AGGREGATE statistic the OD does not contain -- the
+    # national P(industry|occupation) from ONS APS (build_occ_industry_target.py) -- and
+    # re-identify delta_match: freeze everything else (incl. gamma_M, T_max, the NN), fit
+    # only raw_delta_match so the model's predicted occupation->industry landing
+    # distribution matches the target. Occupation analogue of --inject-income-moment.
+    ap.add_argument("--inject-occ-moment", type=str, default=None,
+                    help="Path to .npz with key 'target_pio' (S x n_ind, P(industry|occupation)). "
+                         "Freezes all params except raw_delta_match and fits it to match the "
+                         "predicted per-SOC destination-industry distribution. Requires --load-pt "
+                         "+ --use-soc-mixture.")
+    ap.add_argument("--inject-occ-steps", type=int, default=300)
+    ap.add_argument("--inject-occ-lr", type=float, default=0.05)
+    ap.add_argument("--inject-occ-loss", type=str, default="kl", choices=["kl", "relmse"],
+                    help="Moment-matching loss: kl = sum_o KL(target_o || pred_o) (default), "
+                         "relmse = sum ((pred-target)/target)^2.")
+    ap.add_argument("--inject-occ-thresh", action="store_true",
+                    help="Two-lever recovery: also free the per-SOC consideration-filter "
+                         "threshold (raw_match_filter_thresh_per_soc) alongside delta_match. "
+                         "Gives moderate, interpretable magnitudes and a lower residual than "
+                         "delta_match alone.")
+    ap.add_argument("--inject-occ-out", type=str, default=None,
+                    help="Output JSON for occupation injection result (relative to v3 root).")
+    # Hessian spectrum: second-order identifiability diagnostic at the optimum.
+    ap.add_argument("--hessian-spectrum", action="store_true",
+                    help="Compute Hessian of val NLL w.r.t. behavioral coefficients "
+                         "(V_NN cached/detached) and report eigenvalue spectrum + per-coef "
+                         "diagonal curvature. Requires --load-pt.")
+    ap.add_argument("--hessian-params", type=str,
+                    default="raw_gamma_M,raw_delta_match,raw_gamma_decay,raw_alpha_wage",
+                    help="Comma-separated raw RUM param names to include in the Hessian block.")
+    ap.add_argument("--hessian-mask", type=str, default="val", choices=["val", "train"],
+                    help="Which split to evaluate NLL on for the Hessian (default val).")
+    ap.add_argument("--hessian-eps", type=float, default=1e-3,
+                    help="Relative finite-difference step for the Hessian (central diff).")
+    ap.add_argument("--hessian-out", type=str, default=None,
+                    help="Output JSON for Hessian spectrum (relative to v3 root).")
+    # Synthetic collinearity sweep: identifiability threshold for occupation matching.
+    ap.add_argument("--synth-collin-sweep", action="store_true",
+                    help="Sweep cross-SOC demand-profile collinearity; at each level "
+                         "generate OD from a known delta_match and recover it. Requires --load-pt.")
+    ap.add_argument("--synth-betas", type=str, default="0.2,0.4,0.6,1.0,1.6,2.6",
+                    help="Comma-separated cross-SOC spread multipliers (beta<1 = more "
+                         "collinear, >1 = less). beta=1 reproduces the dataset's collinearity.")
+    ap.add_argument("--synth-recover-steps", type=int, default=120,
+                    help="Adam steps to recover delta_match from random init per collinearity level.")
+    ap.add_argument("--synth-out", type=str, default=None,
+                    help="Output JSON for the synthetic sweep (relative to v3 root).")
     args = ap.parse_args()
 
     # ---- load v2 data (encoder inputs, OD flows, t_ij, etc.) ----
@@ -1311,6 +1503,9 @@ def main():
         demand_share_np = _per_soc_demand_share(soc_props_np, eps_np, grid_ind_np)   # (N, 9)
         soc_props_per_origin = torch.from_numpy(soc_props_np).float()
         per_soc_demand_share_j = torch.from_numpy(demand_share_np).float()
+        # Destination industry composition (N, n_ind): used by the occupation x industry
+        # moment injection to map per-SOC predicted dest flow -> predicted P(industry|occ).
+        grid_industry_prop_t = torch.from_numpy(grid_ind_np.astype(np.float32))
         print(f"  per-SOC: soc_props {tuple(soc_props_per_origin.shape)}, "
               f"demand_share_j {tuple(per_soc_demand_share_j.shape)}; "
               f"demand_share range [{per_soc_demand_share_j.min():.3f}, {per_soc_demand_share_j.max():.3f}], "
@@ -1318,6 +1513,7 @@ def main():
     else:
         soc_props_per_origin = None
         per_soc_demand_share_j = None
+        grid_industry_prop_t = None
         if args.use_soc_mixture:
             raise RuntimeError("--use-soc-mixture requires soc_props + grid_industry_prop + epsilon in aux")
 
@@ -1376,6 +1572,8 @@ def main():
     if soc_props_per_origin is not None:
         soc_props_per_origin = soc_props_per_origin.to(device)
         per_soc_demand_share_j = per_soc_demand_share_j.to(device)
+        if grid_industry_prop_t is not None:
+            grid_industry_prop_t = grid_industry_prop_t.to(device)
     pi_m_pair = pair_mode_share.to(device).float()
     grid_borough_idx = grid_borough_idx.to(device)
 
@@ -1556,6 +1754,12 @@ def main():
         attn_max_add=args.attn_max_add,
         nu_D_sign_free=args.nu_D_sign_free,
     ).to(device)
+    # Occupation-specific job mass reformulation (set as attribute; forward_cs reads it).
+    rum.use_occ_specific_mass = bool(args.use_occ_specific_mass)
+    if rum.use_occ_specific_mass:
+        assert args.use_soc_mixture, "--use-occ-specific-mass requires --use-soc-mixture"
+        print("        occupation-specific mass: V_M = γ_M·log(M_j·demand_share_s) "
+              "(occupation baked into gravity)")
 
     # z-score normalization: inject per-SOC demand_share mean and std
     if args.use_z_score_match:
@@ -1781,6 +1985,669 @@ def main():
         total_epochs = args.epochs
 
     t0 = time.time()
+    # ===================================================================
+    # Profile-likelihood / eval-only mode (2026-05-26).
+    # Load trained .pt, skip training, scan each param on a grid in EFFECTIVE
+    # space (multiplicative around fitted value), record val NLL / CPC response.
+    # Cheap "slice" (refit-epochs=0): hold all other params fixed. A FLAT slice
+    # is strong evidence of non-identification; a SHARP slice is necessary but
+    # not sufficient (others may compensate) -> confirm with --profile-refit-epochs.
+    # ===================================================================
+    if args.load_pt is not None:
+        import json as _pjson
+        assert (args.profile_out or args.inject_income_moment or args.inject_occ_moment
+                or args.hessian_spectrum or args.synth_collin_sweep), \
+            "--load-pt requires --profile-out, --inject-income-moment, --inject-occ-moment, " \
+            "--hessian-spectrum, or --synth-collin-sweep"
+        _ckpt = torch.load(args.load_pt, map_location=device, weights_only=False)
+        encoder.load_state_dict(_ckpt["encoder_state"])
+        rum.load_state_dict(_ckpt["rum_state"])
+        encoder.eval(); rum.eval()
+
+        if args.profile_zero_nn:
+            # Remove V_NN from V_dest so we can see whether RUM params regain
+            # leverage on NLL absent the NN (tests NN-absorption hypothesis).
+            _off = math.log(math.exp(1e-4) - 1.0)  # inv_softplus(1e-4) ~= -9.21
+            with torch.no_grad():
+                if getattr(rum, "raw_gnn_residual_scale", None) is not None:
+                    rum.raw_gnn_residual_scale.fill_(_off)
+                if getattr(rum, "raw_gnn_blend", None) is not None:
+                    rum.raw_gnn_blend.fill_(-15.0)
+            print("[profile] ZERO-NN mode: V_NN removed from V_dest", flush=True)
+
+        # Cache V_NN once: the encoder (GNN) output does NOT depend on RUM params,
+        # so during profiling (encoder frozen) we compute it a single time and a
+        # stub encoder returns the cached tensor — each forward then skips the
+        # costly GraphSAGE pass. Exact, and ~50x faster on CPU.
+        with torch.no_grad():
+            _vnn_cache = encoder(X_static, X_dynamic, edge_index).detach()
+
+        class _StubEncoder:
+            def __call__(self, *a, **k):
+                return _vnn_cache
+
+            def parameters(self):
+                return iter(())
+
+        _enc = _StubEncoder()
+
+        def _profile_fwd(mask=val_mask, tier_commute_probe=False, soc_dest_probe=False,
+                         force_no_ckpt=False):
+            return forward_cs(
+                _enc, rum, X_static, X_dynamic, edge_index,
+                t_per_mode, mode_names, log_d_ij, match_prob, log_M_j, log_W_j, log_D_j,
+                income_score, pct_kids, mean_cars, income_tier_props,
+                pi_m_pair, grid_borough_idx, observed_OD, mask,
+                soc_props_per_origin=soc_props_per_origin,
+                per_soc_demand_share_j=per_soc_demand_share_j,
+                hour_weights=hour_weights,
+                log_transit_access_z=log_transit_access_z,
+                log_commercial_z=log_commercial_z,
+                quality_nvm_z=quality_nvm_z,
+                quality_ta_z=quality_ta_z,
+                quality_wf_z=quality_wf_z,
+                log_time_mask_per_tier=log_time_mask_per_tier,
+                strip_time_from_vdest_iv=args.strip_time_from_vdest_iv,
+                tier_commute_probe=tier_commute_probe,
+                soc_dest_probe=soc_dest_probe,
+                force_no_ckpt=force_no_ckpt,
+            )
+
+        def _profile_eval():
+            with torch.no_grad():
+                _o = _profile_fwd(val_mask)
+                return (float(cpc(_o["log_P_D"], observed_OD, val_mask, hour_weights=hour_weights)),
+                        float(_o["nll_dest"]))
+
+        def _train_loss_from(out):
+            l = (out["nll_dest"]
+                 + args.lambda_kl * out["ce_mode"]
+                 + args.lambda_nn_norm * out["nn_norm_sq"]
+                 + args.lambda_ortho * out["ortho_cos_sq"]
+                 + args.lambda_match_ortho * out["match_ortho_cos_sq"]
+                 + args.lambda_iv_balance * (out["iv_share_across_j"] - args.target_iv_share) ** 2)
+            if rum.use_self_loop_boost and args.self_loop_l2 > 0:
+                l = l + args.self_loop_l2 * (rum.self_loop_boost ** 2).mean()
+            if rum.n_busy_dest > 0 and args.busy_dest_l2 > 0:
+                l = l + args.busy_dest_l2 * (rum.busy_dest_boost ** 2).mean()
+            return l
+
+        _REFIT = int(args.profile_refit_epochs)
+
+        def _refit_eval(p, idxs, kind, effs):
+            # TRUE profile likelihood: pin the scanned indices at `effs`, then
+            # re-optimize ALL OTHER rum params (V_NN held fixed) for _REFIT steps,
+            # and evaluate on val. A param that stays sharp after others are free
+            # to compensate is identified; one that flattens is not.
+            snap = {n: t.detach().clone() for n, t in rum.named_parameters()}
+            for k, i in enumerate(idxs):
+                _set_eff(p, i, kind, effs[k])
+            pinned = [p.data[i].item() for i in idxs]
+            if _REFIT > 0:
+                rum.train()
+                opt = torch.optim.AdamW([q for q in rum.parameters() if q.requires_grad],
+                                        lr=args.lr_rum, weight_decay=0.0)
+                for _it in range(_REFIT):
+                    opt.zero_grad()
+                    loss = _train_loss_from(_profile_fwd(train_mask))
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(list(rum.parameters()), 1.0)
+                    opt.step()
+                    with torch.no_grad():  # re-pin scanned indices after each step
+                        for k, i in enumerate(idxs):
+                            p.data[i] = pinned[k]
+                rum.eval()
+            c, nll = _profile_eval()
+            with torch.no_grad():
+                for n, t in rum.named_parameters():
+                    t.data.copy_(snap[n])
+            return c, nll
+
+        def _inv_softplus_t(y):  # y > 0 (tensor or float) -> raw such that softplus(raw)=y
+            import math as _m
+            yv = float(y)
+            return yv if yv > 20.0 else _m.log(_m.expm1(yv))
+
+        import time as _time
+        _t0 = _time.time()
+        base_cpc, base_nll = _profile_eval()
+        _fwd_s = _time.time() - _t0
+        print(f"[profile] loaded {args.load_pt}", flush=True)
+        print(f"[profile] BASELINE reproduce: CPC={base_cpc:.4f} (ckpt {_ckpt['final_cpc']:.4f}, "
+              f"diff {base_cpc-_ckpt['final_cpc']:+.4f}) | NLL={base_nll:.4f} | "
+              f"forward={_fwd_s:.1f}s", flush=True)
+
+        # ---- HESSIAN SPECTRUM (identifiability via local curvature) ----
+        # Second-order companion to the profile likelihood. At the fitted optimum,
+        # form the Hessian of the validation NLL w.r.t. the behavioral coefficients
+        # (V_NN cached & detached, so no GNN double-backward). Near-zero eigenvalues
+        # are flat directions = non-identified combinations; the per-coefficient
+        # diagonal curvature maps onto the profile-likelihood table (identified =
+        # sharp curvature, flat ~ 0). Coordinates are the raw (unconstrained)
+        # parametrization; flat directions are coordinate-covariant (a genuinely
+        # flat direction has ~0 curvature in any smooth reparametrization).
+        if getattr(args, "hessian_spectrum", False):
+            import json as _hjson
+            groups = [g.strip() for g in (args.hessian_params or
+                      "raw_gamma_M,raw_delta_match,raw_gamma_decay,raw_alpha_wage").split(",") if g.strip()]
+            sel, blocks = [], []   # (name, start, len)
+            off = 0
+            for g in groups:
+                t = getattr(rum, g, None)
+                if t is None:
+                    print(f"[hessian] skip missing param '{g}'", flush=True); continue
+                sel.append(t); blocks.append((g, off, t.numel())); off += t.numel()
+            assert sel, "no behavioral params found for hessian"
+            for p in rum.parameters():
+                p.requires_grad_(False)
+            for t in sel:
+                t.requires_grad_(True)
+            rum.eval()
+            _hmask = train_mask if getattr(args, "hessian_mask", "val") == "train" else val_mask
+            n = int(off)
+            print(f"[hessian] params={[b[0] for b in blocks]} dim={n} mask={args.hessian_mask} "
+                  f"(finite-diff gradient, memory-frugal: no create_graph)", flush=True)
+            # global flat index -> (tensor, local linear index)
+            idxmap = []
+            for t in sel:
+                for j in range(t.numel()):
+                    idxmap.append((t, j))
+
+            def _grad_vec():
+                for t in sel:
+                    if t.grad is not None:
+                        t.grad = None
+                nll = _profile_fwd(_hmask)["nll_dest"]
+                g = torch.autograd.grad(nll, sel)            # single backward, no create_graph
+                return torch.cat([gi.reshape(-1) for gi in g]).detach()
+
+            EPS = float(getattr(args, "hessian_eps", 1e-3))
+            H = torch.zeros(n, n, device=device)
+            for i in range(n):
+                t, j = idxmap[i]
+                orig = t.data.view(-1)[j].item()
+                h = EPS * (1.0 + abs(orig))                   # relative step
+                with torch.no_grad():
+                    t.data.view(-1)[j] = orig + h
+                gp = _grad_vec()
+                with torch.no_grad():
+                    t.data.view(-1)[j] = orig - h
+                gm = _grad_vec()
+                with torch.no_grad():
+                    t.data.view(-1)[j] = orig            # restore exactly
+                H[:, i] = (gp - gm) / (2.0 * h)
+                if (i + 1) % 10 == 0:
+                    print(f"[hessian]   col {i+1}/{n}", flush=True)
+            H = 0.5 * (H + H.T)                              # symmetrize (FD noise)
+            evals = torch.linalg.eigvalsh(H)                       # ascending
+            evals_l = [float(x) for x in evals]
+            diag = torch.diagonal(H)
+            # per-named-coefficient summary (mean & max diagonal curvature within block)
+            FLAT_EIG = 1e-3 * max(1.0, float(evals.max()))         # relative flat threshold
+            n_flat = int((evals < FLAT_EIG).sum())
+            # top eigenvector: which raw coefficients dominate the stiffest direction
+            evecs = torch.linalg.eigh(H).eigenvectors
+            top = evecs[:, -1].abs()
+            coef_diag, coef_top = {}, {}
+            for (gname, s, ln) in blocks:
+                blk = diag[s:s + ln]
+                coef_diag[gname] = {"mean": float(blk.mean()), "max": float(blk.max()),
+                                    "min": float(blk.min())}
+                coef_top[gname] = float(top[s:s + ln].pow(2).sum())   # share of stiff direction
+                # gamma_M is tier-major (tier*S + soc): report per-tier diagonal
+                if gname == "raw_gamma_M":
+                    S = rum.n_soc
+                    coef_diag[gname]["per_tier_mean"] = [float(blk.view(-1, S)[k].mean())
+                                                         for k in range(blk.numel() // S)]
+            res = {"ckpt": args.load_pt, "mask": args.hessian_mask, "dim": n,
+                   "base_nll": float(base_nll), "base_cpc": float(base_cpc),
+                   "eigenvalues": evals_l,
+                   "eig_max": float(evals.max()), "eig_min": float(evals.min()),
+                   "n_flat_directions": n_flat, "flat_eig_threshold": float(FLAT_EIG),
+                   "condition_number": float(evals.max() / evals.clamp_min(1e-12).min()),
+                   "coef_diag_curvature": coef_diag,
+                   "coef_share_of_stiff_direction": coef_top,
+                   "blocks": [(b[0], b[1], b[2]) for b in blocks]}
+            print(f"[hessian] eig range [{evals.min():.3e}, {evals.max():.3e}]  "
+                  f"n_flat(<{FLAT_EIG:.2e})={n_flat}/{n}  cond={res['condition_number']:.2e}", flush=True)
+            for gname in coef_diag:
+                print(f"[hessian]   {gname}: diag mean={coef_diag[gname]['mean']:.3e} "
+                      f"max={coef_diag[gname]['max']:.3e}  stiff-share={coef_top[gname]:.3f}", flush=True)
+            if getattr(args, "hessian_out", None):
+                _hp = V3_ROOT / args.hessian_out
+                _hp.parent.mkdir(parents=True, exist_ok=True)
+                _hjson.dump(res, open(_hp, "w"), indent=2)
+                print(f"[hessian] wrote {_hp}", flush=True)
+            return
+
+        # ---- SYNTHETIC COLLINEARITY SWEEP (identifiability threshold) ----
+        # Constructive condition for OCCUPATION heterogeneity: control the
+        # cross-SOC demand-profile collinearity, generate OD from a KNOWN
+        # delta_match, then recover delta_match from a random init. Recovery
+        # succeeds (low error) only below a collinearity threshold -> turns the
+        # "necessary but not sufficient" resolution result into a sufficient,
+        # quantified condition: identifiable iff demand-profile collinearity < X.
+        if getattr(args, "synth_collin_sweep", False):
+            import json as _sjson
+            assert per_soc_demand_share_j is not None, "synth sweep needs per_soc_demand_share_j"
+            S = rum.n_soc
+
+            def _set_delta(vals):
+                with torch.no_grad():
+                    raw = torch.log(torch.expm1(vals.clamp(min=1e-4)))   # inv-softplus
+                    rum.raw_delta_match.copy_(raw)
+
+            # designed TRUE occupation-matching gradient: clear, monotone, >0
+            true_vals = torch.linspace(0.3, 1.7, S, device=device)
+            _set_delta(true_vals)
+            delta_true = rum.delta_match.detach().clone()
+
+            base_ds = per_soc_demand_share_j.detach().clone()            # (N, S)
+            mbar = base_ds.mean(dim=1, keepdim=True)                     # (N, 1) cross-SOC mean
+
+            def _collin(ds):                # max |off-diag corr| between SOC dest profiles (cols)
+                X = ds.t()                  # (S, N)
+                Xc = X - X.mean(dim=1, keepdim=True)
+                C = Xc @ Xc.t()
+                d = torch.sqrt(torch.diag(C).clamp_min(1e-12))
+                R = C / (d.view(-1, 1) * d.view(1, -1))
+                return float((R - torch.eye(S, device=ds.device)).abs().max())
+
+            def _synth_fwd(ds, od, mask):
+                return forward_cs(
+                    _enc, rum, X_static, X_dynamic, edge_index,
+                    t_per_mode, mode_names, log_d_ij, match_prob, log_M_j, log_W_j, log_D_j,
+                    income_score, pct_kids, mean_cars, income_tier_props,
+                    pi_m_pair, grid_borough_idx, od, mask,
+                    soc_props_per_origin=soc_props_per_origin,
+                    per_soc_demand_share_j=ds, hour_weights=hour_weights,
+                    log_transit_access_z=log_transit_access_z,
+                    log_commercial_z=log_commercial_z,
+                    quality_nvm_z=quality_nvm_z, quality_ta_z=quality_ta_z,
+                    quality_wf_z=quality_wf_z,
+                    log_time_mask_per_tier=log_time_mask_per_tier,
+                    strip_time_from_vdest_iv=args.strip_time_from_vdest_iv)
+
+            # Collinearity knob: blend each SOC's destination profile toward a COMMON
+            # reference column R (= cross-SOC mean profile). lambda->1 makes all SOC
+            # profiles identical (collinear); lambda<0 spreads them apart (less collinear).
+            # NB: do NOT row-renormalize -- that turns the blend into a global scale that
+            # cancels in the correlation (the v1 bug). Demand share enters as a per-SOC
+            # log attractiveness, so the destination softmax tolerates an unnormalized level.
+            R_ref = base_ds.mean(dim=1, keepdim=True)                   # (N,1) common profile
+            lambdas = [float(b) for b in (args.synth_betas or
+                       "-0.6,0.0,0.5,0.8,0.94,0.99").split(",")]
+            OD_tot = observed_OD.sum(dim=2, keepdim=True)               # (T,N,1) origin totals
+            R_STEPS = int(args.synth_recover_steps)
+            # destination-utility params free to COMPENSATE during recovery (mirrors the
+            # profile-with-refit test): collinear profiles let these absorb delta_match.
+            FREE = [a for a in ["raw_delta_match", "raw_gamma_M", "raw_alpha_wage",
+                                "raw_nu_D", "raw_gamma_decay"] if getattr(rum, a, None) is not None]
+            _set_delta(true_vals)
+            truth_state = {n: t.detach().clone() for n, t in rum.named_parameters()}
+            sweep = []
+            for lam in lambdas:
+                ds_b = (R_ref + (1.0 - lam) * (base_ds - R_ref)).clamp(min=1e-6)
+                collin = _collin(ds_b)
+                # restore all params to truth, then generate synthetic OD from TRUE delta
+                with torch.no_grad():
+                    for n, t in rum.named_parameters():
+                        t.data.copy_(truth_state[n])
+                    P = _synth_fwd(ds_b, observed_OD, train_mask)["log_P_D"].exp()
+                    synth_OD = torch.poisson(P * OD_tot).detach()        # finite-sample noise
+                # recover: random-init delta_match, free destination-utility params to
+                # compensate, fit to noisy synthetic OD
+                for p in rum.parameters():
+                    p.requires_grad_(False)
+                with torch.no_grad():
+                    rum.raw_delta_match.copy_(torch.randn_like(rum.raw_delta_match) * 0.5)
+                free_params = []
+                for a in FREE:
+                    getattr(rum, a).requires_grad_(True)
+                    free_params.append(getattr(rum, a))
+                opt = torch.optim.Adam(free_params, lr=0.05)
+                rum.train()
+                for _it in range(R_STEPS):
+                    opt.zero_grad()
+                    loss = _synth_fwd(ds_b, synth_OD, train_mask)["nll_dest"]
+                    loss.backward()
+                    opt.step()
+                rum.eval()
+                rec = rum.delta_match.detach().clone()
+                mae = float((rec - delta_true).abs().mean())
+                relmae = float(((rec - delta_true).abs()
+                                / delta_true.abs().clamp_min(1e-3)).mean())
+                sweep.append({"lambda": lam, "collinearity": collin, "recover_mae": mae,
+                              "recover_relmae": relmae,
+                              "recovered": [round(float(x), 4) for x in rec]})
+                print(f"[synth] lambda={lam:+.2f} collin={collin:.3f} "
+                      f"MAE={mae:.4f} relMAE={relmae:.3f}", flush=True)
+            # restore truth at the end
+            with torch.no_grad():
+                for n, t in rum.named_parameters():
+                    t.data.copy_(truth_state[n])
+            res = {"ckpt": args.load_pt, "metric": "delta_match_recovery_vs_collinearity",
+                   "true_delta": [round(float(x), 4) for x in delta_true],
+                   "recover_steps": R_STEPS, "free_params": FREE,
+                   "noise": "poisson", "sweep": sweep}
+            if getattr(args, "synth_out", None):
+                _op = V3_ROOT / args.synth_out
+                _op.parent.mkdir(parents=True, exist_ok=True)
+                _sjson.dump(res, open(_op, "w"), indent=2)
+                print(f"[synth] wrote {_op}", flush=True)
+            return
+
+        # ---- Income x commute MOMENT INJECTION (constructive identifiability) ----
+        # Reuses _profile_fwd (cached V_NN). Freeze all RUM params except the chosen
+        # per-tier time-disutility lever (--inject-param); fit it so predicted per-tier
+        # commute time matches an external income x commute-time target. Reports whether
+        # the lever pins, predicted time -> target, CPC stays put, gamma_M untouched.
+        #   tmin = raw_beta_tmin  (linear per-tier t_min cost; continuous leverage)  [default]
+        #   kink = raw_beta_t_kink_per_tier  (Bhat long-commute kink penalty)
+        #   tmax = raw_T_max_per_tier  (hard time gate; SATURATED-OPEN -> no leverage; diagnostic only)
+        # Observable EXCLUDES self-loops (i==j): NTS measures actual commute journeys,
+        # and the model's diagonal (self_loop_boost) otherwise dominates the mean (~5 min).
+        if getattr(args, "inject_income_moment", None) is not None:
+            import json as _ijson
+            _PMAP = {"gammaM": "raw_gamma_M", "decay": "raw_gamma_decay",
+                     "tmin": "raw_beta_tmin", "kink": "raw_beta_t_kink_per_tier",
+                     "tmax": "raw_T_max_per_tier"}
+            _DISP = {"decay": "gamma_decay_per_tier", "tmin": "beta_tmin_per_tier",
+                     "kink": "beta_t_kink_per_tier", "tmax": "T_max_per_tier"}
+            _pname = args.inject_param
+            _raw_attr = _PMAP[_pname]
+            _raw = getattr(rum, _raw_attr, None)
+            assert _raw is not None, f"model has no {_raw_attr} (inject-param={_pname})"
+            K = int(income_tier_props.shape[1])
+            _gm_mode = (_pname == "gammaM")   # gravity lever (strong); fit low+mid, freeze high tier
+            if _gm_mode:
+                _S = rum.n_soc                                  # gamma_M is (K_tier*n_soc,), tier-major
+                _hi = list(range((K - 1) * _S, K * _S))         # high-tier class indices (re-pinned)
+                _disp = lambda: [round(float(rum.gamma_M.view(K, -1)[k].mean()), 3) for k in range(K)]
+            else:
+                _disp = lambda: [round(float(x), 3) for x in getattr(rum, _DISP[_pname])]
+            _mm = np.load(args.inject_income_moment)
+            target = torch.tensor(_mm["target_min"], dtype=torch.float32, device=device)  # (K_tier,)
+            assert target.numel() == K, f"target has {target.numel()} entries, model has {K} tiers"
+            # Predicted per-tier mean commute time uses the model's PER-CLASS destination
+            # distributions (forward_cs tier_commute_probe), NOT the tier-marginal P --
+            # the marginal cannot express tier differences. Off-diagonal, hour-weighted.
+            def _pred_time_by_tier():
+                out = _profile_fwd(train_mask, tier_commute_probe=True)
+                tct = out["tier_commute_time"]
+                assert tct is not None, "tier_commute_probe returned None (model not tier-mixture?)"
+                return tct                                      # (K_tier,) minutes
+
+            for p in rum.parameters():                          # freeze all ...
+                p.requires_grad_(False)
+            _raw.requires_grad_(True)                            # ... except the chosen lever
+            gM0 = rum.gamma_M.detach().clone()
+            if _gm_mode:                                         # protect OD-identified high tier
+                _gm_hi_orig = _raw.data[_hi].clone()
+            with torch.no_grad():
+                pt0 = _pred_time_by_tier()
+            lev0 = _disp()
+            print(f"[inject] param={_pname} ({_raw_attr})  target min (low/mid/high) = "
+                  f"{[round(float(x),1) for x in target]}", flush=True)
+            print(f"[inject] BEFORE: {_pname}={lev0}  "
+                  f"pred_time={[round(float(x),1) for x in pt0]}  CPC={base_cpc:.4f}", flush=True)
+
+            opt = torch.optim.Adam([_raw], lr=float(args.inject_lr))
+            rum.train()
+            for s in range(int(args.inject_steps)):
+                opt.zero_grad()
+                pt = _pred_time_by_tier()
+                loss = (((pt - target) / target) ** 2).sum()
+                loss.backward()
+                opt.step()
+                if _gm_mode:                       # re-pin high tier (keep identified gamma_M[high])
+                    with torch.no_grad():
+                        _raw.data[_hi] = _gm_hi_orig
+                if (s + 1) % 50 == 0:
+                    print(f"[inject] step {s+1}: loss={float(loss):.4f} "
+                          f"{_pname}={_disp()}  pred={[round(float(x),1) for x in pt.detach()]}", flush=True)
+            rum.eval()
+            with torch.no_grad():
+                pt1 = _pred_time_by_tier()
+            cpc1, nll1 = _profile_eval()
+            dG = float((rum.gamma_M.detach() - gM0).abs().max())
+            # In gammaM mode, the high tier is re-pinned: report its drift separately
+            # (should be ~0 = OD-identified gamma_M[high] protected) vs the fitted low/mid.
+            dG_hi = (float((rum.gamma_M.detach().view(K, -1)[K - 1]
+                            - gM0.view(K, -1)[K - 1]).abs().max()) if _gm_mode else dG)
+            lev1 = _disp()
+            print(f"[inject] AFTER:  {_pname}={lev1}  pred_time={[round(float(x),1) for x in pt1]}  "
+                  f"CPC={cpc1:.4f} (d{cpc1-base_cpc:+.4f})  "
+                  f"gamma_M max|d|={dG:.2e}  high-tier|d|={dG_hi:.2e}", flush=True)
+            res = {"ckpt": args.load_pt, "metric": "commute_time_min_offdiag",
+                   "inject_param": _pname, "raw_attr": _raw_attr,
+                   "target": [float(x) for x in target],
+                   "pred_before": [float(x) for x in pt0], "pred_after": [float(x) for x in pt1],
+                   "lever_before": lev0, "lever_after": lev1,
+                   "cpc_before": float(base_cpc), "cpc_after": float(cpc1),
+                   "nll_after": float(nll1), "gamma_M_max_abs_delta": dG,
+                   "gamma_M_high_abs_delta": dG_hi, "steps": int(args.inject_steps)}
+            if args.inject_out:
+                _op = V3_ROOT / args.inject_out
+                _op.parent.mkdir(parents=True, exist_ok=True)
+                _ijson.dump(res, open(_op, "w"), indent=2)
+                print(f"[inject] wrote {_op}", flush=True)
+            _ok = (abs(cpc1 - base_cpc) < 0.01) and (dG_hi < 1e-6 if _gm_mode else True)
+            print(f"[inject] check: pred {[round(float(x),1) for x in pt0]} -> "
+                  f"{[round(float(x),1) for x in pt1]} (target {[round(float(x),1) for x in target]}); "
+                  f"CPC {base_cpc:.4f}->{cpc1:.4f}; "
+                  f"{'OK: low/mid fit, high+CPC protected' if _ok else 'PARTIAL: inspect deltas'}",
+                  flush=True)
+            return
+
+        # --- Occupation x industry moment injection: re-identify delta_match ---
+        # Aggregate OD leaves delta_match FLAT (occupation-blind). Freeze everything
+        # else (incl. gamma_M, T_max, the NN) and fit ONLY raw_delta_match so the model's
+        # predicted per-SOC destination-industry distribution P(industry|occupation)
+        # matches the external ONS APS moment. Constructive occupation analogue of the
+        # income x commute moment injection above.
+        if getattr(args, "inject_occ_moment", None) is not None:
+            import json as _ojson
+            assert rum.use_soc_mixture, "--inject-occ-moment requires --use-soc-mixture"
+            _raw_dm = getattr(rum, "raw_delta_match", None)
+            assert _raw_dm is not None, "model has no raw_delta_match"
+            SOC9 = ["mgr", "prof", "assoc", "admin", "trades", "care", "sales", "oper", "elem"]
+            _mm = np.load(args.inject_occ_moment, allow_pickle=True)
+            tgt = torch.tensor(_mm["target_pio"], dtype=torch.float32, device=device)   # (S, n_ind)
+            S_occ = rum.n_soc
+            assert tgt.shape[0] == S_occ, f"target has {tgt.shape[0]} occ rows, model has {S_occ} SOC"
+            assert grid_industry_prop_t is not None and grid_industry_prop_t.shape[1] == tgt.shape[1], \
+                "grid_industry_prop n_ind must match target_pio n_ind (use the bres18 aux + bres18 target)"
+            _gip = grid_industry_prop_t                                                  # (N, n_ind)
+
+            def _pred_occ_industry():
+                # Per-SOC predicted dest flow (S, N) -> map to industry via grid mix ->
+                # row-normalise to predicted P(industry | occupation) (S, n_ind).
+                out = _profile_fwd(train_mask, soc_dest_probe=True, force_no_ckpt=True)
+                sf = out["soc_dest_flow"]                                                # (S, N)
+                assert sf is not None, "soc_dest_probe returned None (model not soc-mixture?)"
+                occ_ind = sf @ _gip                                                      # (S, n_ind)
+                return occ_ind / occ_ind.sum(dim=1, keepdim=True).clamp_min(1e-9)
+
+            def _moment_loss(pred):
+                if args.inject_occ_loss == "kl":
+                    return (tgt * (tgt.clamp_min(1e-9).log() - pred.clamp_min(1e-9).log())).sum()
+                return (((pred - tgt) / tgt.clamp_min(1e-3)) ** 2).sum()
+
+            # Freeze everything; optimise the 9 delta_match GRADIENT-FREE over no_grad
+            # forward evaluations. (Windows-CPU autograd backward through the 27-class
+            # mixture SEGFAULTs — confirmed for both income and occ injections — but the
+            # forward is fine, and 9 smooth params optimise quickly with scipy L-BFGS-B.)
+            for p in rum.parameters():
+                p.requires_grad_(False)
+            rum.eval()
+            # Levers: delta_match always; + per-SOC consideration-filter threshold if asked.
+            # Two occupation knobs let each settle at a moderate, interpretable magnitude
+            # (one knob alone gets blown up to ~30) and reach a lower moment residual.
+            _use_thresh = bool(getattr(args, "inject_occ_thresh", False))
+            _levers = [("raw_delta_match", _raw_dm)]
+            if _use_thresh:
+                _rt = getattr(rum, "raw_match_filter_thresh_per_soc", None)
+                assert _rt is not None, \
+                    "--inject-occ-thresh needs raw_match_filter_thresh_per_soc (per-SOC filter)"
+                _levers.append(("raw_match_filter_thresh_per_soc", _rt))
+            _sizes = [t.numel() for _, t in _levers]
+            x0 = np.concatenate([t.detach().cpu().numpy().astype(np.float64).ravel()
+                                 for _, t in _levers])
+            dm0 = rum.delta_match.detach().clone()
+            th0 = rum.match_filter_thresh_per_soc.detach().clone() if _use_thresh else None
+
+            def _set_and_loss(x):
+                with torch.no_grad():
+                    off = 0
+                    for (nm, t), sz in zip(_levers, _sizes):
+                        t.data = torch.tensor(x[off:off + sz], dtype=t.dtype,
+                                              device=device).view_as(t)
+                        off += sz
+                    return float(_moment_loss(_pred_occ_industry()))
+
+            loss0 = _set_and_loss(x0)
+            print(f"[inject-occ] target P(ind|occ) {tuple(tgt.shape)}  loss={args.inject_occ_loss}  "
+                  f"levers={[n for n, _ in _levers]} ({x0.size} params)", flush=True)
+            print(f"[inject-occ] BEFORE: delta_match={[round(float(x), 3) for x in dm0]}  "
+                  f"moment_loss={loss0:.4f}  CPC={base_cpc:.4f}", flush=True)
+            if th0 is not None:
+                print(f"[inject-occ] BEFORE: thresh_per_soc={[round(float(x), 4) for x in th0]}",
+                      flush=True)
+
+            from scipy.optimize import minimize as _spmin
+            _ev = {"n": 0}
+
+            def _obj(x):
+                _ev["n"] += 1
+                v = _set_and_loss(x)
+                if _ev["n"] % 10 == 0:
+                    print(f"[inject-occ] eval {_ev['n']}: loss={v:.4f} "
+                          f"delta_match={[round(float(z), 3) for z in rum.delta_match.detach()]}",
+                          flush=True)
+                return v
+
+            _spres = _spmin(_obj, x0, method="L-BFGS-B",
+                            options={"eps": 1e-3, "maxiter": int(args.inject_occ_steps),
+                                     "maxfun": int(args.inject_occ_steps) * 12, "ftol": 1e-7})
+            loss1 = _set_and_loss(_spres.x)
+            cpc1, nll1 = _profile_eval()
+            dm1 = rum.delta_match.detach().clone()
+            th1 = rum.match_filter_thresh_per_soc.detach().clone() if _use_thresh else None
+            print(f"[inject-occ] AFTER:  delta_match={[round(float(x), 3) for x in dm1]}  "
+                  f"moment_loss={loss1:.4f}  CPC={cpc1:.4f} (d{cpc1-base_cpc:+.4f})  "
+                  f"evals={_ev['n']}  converged={bool(_spres.success)}", flush=True)
+            if th1 is not None:
+                print(f"[inject-occ] AFTER:  thresh_per_soc={[round(float(x), 4) for x in th1]}",
+                      flush=True)
+            res = {"ckpt": args.load_pt, "metric": "P(industry|occupation)",
+                   "loss_kind": args.inject_occ_loss, "soc_labels": SOC9,
+                   "levers": [n for n, _ in _levers],
+                   "delta_match_before": [float(x) for x in dm0],
+                   "delta_match_after": [float(x) for x in dm1],
+                   "thresh_before": ([float(x) for x in th0] if th0 is not None else None),
+                   "thresh_after": ([float(x) for x in th1] if th1 is not None else None),
+                   "moment_loss_before": loss0, "moment_loss_after": loss1,
+                   "cpc_before": float(base_cpc), "cpc_after": float(cpc1),
+                   "nll_after": float(nll1), "maxiter": int(args.inject_occ_steps),
+                   "n_evals": _ev["n"], "scipy_success": bool(_spres.success)}
+            if args.inject_occ_out:
+                _op = V3_ROOT / args.inject_occ_out
+                _op.parent.mkdir(parents=True, exist_ok=True)
+                _ojson.dump(res, open(_op, "w"), indent=2)
+                print(f"[inject-occ] wrote {_op}", flush=True)
+            _ok = abs(cpc1 - base_cpc) < 0.01
+            print(f"[inject-occ] check: moment_loss {loss0:.4f}->{loss1:.4f}; "
+                  f"CPC {base_cpc:.4f}->{cpc1:.4f}; "
+                  f"{'OK: delta_match identified at small CPC cost' if _ok else 'PARTIAL: inspect'}",
+                  flush=True)
+            return
+
+        # transform kind per raw attr: 'sp' = softplus, 'neg_sp' = -softplus
+        SOC9 = ["mgr","prof","assoc","admin","trades","care","sales","oper","elem"]
+        TIER3 = ["low","mid","high"]
+        # (raw_attr, kind, n, labels, tag, group_size)  group_size=1 => per-index
+        specs = []
+        def _maybe(attr, kind, n, labels, tag, group=1):
+            if getattr(rum, attr, None) is not None:
+                specs.append((attr, kind, n, labels, tag, group))
+        _maybe("raw_T_max_per_tier", "sp", 3, TIER3, "T_max")
+        _maybe("raw_alpha_wage", "sp", 3, TIER3, "alpha_W")
+        _maybe("raw_nu_D", "neg_sp", 3, TIER3, "nu_D")
+        _maybe("raw_gamma_decay", "sp", 3, TIER3, "gamma_decay")
+        _maybe("raw_delta_match", "sp", 9, SOC9, "delta_match")
+        _maybe("raw_match_filter_thresh_per_soc", "sp", 9, SOC9, "match_thresh")
+        _maybe("raw_gamma_M", "sp", 27, [f"{TIER3[i//9]}.{SOC9[i%9]}" for i in range(27)],
+               "gamma_M_tier", group=9)  # scan 3 tier-blocks of 9 together
+
+        if args.profile_params != "all":
+            _want = set(args.profile_params.split(","))
+            specs = [s for s in specs if s[4] in _want]
+            print(f"[profile] filtered to tags: {sorted(_want)} -> {len(specs)} param groups", flush=True)
+
+        mults = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0]
+        results = {
+            "ckpt": args.load_pt, "ckpt_cpc": float(_ckpt["final_cpc"]),
+            "refit_epochs": int(args.profile_refit_epochs),
+            "baseline": {"cpc": base_cpc, "nll": base_nll},
+            "mults": mults, "scans": [],
+        }
+
+        def _set_eff(p, idx, kind, eff):
+            with torch.no_grad():
+                if kind == "sp":
+                    p.data[idx] = _inv_softplus_t(max(eff, 1e-6))
+                elif kind == "neg_sp":
+                    p.data[idx] = _inv_softplus_t(max(-eff, 1e-6))
+
+        for attr, kind, n, labels, tag, group in specs:
+            p = getattr(rum, attr)
+            n_scans = n // group
+            for gi in range(n_scans):
+                idxs = list(range(gi*group, gi*group+group))
+                glabel = f"{tag}[{labels[idxs[0]]}]" if group == 1 else f"{tag}[{TIER3[gi]}]"
+                orig = [float(p.data[i].item()) for i in idxs]
+                # fitted effective per index
+                if kind == "sp":
+                    fitted_eff = [float(torch.nn.functional.softplus(torch.tensor(o))) for o in orig]
+                else:
+                    fitted_eff = [-float(torch.nn.functional.softplus(torch.tensor(o))) for o in orig]
+                pts = []
+                for m in mults:
+                    if _REFIT > 0:
+                        c, nll = _refit_eval(p, idxs, kind, [fitted_eff[k] * m for k in range(len(idxs))])
+                    else:
+                        for k, i in enumerate(idxs):
+                            _set_eff(p, i, kind, fitted_eff[k] * m)
+                        c, nll = _profile_eval()
+                    pts.append({"mult": m, "eff_idx0": fitted_eff[0]*m, "cpc": c, "nll": nll})
+                    print(f"[profile]      {glabel:>20s} mult={m:.2f} -> cpc={c:.4f} nll={nll:.4f}", flush=True)
+                for k, i in enumerate(idxs):  # restore
+                    with torch.no_grad():
+                        p.data[i] = orig[k]
+                nlls = [pt["nll"] for pt in pts]
+                cpcs = [pt["cpc"] for pt in pts]
+                rec = {"param": glabel, "raw_attr": attr, "idxs": idxs,
+                       "fitted_eff0": fitted_eff[0],
+                       "nll_span": max(nlls)-min(nlls), "cpc_span": max(cpcs)-min(cpcs),
+                       "points": pts}
+                results["scans"].append(rec)
+                print(f"[profile] {glabel:>20s}  fitted_eff={fitted_eff[0]:+.4f}  "
+                      f"NLL span={rec['nll_span']:.4f}  CPC span={rec['cpc_span']:.4f}", flush=True)
+
+        _outp = V3_ROOT / args.profile_out
+        _outp.parent.mkdir(parents=True, exist_ok=True)
+        with open(_outp, "w") as _f:
+            _pjson.dump(results, _f, indent=2)
+        # Rank by NLL span (smallest = least identified)
+        ranked = sorted(results["scans"], key=lambda r: r["nll_span"])
+        print("\n[profile] === IDENTIFICATION RANKING (NLL span, smallest=flattest=least identified) ===", flush=True)
+        for r in ranked:
+            flag = "FLAT (not identified)" if r["nll_span"] < 0.01 else ("weak" if r["nll_span"] < 0.05 else "identified")
+            print(f"  {r['param']:>20s}  NLL span {r['nll_span']:.4f}  CPC span {r['cpc_span']:.4f}  -> {flag}", flush=True)
+        print(f"\n[profile] wrote {_outp}", flush=True)
+        return
+
     best_val = float("inf")
     no_improve = 0
     best_state = None
@@ -1879,6 +2746,26 @@ def main():
             loss = loss + args.self_loop_l2 * (rum.self_loop_boost ** 2).mean()
         if rum.n_busy_dest > 0 and args.busy_dest_l2 > 0:
             loss = loss + args.busy_dest_l2 * (rum.busy_dest_boost ** 2).mean()
+        # Ben-Akiva-Morikawa in-loss external occupation moment (z-scored pattern anchor).
+        # Aggregate OD is flat in delta_match; this penalty narrows it to the WU07AUK pattern.
+        if args.lambda_occ_penalty > 0 and getattr(rum, "use_soc_mixture", False):
+            dm = rum.delta_match
+            dm_z = (dm - dm.mean()) / (dm.std() + 1e-6)
+            _ext = torch.tensor([float(x) for x in args.occ_ext_delta.split(",")],
+                                device=dm.device, dtype=dm.dtype)
+            ext_z = (_ext - _ext.mean()) / (_ext.std() + 1e-6)
+            loss = loss + args.lambda_occ_penalty * ((dm_z - ext_z) ** 2).mean()
+        # Income/class external moment (NS-SeC): per-tier wage attraction monotone increasing.
+        if args.lambda_class_penalty > 0 and getattr(rum, "use_tier_mixture", False):
+            aw = torch.nn.functional.softplus(rum.raw_alpha_wage)
+            aw_z = (aw - aw.mean()) / (aw.std() + 1e-6)
+            if args.class_ext_pattern == "mono":
+                _ct = torch.linspace(0.0, 1.0, aw.numel(), device=aw.device, dtype=aw.dtype)
+            else:
+                _ct = torch.tensor([float(x) for x in args.class_ext_pattern.split(",")],
+                                   device=aw.device, dtype=aw.dtype)
+            ct_z = (_ct - _ct.mean()) / (_ct.std() + 1e-6)
+            loss = loss + args.lambda_class_penalty * ((aw_z - ct_z) ** 2).mean()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
             list(encoder.parameters()) + list(rum.parameters()), 1.0
